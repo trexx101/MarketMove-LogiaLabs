@@ -1,0 +1,60 @@
+# Environment
+.env
+.env.*
+!.env.example
+
+# Models
+/models/*
+!/models/.gitkeep
+!/models/README.md
+
+# Databases
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+/data/*.db
+
+# Rust
+/target
+**/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# Python
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.uv-cache/
+*.egg-info/
+dist/
+build/
+
+# Node / frontend build
+node_modules/
+*.min.js
+*.min.css
+
+# IDE / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Parity artifacts (large)
+/tests/fixtures/*.parquet
+/tests/fixtures/*.h5

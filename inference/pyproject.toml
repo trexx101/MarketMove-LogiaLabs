@@ -1,0 +1,14 @@
+[project]
+name = "market-markov-net-inference"
+version = "0.1.0"
+description = "MarketMarkovNet ZMQ inference microservice (PyTorch CPU)."
+requires-python = ">=3.10"
+readme = "README.md"
+dependencies = [
+    "torch>=2.0",
+    "pyzmq>=25",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]

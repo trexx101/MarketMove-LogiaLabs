@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MarketMarkovNet — Control Room</title>
+    <link rel="stylesheet" href="style.css" />
+    <style>
+      :root {
+        --bg: #0e1116;
+        --panel: #161b22;
+        --border: #30363d;
+        --text: #c9d1d9;
+        --muted: #8b949e;
+        --accent: #58a6ff;
+        --warn: #d29922;
+        --ok: #3fb950;
+        --err: #f85149;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+      header { padding: 16px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+      header h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: 0.2px; }
+      header .mode { font-size: 12px; color: var(--muted); }
+      main { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; padding: 16px; }
+      .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 16px; min-height: 200px; }
+      .panel h2 { margin: 0 0 12px 0; font-size: 14px; font-weight: 600; color: var(--accent); text-transform: uppercase; letter-spacing: 0.5px; }
+      #chart { display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 13px; }
+      .row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 13px; border-bottom: 1px dashed var(--border); }
+      .row:last-child { border-bottom: 0; }
+      .row .k { color: var(--muted); }
+      .row .v { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      .pending { color: var(--warn); }
+      @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>MarketMarkovNet — Control Room</h1>
+      <span class="mode" id="mode">mode: pending</span>
+    </header>
+    <main>
+      <section class="panel" id="chart-panel">
+        <h2>Chart</h2>
+        <div id="chart">pending — engine not connected</div>
+      </section>
+      <section class="panel" id="status-panel">
+        <h2>Status</h2>
+        <div class="row"><span class="k">engine</span><span class="v pending" id="st-engine">pending</span></div>
+        <div class="row"><span class="k">trading mode</span><span class="v" id="st-mode">—</span></div>
+        <div class="row"><span class="k">symbol</span><span class="v" id="st-symbol">—</span></div>
+        <div class="row"><span class="k">last candle (UTC)</span><span class="v" id="st-last">—</span></div>
+        <div class="row"><span class="k">position</span><span class="v" id="st-position">—</span></div>
+      </section>
+      <section class="panel" id="predictions-panel" style="grid-column: 1 / -1;">
+        <h2>Predictions</h2>
+        <div class="row"><span class="k">pred_1h</span><span class="v pending" id="p-1h">pending</span></div>
+        <div class="row"><span class="k">pred_4h</span><span class="v pending" id="p-4h">pending</span></div>
+        <div class="row"><span class="k">pred_24h</span><span class="v pending" id="p-24h">pending</span></div>
+      </section>
+    </main>
+    <script>
+      // SPA logic — see Feature 11. This stub demonstrates the polling pattern
+      // is wired; real rendering, charting, and error UX land in Feature 11.
+      (function poll() {
+        fetch("/api/status", { cache: "no-store" })
+          .then(function (r) {
+            if (!r.ok) throw new Error("status " + r.status);
+            return r.json();
+          })
+          .then(function (s) {
+            document.getElementById("st-engine").textContent = "ok";
+            document.getElementById("st-engine").className = "v";
+            if (s.mode) document.getElementById("st-mode").textContent = s.mode;
+            if (s.symbol) document.getElementById("st-symbol").textContent = s.symbol;
+            if (s.last_candle_ts) document.getElementById("st-last").textContent = s.last_candle_ts;
+            if (s.position) document.getElementById("st-position").textContent = s.position;
+            document.getElementById("mode").textContent = "mode: " + (s.mode || "?");
+          })
+          .catch(function () {
+            document.getElementById("st-engine").textContent = "pending";
+            document.getElementById("st-engine").className = "v pending";
+          })
+          .finally(function () { setTimeout(poll, 5000); });
+      })();
+    </script>
+  </body>
+</html>
