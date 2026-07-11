@@ -1,14 +1,27 @@
 """MarketMarkovNet inference microservice (ZMQ REP).
 
-This is the Feature 04 placeholder. The full model + REQ/REP loop
-is implemented in Feature 04.
+Feature 04 implements the full REQ/REP loop. This Feature 03 file
+loads and validates the inference-side configuration so the service
+fails fast on misconfiguration before any model loading.
 """
 from __future__ import annotations
 
+import sys
 
-def main() -> None:
-    print("inference engine placeholder — see Feature 04")
+from .config import InferenceConfig
+
+
+def main() -> int:
+    cfg = InferenceConfig.from_env()
+    print(f"inference configured: {cfg.summary()}", flush=True)
+    try:
+        cfg.require_artifacts()
+    except FileNotFoundError as e:
+        print(f"config error: {e}", file=sys.stderr, flush=True)
+        return 1
+    print("inference engine placeholder — see Feature 04", flush=True)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
