@@ -58,3 +58,4 @@ logs/
 # Parity artifacts (large)
 /tests/fixtures/*.parquet
 /tests/fixtures/*.h5
+.omo/run-continuation/*

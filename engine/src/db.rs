@@ -294,3 +294,131 @@ pub async fn insert_trade(
     .context("insert_trade")?;
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Read helpers for the telemetry API
+// ---------------------------------------------------------------------------
+
+/// A prediction row as returned by the API read queries.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct PredictionRow {
+    pub id: i64,
+    pub candle_ts: i64,
+    pub pred_1h: f64,
+    pub pred_4h: f64,
+    pub pred_24h: f64,
+    pub features_json: String,
+    pub created_at: i64,
+}
+
+/// A trade row as returned by the API read queries.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct TradeRow {
+    pub id: i64,
+    pub candle_ts: i64,
+    pub side: String,
+    pub qty: f64,
+    pub price: f64,
+    pub fee: f64,
+    pub realized_pnl: f64,
+    pub created_at: i64,
+}
+
+/// Fetch the `limit` most recent predictions, ordered newest-first.
+pub async fn fetch_recent_predictions(pool: &DbPool, limit: usize) -> Result<Vec<PredictionRow>> {
+    let rows = sqlx::query(
+        "SELECT id, candle_ts, pred_1h, pred_4h, pred_24h, features_json, created_at
+         FROM predictions
+         ORDER BY candle_ts DESC
+         LIMIT ?",
+    )
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await
+    .context("fetch_recent_predictions")?;
+
+    Ok(rows
+        .iter()
+        .map(|row| PredictionRow {
+            id: row.get(0),
+            candle_ts: row.get(1),
+            pred_1h: row.get(2),
+            pred_4h: row.get(3),
+            pred_24h: row.get(4),
+            features_json: row.get(5),
+            created_at: row.get(6),
+        })
+        .collect())
+}
+
+/// Fetch the `limit` most recent trades, ordered newest-first.
+#[allow(dead_code)]
+pub async fn fetch_recent_trades(pool: &DbPool, limit: usize) -> Result<Vec<TradeRow>> {
+    let rows = sqlx::query(
+        "SELECT id, candle_ts, side, qty, price, fee, realized_pnl, created_at
+         FROM trades
+         ORDER BY id DESC
+         LIMIT ?",
+    )
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await
+    .context("fetch_recent_trades")?;
+
+    Ok(rows
+        .iter()
+        .map(|row| TradeRow {
+            id: row.get(0),
+            candle_ts: row.get(1),
+            side: row.get(2),
+            qty: row.get(3),
+            price: row.get(4),
+            fee: row.get(5),
+            realized_pnl: row.get(6),
+            created_at: row.get(7),
+        })
+        .collect())
+}
+
+/// Sum all realized PnL across the trades table.
+pub async fn sum_realized_pnl(pool: &DbPool) -> Result<f64> {
+    let row = sqlx::query("SELECT COALESCE(SUM(realized_pnl), 0.0) FROM trades")
+        .fetch_one(pool)
+        .await
+        .context("sum_realized_pnl")?;
+    Ok(row.get(0))
+}
+
+/// Return the most recent candle, or `None` if the table is empty.
+pub async fn fetch_latest_candle(pool: &DbPool) -> Result<Option<Candle>> {
+    let row = sqlx::query(
+        "SELECT ts, open, high, low, close, volume, vwap
+         FROM candles
+         ORDER BY ts DESC
+         LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .context("fetch_latest_candle")?;
+
+    Ok(row.map(|r| Candle {
+        ts: r.get(0),
+        open: r.get(1),
+        high: r.get(2),
+        low: r.get(3),
+        close: r.get(4),
+        volume: r.get(5),
+        vwap: r.get(6),
+    }))
+}
+
+/// Return the price of the most recent trade (the entry price when position is open).
+pub async fn fetch_entry_trade_price(pool: &DbPool) -> Result<Option<f64>> {
+    let row = sqlx::query("SELECT price FROM trades ORDER BY id DESC LIMIT 1")
+        .fetch_optional(pool)
+        .await
+        .context("fetch_entry_trade_price")?;
+    Ok(row.map(|r| r.get(0)))
+}

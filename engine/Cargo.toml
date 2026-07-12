@@ -25,6 +25,7 @@ chrono = { workspace = true }
 once_cell = { workspace = true }
 futures = { workspace = true }
 zeromq = { workspace = true }
+tower-http = { workspace = true }
 
 [[bin]]
 name = "engine"

@@ -1,3 +1,4 @@
+mod api;
 mod bridge;
 mod config;
 mod data;
@@ -101,6 +102,25 @@ async fn main() {
             Err(e) => error!("scheduler init error: {e:#}"),
         }
     });
+
+    // Build and spawn the Axum telemetry server.
+    let app = api::router(pool.clone(), &cfg);
+    let bind_addr = format!("0.0.0.0:{}", cfg.http_port);
+    match tokio::net::TcpListener::bind(&bind_addr).await {
+        Ok(listener) => {
+            info!(addr = %bind_addr, "http server listening");
+            tokio::spawn(async move {
+                if let Err(e) = axum::serve(listener, app).await {
+                    error!("http server error: {e:#}");
+                }
+                info!("http server stopped");
+            });
+        }
+        Err(e) => {
+            eprintln!("http server bind error on {bind_addr}: {e:#}");
+            process::exit(1);
+        }
+    }
 
     // Run the data pipeline (REST backfill → retention loop → WS ingestion).
     // This blocks until a fatal error.
