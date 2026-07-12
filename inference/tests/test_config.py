@@ -120,9 +120,12 @@ def test_engine_main_fails_when_artifacts_missing(
 
 
 def test_engine_main_succeeds_when_artifacts_present(
-    clean_env: None, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    clean_env: None, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    from inference.inference_engine import main
+    """Engine reaches run_service when config and artifacts are valid."""
+    import inference.inference_engine as engine_mod
 
     m = tmp_path / "model.pt"
     n = tmp_path / "norm.json"
@@ -130,8 +133,14 @@ def test_engine_main_succeeds_when_artifacts_present(
     n.touch()
     os.environ["MODEL_PATH"] = str(m)
     os.environ["NORM_STATS_PATH"] = str(n)
-    rc = main()
+
+    # Patch run_service — we only want to verify the config/artifact gate passes.
+    monkeypatch.setattr(engine_mod, "run_service", lambda cfg: 0)
+
+    import logging
+    with caplog.at_level(logging.INFO, logger="inference"):
+        from inference.inference_engine import main
+        rc = main()
+
     assert rc == 0
-    captured = capsys.readouterr()
-    assert "inference configured" in captured.out
-    assert "placeholder" in captured.out
+    assert any("inference configured" in r.message for r in caplog.records)

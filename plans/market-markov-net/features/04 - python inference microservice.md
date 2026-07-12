@@ -5,7 +5,7 @@
 
 ## Requirements
 
-- Port the `MarketMarkovNet` architecture exactly from the Colab notebook (CausalConv1d backbone with GroupNorm + SiLU, parallel draft heads, low-rank Markov heads).
+- Port the `MarketMarkovNet` architecture exactly from the Colab notebook (CausalConv1d backbone with GroupNorm + SiLU, parallel draft heads, low-rank Markov heads). pt and npz file in models directory
 - Load weights from `model.pt` (CPU, `eval()`, `no_grad`).
 - ZMQ REP socket bound to `tcp://0.0.0.0:5555` (localhost-only via Docker network + UFW).
 - JSON contract: request `{ "feature_window": [[...], ...] }` → response `{ "pred_1h", "pred_4h", "pred_24h" }` (outputs scaled by /100 to match the training target scaling).
