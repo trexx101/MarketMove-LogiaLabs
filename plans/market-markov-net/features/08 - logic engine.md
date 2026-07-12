@@ -9,6 +9,7 @@
 - **Hysteresis:** once a signal fires, hold the position (sticky / forward-fill semantics) until an opposing or neutral signal — minimizing turnover.
 - **Regime filter:** 200-hour SMA of close; longs only allowed in bullish regime (close > SMA200), shorts only in bearish regime (asymmetric).
 - Persist state-machine state so restarts resume correctly.
+- Make optimization variables externalized to be able to change logic engine
 
 ## Technical Implementation Steps
 

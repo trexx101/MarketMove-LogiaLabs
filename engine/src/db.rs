@@ -5,7 +5,7 @@ use tracing::info;
 
 pub type DbPool = SqlitePool;
 
-const DDL: &str = r#"
+pub const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS candles (
     ts      INTEGER PRIMARY KEY,
     open    REAL    NOT NULL,
@@ -26,6 +26,33 @@ CREATE TABLE IF NOT EXISTS predictions (
     created_at    INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS predictions_candle_ts_idx ON predictions (candle_ts DESC);
+CREATE TABLE IF NOT EXISTS signal_state (
+    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    position   INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS positions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    candle_ts  INTEGER NOT NULL,
+    position   INTEGER NOT NULL,
+    pred_4h    REAL    NOT NULL,
+    pred_24h   REAL    NOT NULL,
+    regime     INTEGER NOT NULL,
+    sma        REAL    NOT NULL,
+    created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS positions_candle_ts_idx ON positions (candle_ts DESC);
+CREATE TABLE IF NOT EXISTS trades (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    candle_ts     INTEGER NOT NULL,
+    side          TEXT    NOT NULL,
+    qty           REAL    NOT NULL,
+    price         REAL    NOT NULL,
+    fee           REAL    NOT NULL,
+    realized_pnl  REAL    NOT NULL,
+    created_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS trades_candle_ts_idx ON trades (candle_ts DESC);
 "#;
 
 /// A single OHLCV + VWAP candle as stored in the database.
@@ -184,4 +211,86 @@ pub async fn fetch_recent_candles(pool: &DbPool, limit: usize) -> Result<Vec<Can
 
     candles.reverse();
     Ok(candles)
+}
+
+/// Return the current position from `signal_state` (id = 1), or `0` if no row exists.
+pub async fn load_position(pool: &DbPool) -> Result<i64> {
+    match sqlx::query("SELECT position FROM signal_state WHERE id = 1")
+        .fetch_one(pool)
+        .await
+    {
+        Ok(row) => Ok(row.get(0)),
+        Err(sqlx::Error::RowNotFound) => Ok(0),
+        Err(e) => Err(e).context("load_position"),
+    }
+}
+
+/// Upsert the current position into `signal_state` (singleton row id = 1).
+pub async fn save_position(pool: &DbPool, position: i64) -> Result<()> {
+    let updated_at = Utc::now().timestamp();
+    sqlx::query(
+        "INSERT INTO signal_state (id, position, updated_at) VALUES (1, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET position = excluded.position, updated_at = excluded.updated_at",
+    )
+    .bind(position)
+    .bind(updated_at)
+    .execute(pool)
+    .await
+    .context("save_position")?;
+    Ok(())
+}
+
+/// Append a position-change event to the `positions` audit table.
+pub async fn insert_position_event(
+    pool: &DbPool,
+    candle_ts: i64,
+    position: i64,
+    pred_4h: f64,
+    pred_24h: f64,
+    regime: i64,
+    sma: f64,
+) -> Result<()> {
+    let created_at = Utc::now().timestamp();
+    sqlx::query(
+        "INSERT INTO positions (candle_ts, position, pred_4h, pred_24h, regime, sma, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(candle_ts)
+    .bind(position)
+    .bind(pred_4h)
+    .bind(pred_24h)
+    .bind(regime)
+    .bind(sma)
+    .bind(created_at)
+    .execute(pool)
+    .await
+    .context("insert_position_event")?;
+    Ok(())
+}
+
+pub async fn insert_trade(
+    pool: &DbPool,
+    candle_ts: i64,
+    side: &str,
+    qty: f64,
+    price: f64,
+    fee: f64,
+    realized_pnl: f64,
+) -> Result<()> {
+    let created_at = Utc::now().timestamp();
+    sqlx::query(
+        "INSERT INTO trades (candle_ts, side, qty, price, fee, realized_pnl, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(candle_ts)
+    .bind(side)
+    .bind(qty)
+    .bind(price)
+    .bind(fee)
+    .bind(realized_pnl)
+    .bind(created_at)
+    .execute(pool)
+    .await
+    .context("insert_trade")?;
+    Ok(())
 }

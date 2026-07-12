@@ -10,6 +10,7 @@
 - `KrakenExecutor`: places market orders via Kraken REST (Query+Trade key); handles auth signing, nonce, error responses.
 - Mode selected by `TRADING_MODE`; live mode is refused unless keys are present.
 - Track position and realized/unrealized PnL; persist `trades` and `positions`.
+- externalize configuration to allowchange to system variables that may change like fees
 
 ## Technical Implementation Steps
 

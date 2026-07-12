@@ -5,6 +5,7 @@ use tracing::{error, info, warn};
 
 use crate::bridge::ZmqBridge;
 use crate::db::{self, DbPool};
+use crate::exec::ExecutorKind;
 use crate::features::compute_features;
 use crate::normalize::{normalize_row, NormStats};
 
@@ -14,6 +15,8 @@ pub struct Scheduler {
     norm_stats: NormStats,
     feature_window_size: usize,
     last_processed_ts: Option<i64>,
+    strategy_params: crate::strategy::StrategyParams,
+    executor: ExecutorKind,
 }
 
 impl Scheduler {
@@ -23,6 +26,8 @@ impl Scheduler {
         zmq_endpoint: &str,
         norm_stats: NormStats,
         feature_window_size: usize,
+        strategy_params: crate::strategy::StrategyParams,
+        executor: ExecutorKind,
     ) -> Result<Self> {
         let bridge = ZmqBridge::connect(zmq_endpoint).await?;
         Ok(Self {
@@ -31,6 +36,8 @@ impl Scheduler {
             norm_stats,
             feature_window_size,
             last_processed_ts: None,
+            strategy_params,
+            executor,
         })
     }
 
@@ -103,6 +110,80 @@ impl Scheduler {
             pred_24h = pred.pred_24h,
             "prediction persisted"
         );
+
+        // --- Strategy evaluation ---
+        // Load current persisted position
+        let current_pos = crate::strategy::Position::from_i64(
+            db::load_position(&self.pool).await?
+        );
+
+        // Compute SMA using all fetched candles
+        let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
+        let (sma, sma_valid) = crate::strategy::compute_sma(&closes, self.strategy_params.sma_window);
+
+        let latest_close = candles.last().map(|c| c.close).unwrap_or(0.0);
+
+        let input = crate::strategy::SignalInput {
+            pred_4h: pred.pred_4h,
+            pred_24h: pred.pred_24h,
+            current_close: latest_close,
+            sma,
+            sma_valid,
+        };
+
+        let new_pos = crate::strategy::next_position(current_pos, &input, &self.strategy_params);
+
+        // Regime for audit log
+        let regime: i64 = if sma_valid {
+            if latest_close > sma { 1 } else { -1 }
+        } else {
+            0
+        };
+
+        // Always persist the position event (audit trail)
+        db::insert_position_event(
+            &self.pool,
+            candle_ts,
+            new_pos.as_i64(),
+            pred.pred_4h,
+            pred.pred_24h,
+            regime,
+            sma,
+        ).await?;
+
+        // Persist signal_state (for restart resume)
+        db::save_position(&self.pool, new_pos.as_i64()).await?;
+
+        // Execute trades if position changed
+        if new_pos != current_pos {
+            match self.executor.set_target_position(new_pos, latest_close, candle_ts).await {
+                Ok(fills) => {
+                    for fill in &fills {
+                        info!(
+                            side = ?fill.side,
+                            qty = fill.qty,
+                            price = fill.price,
+                            fee = fill.fee,
+                            pnl = fill.realized_pnl,
+                            "trade executed"
+                        );
+                    }
+                }
+                Err(e) => {
+                    error!(error = %e, "executor failed to place order");
+                }
+            }
+            info!(
+                candle_ts,
+                prev = %current_pos,
+                next = %new_pos,
+                regime,
+                sma,
+                "position changed"
+            );
+        } else {
+            tracing::debug!(candle_ts, position = %new_pos, "position unchanged");
+        }
 
         self.last_processed_ts = Some(candle_ts);
 

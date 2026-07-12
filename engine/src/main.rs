@@ -2,9 +2,11 @@ mod bridge;
 mod config;
 mod data;
 mod db;
+mod exec;
 mod features;
 mod normalize;
 mod scheduler;
+mod strategy;
 
 use std::process;
 
@@ -59,12 +61,38 @@ async fn main() {
         }
     };
 
+    // Construct executor based on trading mode
+    let executor = match cfg.trading_mode {
+        config::TradingMode::Paper => {
+            info!(fee = cfg.paper_fee, "using paper executor");
+            exec::ExecutorKind::Paper(exec::paper::PaperExecutor::new(pool.clone(), cfg.paper_fee))
+        }
+        config::TradingMode::Live => {
+            let key = cfg.kraken_api_key.as_deref().expect("live mode requires key");
+            let secret = cfg.kraken_api_secret.as_deref().expect("live mode requires secret");
+            match exec::kraken::KrakenExecutor::new(key, secret, &cfg.symbol) {
+                Ok(k) => {
+                    info!(symbol = %cfg.symbol, "using Kraken executor");
+                    exec::ExecutorKind::Kraken(k)
+                }
+                Err(e) => {
+                    eprintln!("Kraken executor init error: {e:#}");
+                    process::exit(1);
+                }
+            }
+        }
+    };
+
     // Spawn the hourly scheduler (inference pipeline) as a background task.
     let scheduler_pool = pool.clone();
     let zmq_endpoint = cfg.zmq_endpoint.clone();
     let feature_window_size = cfg.feature_window_size;
+    let strategy_params = strategy::StrategyParams {
+        magnitude_threshold: cfg.magnitude_threshold,
+        sma_window: cfg.sma_window,
+    };
     tokio::spawn(async move {
-        match scheduler::Scheduler::new(scheduler_pool, &zmq_endpoint, norm_stats, feature_window_size).await {
+        match scheduler::Scheduler::new(scheduler_pool, &zmq_endpoint, norm_stats, feature_window_size, strategy_params, executor).await {
             Ok(mut sched) => {
                 if let Err(e) = sched.run().await {
                     error!("scheduler fatal error: {e:#}");
