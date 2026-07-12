@@ -6,7 +6,7 @@
 ## Requirements
 
 - UFW configured: allow 22 and 80/443; deny 5555 and all internal service ports (default deny incoming).
-- Docker Engine + Docker Compose plugin installed.
+- Docker Engine + Docker Compose plugin should already be installed
 - Non-root `deploy` user with docker group membership.
 - Provisioning documented and repeatable.
 

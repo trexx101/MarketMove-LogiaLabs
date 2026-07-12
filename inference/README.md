@@ -4,25 +4,15 @@ MarketMarkovNet inference microservice (Python, PyTorch CPU, ZMQ REP).
 
 ## Status
 
-**Feature 04 placeholder.** The full model + REQ/REP loop lands in Feature 04
-(see `../plans/market-markov-net/features/04 - python inference microservice.md`).
+**Feature 04 + 05 shipped.** The microservice:
 
-This directory currently ships:
-
-- `pyproject.toml` — project metadata + dependency list (torch, pyzmq, numpy).
-- `.python-version` — pins Python 3.11.
-- `inference_engine.py` — `main()` stub.
-- `__init__.py` — empty package marker.
-
-## Run (placeholder)
-
-```bash
-cd inference
-uv sync
-uv run python inference_engine.py
-```
-
-## Role in the system
+- defines `MarketMarkovNet` (causal CNN backbone + parallel draft heads +
+  low-rank Markov heads) matching the Colab reference,
+- binds a ZMQ `REP` socket on the address given by `ZMQ_BIND`,
+- serves the JSON contract
+  `{ "feature_window": [[...], ...] }` → `{ "pred_1h", "pred_4h", "pred_24h" }`,
+- logs every request as a single JSON line to stdout for parity auditing,
+- ships as a CPU-only Docker image with a ZMQ-based `HEALTHCHECK`.
 
 The Rust engine builds a normalized feature vector at each hourly candle
 boundary and sends a ZMQ `REQ` to this service. We respond with a JSON payload:
@@ -32,4 +22,36 @@ boundary and sends a ZMQ `REQ` to this service. We respond with a JSON payload:
 ```
 
 Model artifacts (`model.pt`, `norm_stats.json`) are mounted from
-`../models/` (gitignored, user-supplied).
+`/models/` (gitignored, user-supplied).
+
+## Local dev (uv)
+
+```bash
+cd inference
+uv sync
+uv run python -m inference.inference_engine
+```
+
+## Docker
+
+The image is built from this directory and is **CPU-only** (no CUDA wheels):
+
+```bash
+docker build -t marketmarkovnet/inference inference/
+
+docker run --rm \
+    -v /models:/models:ro \
+    -e ZMQ_BIND=tcp://0.0.0.0:5555 \
+    marketmarkovnet/inference
+```
+
+Notes on production deployment:
+
+- `/models` is mounted **read-only** (`-v /models:/models:ro`).
+- Port 5555 is **never published to the host**; compose places the
+  container on an internal network and only the `engine` service reaches it.
+- The image includes a `HEALTHCHECK` that performs a real REQ/REP
+  round-trip with a minimal payload, so a stuck-forward or
+  partially-loaded container is detected within 30 s.
+- Missing `model.pt` / `norm_stats.json` cause the entrypoint to exit
+  with a clear log line on stderr (see `InferenceConfig.require_artifacts`).

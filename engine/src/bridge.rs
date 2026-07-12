@@ -1,0 +1,125 @@
+use anyhow::{anyhow, Result};
+use serde_json::json;
+use std::time::Duration;
+use tracing::{debug, warn};
+use zeromq::{ReqSocket, Socket, SocketRecv, SocketSend, ZmqMessage};
+
+/// Predictions returned by the inference service.
+#[derive(Debug, Clone)]
+pub struct Prediction {
+    pub pred_1h: f64,
+    pub pred_4h: f64,
+    pub pred_24h: f64,
+}
+
+/// ZeroMQ REQ client that sends feature windows to a Python inference service.
+pub struct ZmqBridge {
+    socket: ReqSocket,
+}
+
+impl ZmqBridge {
+    /// Connect a new REQ socket to `endpoint` (e.g. `"tcp://127.0.0.1:5555"`).
+    pub async fn connect(endpoint: &str) -> Result<Self> {
+        let mut socket = ReqSocket::new();
+        socket
+            .connect(endpoint)
+            .await
+            .map_err(|e| anyhow!("ZMQ connect to {endpoint} failed: {e}"))?;
+        Ok(Self { socket })
+    }
+
+    /// Send `feature_window` and receive a `Prediction`.
+    ///
+    /// Applies `timeout` around the entire send+recv round-trip.
+    /// Returns `Err` on timeout, ZMQ error, or if the response contains an
+    /// `"error"` key.
+    pub async fn predict(
+        &mut self,
+        feature_window: &[[f64; 3]],
+        timeout: Duration,
+    ) -> Result<Prediction> {
+        let payload = json!({ "feature_window": feature_window }).to_string();
+        debug!(bytes = payload.len(), "sending inference request");
+
+        let fut = async {
+            self.socket
+                .send(ZmqMessage::from(payload.clone()))
+                .await
+                .map_err(|e| anyhow!("ZMQ send failed: {e}"))?;
+
+            let reply: ZmqMessage = self
+                .socket
+                .recv()
+                .await
+                .map_err(|e| anyhow!("ZMQ recv failed: {e}"))?;
+
+            let bytes = reply
+                .get(0)
+                .map(|b| b.as_ref())
+                .unwrap_or(b"");
+
+            debug!(bytes = bytes.len(), "received inference response");
+
+            let value: serde_json::Value = serde_json::from_slice(bytes)
+                .map_err(|e| anyhow!("failed to parse response JSON: {e}"))?;
+
+            if let Some(err_msg) = value.get("error") {
+                return Err(anyhow!("inference service error: {err_msg}"));
+            }
+
+            let pred_1h = value
+                .get("pred_1h")
+                .and_then(|v| v.as_f64())
+                .ok_or_else(|| anyhow!("missing or invalid field 'pred_1h'"))?;
+            let pred_4h = value
+                .get("pred_4h")
+                .and_then(|v| v.as_f64())
+                .ok_or_else(|| anyhow!("missing or invalid field 'pred_4h'"))?;
+            let pred_24h = value
+                .get("pred_24h")
+                .and_then(|v| v.as_f64())
+                .ok_or_else(|| anyhow!("missing or invalid field 'pred_24h'"))?;
+
+            Ok(Prediction {
+                pred_1h,
+                pred_4h,
+                pred_24h,
+            })
+        };
+
+        tokio::time::timeout(timeout, fut)
+            .await
+            .map_err(|_| anyhow!("inference request timed out after {timeout:?}"))?
+    }
+
+    /// Retry wrapper: call `predict` up to `retries` times (total attempts = retries + 1).
+    ///
+    /// On each failure, logs a warning with the attempt number and error.
+    /// On final failure, returns the last error.
+    pub async fn predict_with_retry(
+        &mut self,
+        feature_window: &[[f64; 3]],
+        timeout: Duration,
+        retries: u32,
+    ) -> Result<Prediction> {
+        let total_attempts = retries + 1;
+        let mut last_err = anyhow!("no attempts made");
+
+        for attempt in 1..=total_attempts {
+            match self.predict(feature_window, timeout).await {
+                Ok(pred) => return Ok(pred),
+                Err(e) => {
+                    last_err = e;
+                    warn!(
+                        attempt,
+                        total_attempts,
+                        error = %last_err,
+                        "inference attempt failed"
+                    );
+                }
+            }
+        }
+
+        Err(last_err)
+    }
+}

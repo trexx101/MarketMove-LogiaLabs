@@ -1,0 +1,51 @@
+# Keep the Docker build context small — only the inference package is
+# needed inside the image. Model artifacts, venv, target, plans, and
+# anything else from the repo root must not leak in.
+
+# Python venv / caches
+.venv/
+.uv-cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+
+# Tests
+tests/
+
+# Repo-root noise
+.git/
+.gitignore
+.gitkeep
+README.md
+
+# Models are mounted, never baked
+models/
+
+# Build artifacts from sibling crates
+target/
+**/target/
+
+# Frontend / deploy / engine
+frontend/
+deploy/
+engine/
+plans/
+skills-lock.json
+
+# Editor / OS junk
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.log
+
+# Env files
+.env
+.env.*
+!.env.example

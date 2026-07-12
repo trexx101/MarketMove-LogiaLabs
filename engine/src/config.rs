@@ -16,6 +16,11 @@ pub struct Config {
     pub symbol: String,
     pub kraken_api_key: Option<String>,
     pub kraken_api_secret: Option<String>,
+    pub database_url: String,
+    /// Path to `norm_stats.json` produced from the training npz.
+    pub norm_stats_path: String,
+    /// Number of candles sent as the feature window to the inference service.
+    pub feature_window_size: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -105,6 +110,22 @@ impl Config {
             ));
         }
 
+        let database_url = env_or("DATABASE_URL", "sqlite://data/candles.db");
+        if database_url.trim().is_empty() {
+            return Err(anyhow!("DATABASE_URL must not be empty"));
+        }
+
+        let norm_stats_path = env_or("NORM_STATS_PATH", "models/norm_stats.json");
+        if norm_stats_path.trim().is_empty() {
+            return Err(anyhow!("NORM_STATS_PATH must not be empty"));
+        }
+
+        let feature_window_size = parse_env::<usize>("FEATURE_WINDOW_SIZE", "72")
+            .context("FEATURE_WINDOW_SIZE must be a positive integer")?;
+        if feature_window_size == 0 {
+            return Err(anyhow!("FEATURE_WINDOW_SIZE must be > 0, got 0"));
+        }
+
         Ok(Self {
             trading_mode,
             zmq_endpoint,
@@ -115,6 +136,9 @@ impl Config {
             symbol,
             kraken_api_key,
             kraken_api_secret,
+            database_url,
+            norm_stats_path,
+            feature_window_size,
         })
     }
 }
@@ -158,6 +182,9 @@ mod tests {
             "SYMBOL",
             "KRAKEN_API_KEY",
             "KRAKEN_API_SECRET",
+            "DATABASE_URL",
+            "NORM_STATS_PATH",
+            "FEATURE_WINDOW_SIZE",
         ] {
             env::remove_var(key);
         }
@@ -194,6 +221,9 @@ mod tests {
         assert_eq!(cfg.symbol, "BTC/USD");
         assert!(cfg.kraken_api_key.is_none());
         assert!(cfg.kraken_api_secret.is_none());
+        assert_eq!(cfg.database_url, "sqlite://data/candles.db");
+        assert_eq!(cfg.norm_stats_path, "models/norm_stats.json");
+        assert_eq!(cfg.feature_window_size, 72);
     }
 
     #[test]

@@ -24,7 +24,12 @@ base64 = { workspace = true }
 chrono = { workspace = true }
 once_cell = { workspace = true }
 futures = { workspace = true }
+zeromq = { workspace = true }
 
 [[bin]]
 name = "engine"
 path = "src/main.rs"
+
+[lib]
+name = "engine"
+path = "src/lib.rs"
