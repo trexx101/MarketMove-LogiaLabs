@@ -54,7 +54,26 @@ gated behind a verified parity check.
 
 ## Quick start
 
-### Engine (Rust)
+### Production (Docker Compose)
+
+The canonical deployment is a single compose file. The stack brings up
+inference, engine, and a Caddy reverse proxy on an internal network; only
+Caddy publishes host ports (80/443) and auto-issues a Let's Encrypt cert
+when `HOST` is set in `.env`.
+
+```bash
+cp .env.example .env
+$EDITOR .env                      # set HOST, KRAKEN_* (live mode), etc.
+docker compose -f deploy/docker-compose.yml build
+docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/docker-compose.yml ps              # all healthy
+curl -fsSL https://$HOST/api/status | jq
+```
+
+See `deploy/README.md` for the full operational guide (backups, log
+tailing, parity-marker refresh, security model).
+
+### Engine (Rust, host-side dev)
 
 ```bash
 cd /home/ubuntu/projects/MarketMoves
@@ -62,12 +81,12 @@ cargo build                      # workspace build
 cargo run --bin engine           # launch (needs .env + models + ZMQ peer)
 ```
 
-### Inference (Python)
+### Inference (Python, host-side dev)
 
 ```bash
 cd /home/ubuntu/projects/MarketMoves/inference
 uv sync                         # resolves pyproject.toml, creates .venv
-uv run python inference_engine.py
+uv run python -m inference.inference_engine
 ```
 
 The full ZMQ REP loop is implemented in **Feature 04**.
@@ -77,16 +96,6 @@ The full ZMQ REP loop is implemented in **Feature 04**.
 The SPA is served by the Axum telemetry service in production. For local
 development open `frontend/index.html` in a browser (status polling will 404
 until the engine is up).
-
-### Docker Compose
-
-Compose files land in `deploy/` in **Feature 14**. The canonical command once
-they exist:
-
-```bash
-cd /home/ubuntu/projects/MarketMoves/deploy
-docker compose up -d
-```
 
 ## Environment variables
 

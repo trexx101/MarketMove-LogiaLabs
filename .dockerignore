@@ -1,0 +1,64 @@
+# Build context for engine/Dockerfile is the WORKSPACE ROOT.
+# This file lives at the workspace root to keep the build context small.
+
+# Cargo / Rust artifacts (mounted or rebuilt inside the image)
+target/
+**/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Local databases (mounted at runtime)
+data/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Models (mounted read-only at runtime)
+/models/*
+!/models/.gitkeep
+!/models/README.md
+
+# Environment files (compose passes them via --env-file)
+.env
+.env.*
+!.env.example
+
+# Local tooling / caches
+.agents/
+.codegraph/
+.omo/
+.uv-cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+env/
+
+# IDE / OS junk
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Plans and docs are not needed in the image
+plans/
+Training_model_Design.md
+AGENTS.md
+skills-lock.json
+README.md
+scripts/
+tests/
+
+# Python (sibling crate) — not needed for the engine build
+inference/

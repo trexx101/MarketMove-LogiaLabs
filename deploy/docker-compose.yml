@@ -1,0 +1,170 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# MarketMarkovNet — full stack
+#
+# Three services, one internal network, one external reverse proxy.
+#
+#   inference  PyTorch CPU ZMQ REP, port 5555 (internal only)
+#   engine     Rust/Axum binary, port 8080 (internal only, served via Caddy)
+#   proxy      Caddy, ports 80 + 443 on the host, TLS via Let's Encrypt
+#
+# Port 5555 is *never* published to the host. The `mmn` network is an
+# internal bridge; only the proxy exposes anything to the public internet,
+# and it terminates TLS + reverse-proxies to engine:8080.
+#
+# Bring up:    docker compose -f deploy/docker-compose.yml up -d
+# Tail logs:   docker compose -f deploy/docker-compose.yml logs -f
+# Tear down:   docker compose -f deploy/docker-compose.yml down
+#
+# Compose v2 syntax (works with `docker compose` v2+ and `docker-compose`
+# v1.29+). Tested with docker-compose 1.29.2.
+# ─────────────────────────────────────────────────────────────────────────────
+
+version: "3.8"
+
+# Secrets / runtime config come from the workspace-root .env. Operators
+# must `cp .env.example .env` and fill in values before bringing the
+# stack up.
+x-restart-policy: &restart_policy
+  restart: unless-stopped
+
+services:
+  # ── Inference microservice (PyTorch CPU) ────────────────────────────────
+  inference:
+    build:
+      context: ../inference
+      dockerfile: Dockerfile
+    image: marketmarkovnet/inference:latest
+    container_name: mmn-inference
+    <<: *restart_policy
+    # Read-only mount of the model artifacts.
+    volumes:
+      - models:/models:ro
+    # Internal port only — no `ports:` mapping → never reachable from the host.
+    expose:
+      - "5555"
+    env_file:
+      - ../.env
+    environment:
+      MODEL_PATH: ${MODEL_PATH:-/models/model.pt}
+      NORM_STATS_PATH: ${NORM_STATS_PATH:-/models/norm_stats.json}
+      ZMQ_BIND: tcp://0.0.0.0:5555
+      PYTHONUNBUFFERED: "1"
+    networks:
+      - mmn
+    # The inference Dockerfile already declares a HEALTHCHECK; this
+    # is compose-level plumbing to make the engine wait for it.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json, zmq; ctx=zmq.Context.instance(); s=ctx.socket(zmq.REQ); s.setsockopt(zmq.LINGER, 0); s.setsockopt(zmq.RCVTIMEO, 5000); s.setsockopt(zmq.SNDTIMEO, 5000); s.connect('tcp://127.0.0.1:5555'); s.send(json.dumps({'feature_window': [[0.0, 0.0, 0.0]]}).encode()); reply = json.loads(s.recv()); assert all(k in reply for k in ('pred_1h', 'pred_4h', 'pred_24h')), reply; s.close()"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    # Aggressive resource caps — PyTorch CPU is the only meaningful
+    # workload on this container.
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+
+  # ── Engine (Rust / Axum) ────────────────────────────────────────────────
+  engine:
+    build:
+      context: ..
+      dockerfile: engine/Dockerfile
+    image: marketmarkovnet/engine:latest
+    container_name: mmn-engine
+    <<: *restart_policy
+    # Run as the non-root `mmn` user (uid:gid 1000) so the `data` volume
+    # is chowned to it on first mount and SQLite can be created/updated.
+    user: "1000:1000"
+    # Persistent SQLite + parity marker. Both live under /app/data.
+    volumes:
+      - data:/app/data
+      - models:/models:ro
+    # Internal port only.
+    expose:
+      - "8080"
+    env_file:
+      - ../.env
+    environment:
+      TRADING_MODE: ${TRADING_MODE:-paper}
+      ZMQ_ENDPOINT: tcp://inference:5555
+      MAGNITUDE_THRESHOLD: ${MAGNITUDE_THRESHOLD:-0.005}
+      PAPER_FEE: ${PAPER_FEE:-0.0015}
+      SMA_WINDOW: ${SMA_WINDOW:-200}
+      HTTP_PORT: "8080"
+      SYMBOL: ${SYMBOL:-BTC/USD}
+      DATABASE_URL: sqlite:///app/data/candles.db
+      NORM_STATS_PATH: /models/norm_stats.json
+      FEATURE_WINDOW_SIZE: ${FEATURE_WINDOW_SIZE:-72}
+      PARITY_MARKER_PATH: /app/data/parity_verified.json
+      PARITY_MAX_AGE_SECS: ${PARITY_MAX_AGE_SECS:-604800}
+      RUST_LOG: ${RUST_LOG:-info}
+      # Kraken keys — only present in live mode. Compose passes them
+      # through verbatim from .env; the engine ignores them in paper mode.
+      KRAKEN_API_KEY: ${KRAKEN_API_KEY:-}
+      KRAKEN_API_SECRET: ${KRAKEN_API_SECRET:-}
+    networks:
+      - mmn
+    depends_on:
+      inference:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--silent", "--fail", "--max-time", "4", "http://127.0.0.1:8080/api/status"]
+      interval: 15s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+
+  # ── Reverse proxy (Caddy) ──────────────────────────────────────────────
+  proxy:
+    image: caddy:2-alpine
+    container_name: mmn-proxy
+    <<: *restart_policy
+    # The only service publishing ports to the host. UFW on the VPS must
+    # allow 80 and 443; nothing else is open.
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      # Caddyfile is read-only from the deploy directory.
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Persistent Caddy state — TLS certs, OCSP staples, on-disk cache.
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - mmn
+    depends_on:
+      engine:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:80/"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+# ── Networks ───────────────────────────────────────────────────────────────
+networks:
+  mmn:
+    driver: bridge
+    internal: false  # engine + inference need outbound HTTPS to Kraken
+
+# ── Volumes ────────────────────────────────────────────────────────────────
+volumes:
+  # SQLite DB + parity marker. Lives across `compose down` (only `down -v`
+  # destroys it). Operators must back this up off-host.
+  data:
+  # Read-only model artifacts. Operators populate this with `docker run`
+  # or by placing files directly in the named volume's mount point.
+  models:
+  # Caddy's persistent state. Required for Let's Encrypt to issue a
+  # real cert (not a rate-limited self-signed fallback).
+  caddy_data:
+  caddy_config:

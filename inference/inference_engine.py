@@ -60,11 +60,12 @@ log = _build_logger()
 def _tensorize(feature_window: list[list[float]], device: torch.device) -> torch.Tensor:
     """Convert a nested list (seq_len × n_features) to a model-ready tensor.
 
-    Returns shape ``(1, n_features, seq_len)`` (batch=1, channels-first).
+    Returns shape ``(1, seq_len, n_features)`` (batch=1, sequence-first).
+    The model transposes to channels-first internally.
     """
     t = torch.tensor(feature_window, dtype=torch.float32, device=device)
-    # t: (seq_len, n_features) → (n_features, seq_len) → (1, n_features, seq_len)
-    return t.T.unsqueeze(0)
+    # t: (seq_len, n_features) → (1, seq_len, n_features)
+    return t.unsqueeze(0)
 
 
 def _handle_request(
@@ -164,12 +165,14 @@ def run_service(cfg: InferenceConfig) -> int:
     # ── Load model ────────────────────────────────────────────────────────────
     log.info("loading model from %s", cfg.model_path)
     try:
-        n_features = int(os.environ.get("MODEL_N_FEATURES", "3"))
+        input_features = int(os.environ.get("MODEL_INPUT_FEATURES", "3"))
         hidden_dim = int(os.environ.get("MODEL_HIDDEN_DIM", "64"))
+        rank = int(os.environ.get("MODEL_RANK", "8"))
         model = load_model(
             str(cfg.model_path),
-            n_features=n_features,
+            input_features=input_features,
             hidden_dim=hidden_dim,
+            rank=rank,
         )
     except Exception as exc:  # noqa: BLE001
         log.error("failed to load model: %s", exc)

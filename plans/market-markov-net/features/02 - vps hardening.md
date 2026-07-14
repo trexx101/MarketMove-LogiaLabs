@@ -13,7 +13,6 @@
 ## Technical Implementation Steps
 
 1. `deploy/setup.sh`: enable UFW with `default deny incoming` / `allow outgoing`, `ufw allow 22,80,443`, explicit `ufw deny 5555`.
-2. Install Docker via official convenience script or apt repo; enable/start service.
 3. Create `deploy` user, add to `docker` group, set up SSH.
 4. `deploy/PROVISIONING.md` documenting each step and how to re-run safely.
 5. Since opencode runs on the VPS, verify current firewall/docker state before mutating; make the script idempotent (guard clauses).

@@ -27,9 +27,9 @@ N_FEATURES = 3
 SEQ_LEN = 72
 
 
-def _random_model(n_features: int = N_FEATURES, hidden_dim: int = 32) -> MarketMarkovNet:
+def _random_model(input_features: int = N_FEATURES, hidden_dim: int = 32, rank: int = 8) -> MarketMarkovNet:
     """Return a randomly-initialised model (no file I/O needed)."""
-    model = MarketMarkovNet(n_features=n_features, hidden_dim=hidden_dim)
+    model = MarketMarkovNet(input_features=input_features, hidden_dim=hidden_dim, rank=rank)
     model.eval()
     return model
 
@@ -73,14 +73,14 @@ class TestCausalConv1d:
 class TestMarketMarkovNetShapes:
     def test_output_tuple_length(self) -> None:
         model = _random_model()
-        x = torch.randn(1, N_FEATURES, SEQ_LEN)
+        x = torch.randn(1, SEQ_LEN, N_FEATURES)
         with torch.no_grad():
             out = model(x)
         assert len(out) == 3, "expected 3-tuple (pred_1h, pred_4h, pred_24h)"
 
     def test_each_output_shape(self) -> None:
         model = _random_model()
-        x = torch.randn(2, N_FEATURES, SEQ_LEN)
+        x = torch.randn(2, SEQ_LEN, N_FEATURES)
         with torch.no_grad():
             p1h, p4h, p24h = model(x)
         for name, t in [("pred_1h", p1h), ("pred_4h", p4h), ("pred_24h", p24h)]:
@@ -88,7 +88,7 @@ class TestMarketMarkovNetShapes:
 
     def test_outputs_are_finite(self) -> None:
         model = _random_model()
-        x = torch.randn(1, N_FEATURES, SEQ_LEN)
+        x = torch.randn(1, SEQ_LEN, N_FEATURES)
         with torch.no_grad():
             p1h, p4h, p24h = model(x)
         for t in (p1h, p4h, p24h):
@@ -99,7 +99,7 @@ class TestMarketMarkovNetShapes:
         torch.manual_seed(0)
         model = _random_model()
         # Zero input → near-zero predictions (biases only, likely small)
-        x = torch.zeros(1, N_FEATURES, SEQ_LEN)
+        x = torch.zeros(1, SEQ_LEN, N_FEATURES)
         with torch.no_grad():
             p1h, p4h, p24h = model(x)
         for name, t in [("pred_1h", p1h), ("pred_4h", p4h), ("pred_24h", p24h)]:
@@ -112,7 +112,7 @@ class TestMarketMarkovNetShapes:
     def test_variable_seq_len(self) -> None:
         model = _random_model()
         for seq in (24, 72, 168):
-            x = torch.randn(1, N_FEATURES, seq)
+            x = torch.randn(1, seq, N_FEATURES)
             with torch.no_grad():
                 p1h, p4h, p24h = model(x)
             assert p1h.shape == (1, 1)
@@ -120,7 +120,7 @@ class TestMarketMarkovNetShapes:
     def test_batch_size_independence(self) -> None:
         """Predictions for the same input must not change across batch sizes."""
         model = _random_model()
-        single = torch.randn(1, N_FEATURES, SEQ_LEN)
+        single = torch.randn(1, SEQ_LEN, N_FEATURES)
         batched = single.expand(4, -1, -1)
         with torch.no_grad():
             p_single = model(single)
@@ -135,7 +135,7 @@ class TestCheckpointRoundTrip:
     def test_save_load_produces_identical_output(self) -> None:
         torch.manual_seed(42)
         model = _random_model()
-        x = torch.randn(1, N_FEATURES, SEQ_LEN)
+        x = torch.randn(1, SEQ_LEN, N_FEATURES)
 
         with torch.no_grad():
             orig_out = model(x)
@@ -144,7 +144,7 @@ class TestCheckpointRoundTrip:
             tmp_path = f.name
 
         torch.save(model.state_dict(), tmp_path)
-        loaded = load_model(tmp_path, n_features=N_FEATURES, hidden_dim=32)
+        loaded = load_model(tmp_path, input_features=N_FEATURES, hidden_dim=32, rank=8)
 
         with torch.no_grad():
             loaded_out = loaded(x)
@@ -161,7 +161,7 @@ class TestTensorize:
     def test_shape(self) -> None:
         fw = _feature_window(SEQ_LEN, N_FEATURES)
         t = _tensorize(fw, torch.device("cpu"))
-        assert t.shape == (1, N_FEATURES, SEQ_LEN)
+        assert t.shape == (1, SEQ_LEN, N_FEATURES)
 
     def test_dtype(self) -> None:
         fw = _feature_window()

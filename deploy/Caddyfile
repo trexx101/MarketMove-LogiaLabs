@@ -1,0 +1,48 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# MarketMarkovNet — Caddy reverse proxy
+#
+# Terminates TLS on :443 via Let's Encrypt (when a public hostname is
+# configured) and reverse-proxies everything to the engine (Axum) on
+# the internal `mmn` network.
+#
+# Operators set `HOST` in the workspace-root .env file:
+#   - HOST=btc.example.com  → Caddy auto-issues a Let's Encrypt cert,
+#                             terminates TLS on :443, redirects :80 → :443.
+#   - HOST=localhost        → plain HTTP on :80 only (no ACME, no TLS).
+#     (or simply leave HOST unset; the default is "localhost")
+#
+# The engine serves:
+#   - GET /              → static SPA (uPlot control room)
+#   - GET /api/*         → JSON telemetry
+#   - everything else    → SPA fallback (client-side router)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Global options: log to stdout for `docker logs`, disable the admin
+# endpoint (it would publish an unauthenticated HTTP API).
+{
+    admin off
+    default_sni {$HOST:localhost}
+}
+
+# ── Primary site ────────────────────────────────────────────────────────────
+# `{$HOST:localhost}` resolves to the value of the HOST env var, falling
+# back to "localhost" if unset. Caddy auto-issues a Let's Encrypt cert
+# for any public hostname. For "localhost" it serves plain HTTP on :80
+# only (and skips the HTTPS listener entirely).
+{$HOST:localhost} {
+    encode zstd gzip
+    reverse_proxy engine:8080 {
+        header_up Host {host}
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+        transport http {
+            dial_timeout 5s
+            response_header_timeout 30s
+        }
+    }
+    header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    header X-Content-Type-Options "nosniff"
+    header X-Frame-Options "DENY"
+    header Referrer-Policy "strict-origin-when-cross-origin"
+}

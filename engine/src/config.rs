@@ -1,5 +1,6 @@
 use std::env;
 use std::fmt;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use anyhow::{anyhow, Context, Result};
@@ -21,6 +22,11 @@ pub struct Config {
     pub norm_stats_path: String,
     /// Number of candles sent as the feature window to the inference service.
     pub feature_window_size: usize,
+    /// Path to the `parity_verified.json` marker written by Feature 13.
+    pub parity_marker_path: String,
+    /// Maximum age (in seconds) of the parity marker before `live` mode
+    /// refuses to start. Default: 7 days.
+    pub parity_max_age_secs: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +116,24 @@ impl Config {
             ));
         }
 
+        let parity_marker_path = env_or("PARITY_MARKER_PATH", "parity_verified.json");
+        if parity_marker_path.trim().is_empty() {
+            return Err(anyhow!("PARITY_MARKER_PATH must not be empty"));
+        }
+
+        let parity_max_age_secs = parse_env::<i64>("PARITY_MAX_AGE_SECS", "604800")
+            .context("PARITY_MAX_AGE_SECS must be an integer (seconds)")?;
+        if parity_max_age_secs <= 0 {
+            return Err(anyhow!(
+                "PARITY_MAX_AGE_SECS must be > 0, got {}",
+                parity_max_age_secs
+            ));
+        }
+
+        if trading_mode == TradingMode::Live {
+            verify_parity_marker(&parity_marker_path, parity_max_age_secs)?;
+        }
+
         let database_url = env_or("DATABASE_URL", "sqlite://data/candles.db");
         if database_url.trim().is_empty() {
             return Err(anyhow!("DATABASE_URL must not be empty"));
@@ -139,8 +163,57 @@ impl Config {
             database_url,
             norm_stats_path,
             feature_window_size,
+            parity_marker_path,
+            parity_max_age_secs,
         })
     }
+}
+
+/// Verify the parity-verified marker exists and is fresh.
+///
+/// This is the live-mode gate from Feature 13. The marker is a small JSON
+/// file written by `engine::parity::write_marker` after a clean
+/// regression run. If it is missing, malformed, or older than
+/// `max_age_secs`, the engine refuses to start in `live` mode.
+fn verify_parity_marker(marker_path: &str, max_age_secs: i64) -> Result<()> {
+    let path = PathBuf::from(marker_path);
+    let marker = match crate::parity::read_marker(&path)
+        .with_context(|| format!("reading parity marker at {marker_path}"))?
+    {
+        Some(m) => m,
+        None => {
+            return Err(anyhow!(
+                "TRADING_MODE=live requires a fresh parity marker at '{marker_path}', \
+                 but no marker was found.\n\
+                 Run the parity harness (Feature 13) to produce it:\n\
+                   cargo run --bin engine --bin parity-harness --release\n\
+                 or invoke `engine::parity::run_parity` from a CLI and call \
+                 `engine::parity::write_marker` on success.\n\
+                 Refusing to start in live mode."
+            ));
+        }
+    };
+
+    let now = chrono::Utc::now().timestamp();
+    if !marker.is_fresh(now, max_age_secs) {
+        let age_secs = now - marker.verified_at;
+        let age_hours = age_secs / 3600;
+        return Err(anyhow!(
+            "TRADING_MODE=live requires a fresh parity marker, but the marker at \
+             '{marker_path}' is {age_hours} hours old (max allowed: {max_age_secs} seconds).\n\
+             Re-run the parity harness to refresh the marker.\n\
+             Refusing to start in live mode."
+        ));
+    }
+
+    tracing::info!(
+        marker = marker_path,
+        verified_at = marker.verified_at,
+        fixture_sha256 = %marker.fixture_sha256,
+        max_abs_error = marker.max_abs_error,
+        "parity marker accepted"
+    );
+    Ok(())
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -185,6 +258,8 @@ mod tests {
             "DATABASE_URL",
             "NORM_STATS_PATH",
             "FEATURE_WINDOW_SIZE",
+            "PARITY_MARKER_PATH",
+            "PARITY_MAX_AGE_SECS",
         ] {
             env::remove_var(key);
         }
@@ -224,6 +299,8 @@ mod tests {
         assert_eq!(cfg.database_url, "sqlite://data/candles.db");
         assert_eq!(cfg.norm_stats_path, "models/norm_stats.json");
         assert_eq!(cfg.feature_window_size, 72);
+        assert_eq!(cfg.parity_marker_path, "parity_verified.json");
+        assert_eq!(cfg.parity_max_age_secs, 7 * 24 * 60 * 60);
     }
 
     #[test]
@@ -275,13 +352,105 @@ mod tests {
     fn live_mode_with_both_keys_succeeds() {
         let _g = ENV_LOCK.lock().unwrap();
         clear_engine_env();
+        // Write a fresh parity marker to a temp file and point the engine at it.
+        let marker_path = std::env::temp_dir().join("parity_marker_live_test.json");
+        let marker = crate::parity::ParityMarker {
+            verified_at: chrono::Utc::now().timestamp(),
+            fixture_sha256: "abc".to_string(),
+            candles_compared: 168,
+            max_abs_error: 1e-9,
+            tolerance: 1e-6,
+            notes: "test marker".to_string(),
+        };
+        crate::parity::write_marker(&marker_path, &marker).expect("write test marker");
+
         env::set_var("TRADING_MODE", "live");
         env::set_var("KRAKEN_API_KEY", "abc");
         env::set_var("KRAKEN_API_SECRET", "xyz");
-        let cfg = Config::from_env().expect("live mode with both keys must load");
+        env::set_var("PARITY_MARKER_PATH", marker_path.to_str().unwrap());
+        let cfg = Config::from_env().expect("live mode with both keys + marker must load");
         assert_eq!(cfg.trading_mode, TradingMode::Live);
         assert_eq!(cfg.kraken_api_key.as_deref(), Some("abc"));
         assert_eq!(cfg.kraken_api_secret.as_deref(), Some("xyz"));
+
+        let _ = std::fs::remove_file(&marker_path);
+    }
+
+    #[test]
+    fn live_mode_without_parity_marker_fails_fast() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_engine_env();
+        env::set_var("TRADING_MODE", "live");
+        env::set_var("KRAKEN_API_KEY", "abc");
+        env::set_var("KRAKEN_API_SECRET", "xyz");
+        // Point the engine at a path that does not exist.
+        let bogus = std::env::temp_dir().join("parity_marker_does_not_exist_xyz_12345.json");
+        let _ = std::fs::remove_file(&bogus);
+        env::set_var("PARITY_MARKER_PATH", bogus.to_str().unwrap());
+        let err = Config::from_env().expect_err("live mode without a marker must fail");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("parity marker"), "msg: {msg}");
+        assert!(msg.contains("Refusing to start in live mode"), "msg: {msg}");
+    }
+
+    #[test]
+    fn live_mode_with_stale_parity_marker_fails_fast() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_engine_env();
+        // Marker verified 30 days ago, default max age is 7 days → stale.
+        let marker_path = std::env::temp_dir().join("parity_marker_stale_test.json");
+        let stale = crate::parity::ParityMarker {
+            verified_at: chrono::Utc::now().timestamp() - 30 * 24 * 3600,
+            fixture_sha256: "abc".to_string(),
+            candles_compared: 168,
+            max_abs_error: 1e-9,
+            tolerance: 1e-6,
+            notes: "stale marker".to_string(),
+        };
+        crate::parity::write_marker(&marker_path, &stale).expect("write stale marker");
+
+        env::set_var("TRADING_MODE", "live");
+        env::set_var("KRAKEN_API_KEY", "abc");
+        env::set_var("KRAKEN_API_SECRET", "xyz");
+        env::set_var("PARITY_MARKER_PATH", marker_path.to_str().unwrap());
+        let err = Config::from_env().expect_err("stale marker must fail");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("hours old"), "msg: {msg}");
+
+        let _ = std::fs::remove_file(&marker_path);
+    }
+
+    #[test]
+    fn paper_mode_does_not_check_parity_marker() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_engine_env();
+        // Paper mode must not require a parity marker.
+        env::set_var("TRADING_MODE", "paper");
+        let bogus = std::env::temp_dir().join("parity_marker_does_not_exist_xyz_67890.json");
+        let _ = std::fs::remove_file(&bogus);
+        env::set_var("PARITY_MARKER_PATH", bogus.to_str().unwrap());
+        let cfg = Config::from_env().expect("paper mode must not check the marker");
+        assert_eq!(cfg.trading_mode, TradingMode::Paper);
+    }
+
+    #[test]
+    fn zero_parity_max_age_rejected() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_engine_env();
+        env::set_var("PARITY_MAX_AGE_SECS", "0");
+        let err = Config::from_env().expect_err("PARITY_MAX_AGE_SECS=0 must fail");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("PARITY_MAX_AGE_SECS must be > 0"), "msg: {msg}");
+    }
+
+    #[test]
+    fn empty_parity_marker_path_rejected() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_engine_env();
+        env::set_var("PARITY_MARKER_PATH", "   ");
+        let err = Config::from_env().expect_err("blank PARITY_MARKER_PATH must fail");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("PARITY_MARKER_PATH"), "msg: {msg}");
     }
 
     #[test]

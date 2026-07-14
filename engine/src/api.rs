@@ -7,6 +7,7 @@ use axum::{
 };
 use serde::Serialize;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::services::{ServeDir, ServeFile};
 use tracing::error;
 
 use crate::{config::Config, db, strategy};
@@ -40,6 +41,10 @@ pub fn router(pool: db::DbPool, config: &Config) -> Router {
         .route("/api/chart", get(handle_chart))
         .layer(cors)
         .with_state(state)
+        .fallback_service(
+            ServeDir::new("frontend")
+                .not_found_service(ServeFile::new("frontend/index.html")),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -353,5 +358,89 @@ mod tests {
         assert_eq!(status.position, "long");
         assert!((status.entry_price.unwrap() - 100.0).abs() < 1e-9);
         assert!((status.unrealized_pnl.unwrap() - 10.0).abs() < 1e-9);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn router_serves_static_files_and_api() {
+        use tokio::net::TcpListener;
+
+        // router() resolves "frontend" relative to CWD; cargo test sets CWD to the package root.
+        let original_cwd = std::env::current_dir().unwrap();
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
+        std::env::set_current_dir(workspace_root).unwrap();
+
+        let result = async {
+            let pool = test_pool().await;
+            let config = crate::config::Config {
+                trading_mode: crate::config::TradingMode::Paper,
+                zmq_endpoint: "tcp://127.0.0.1:5555".to_string(),
+                magnitude_threshold: 0.005,
+                paper_fee: 0.0015,
+                sma_window: 3,
+                http_port: 0,
+                symbol: "BTC/USD".to_string(),
+                kraken_api_key: None,
+                kraken_api_secret: None,
+                database_url: ":memory:".to_string(),
+                norm_stats_path: "models/norm_stats.json".to_string(),
+                feature_window_size: 72,
+                parity_marker_path: std::env::temp_dir()
+                    .join("parity_marker_api_test.json")
+                    .to_string_lossy()
+                    .into_owned(),
+                parity_max_age_secs: 7 * 24 * 60 * 60,
+            };
+
+            let app = router(pool, &config);
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                let _ = axum::serve(listener, app).await;
+            });
+
+            let client = reqwest::Client::new();
+            let base = format!("http://{}", addr);
+
+            let status_res = client
+                .get(format!("{base}/api/status"))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(status_res.status(), 200);
+            let status: serde_json::Value = status_res.json().await.unwrap();
+            assert_eq!(status["mode"], "paper");
+            assert_eq!(status["position"], "flat");
+
+            let index_res = client.get(format!("{base}/")).send().await.unwrap();
+            assert_eq!(index_res.status(), 200);
+            let ct = index_res
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            assert!(ct.contains("text/html"));
+            let body = index_res.text().await.unwrap();
+            assert!(body.contains("MarketMarkovNet"));
+
+            let spa_res = client
+                .get(format!("{base}/some/unknown/route"))
+                .send()
+                .await
+                .unwrap();
+            let spa_status = spa_res.status();
+            let spa_body = spa_res.text().await.unwrap();
+            assert!(
+                spa_body.contains("MarketMarkovNet"),
+                "SPA fallback should serve index.html, got status {} body: {}",
+                spa_status,
+                spa_body
+            );
+        }
+        .await;
+
+        std::env::set_current_dir(original_cwd).unwrap();
+        result
     }
 }

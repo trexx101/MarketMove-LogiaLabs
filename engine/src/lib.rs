@@ -5,5 +5,6 @@ pub mod db;
 pub mod exec;
 pub mod features;
 pub mod normalize;
+pub mod parity;
 pub mod scheduler;
 pub mod strategy;
