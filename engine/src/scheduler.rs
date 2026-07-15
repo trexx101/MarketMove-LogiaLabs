@@ -11,7 +11,7 @@ use crate::normalize::{normalize_row, NormStats};
 
 pub struct Scheduler {
     pool: DbPool,
-    bridge: ZmqBridge,
+    bridge: Option<ZmqBridge>,
     norm_stats: NormStats,
     feature_window_size: usize,
     last_processed_ts: Option<i64>,
@@ -32,7 +32,7 @@ impl Scheduler {
         let bridge = ZmqBridge::connect(zmq_endpoint).await?;
         Ok(Self {
             pool,
-            bridge,
+            bridge: Some(bridge),
             norm_stats,
             feature_window_size,
             last_processed_ts: None,
@@ -86,12 +86,28 @@ impl Scheduler {
             return Ok(());
         }
 
-        let pred = self
-            .bridge
+        let bridge = self.bridge.as_mut()
+            .expect("ZMQ bridge not configured (test mode — use process_with_prediction)");
+        let pred = bridge
             .predict_with_retry(&feature_window, Duration::from_secs(5), 2)
             .await?;
 
-        let features_json = serde_json::to_string(&feature_window)?;
+        self.finalize_candle(candle_ts, &pred, &feature_window, &candles).await
+    }
+
+    /// Persist prediction, mark candle as processed, then run strategy evaluation.
+    ///
+    /// `last_processed_ts` is set immediately after `insert_prediction` succeeds so
+    /// that the 30-second poll loop in `run()` will NOT re-request inference for
+    /// this candle even if strategy evaluation subsequently fails.
+    async fn finalize_candle(
+        &mut self,
+        candle_ts: i64,
+        pred: &crate::bridge::Prediction,
+        feature_window: &[[f64; 3]],
+        candles: &[crate::db::Candle],
+    ) -> Result<()> {
+        let features_json = serde_json::to_string(feature_window)?;
 
         db::insert_prediction(
             &self.pool,
@@ -111,7 +127,35 @@ impl Scheduler {
             "prediction persisted"
         );
 
+        // Mark candle as processed IMMEDIATELY after prediction persistence.
+        // This prevents the 30s retry loop: even if strategy evaluation below
+        // fails, the prediction is already persisted and must not be re-requested.
+        self.last_processed_ts = Some(candle_ts);
+
         // --- Strategy evaluation ---
+        // Errors here are logged but do NOT propagate — the prediction is
+        // already persisted and the candle is marked processed.
+        if let Err(e) = self.evaluate_and_execute_strategy(candle_ts, pred, candles).await {
+            error!(
+                error = %e,
+                candle_ts,
+                "strategy evaluation failed (prediction already persisted)"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Evaluate the trading strategy and execute position changes.
+    ///
+    /// Returns `Err` on DB or computation failures — the caller decides
+    /// whether to propagate or log-and-continue.
+    async fn evaluate_and_execute_strategy(
+        &mut self,
+        candle_ts: i64,
+        pred: &crate::bridge::Prediction,
+        candles: &[crate::db::Candle],
+    ) -> Result<()> {
         // Load current persisted position
         let current_pos = crate::strategy::Position::from_i64(
             db::load_position(&self.pool).await?
@@ -185,8 +229,147 @@ impl Scheduler {
             tracing::debug!(candle_ts, position = %new_pos, "position unchanged");
         }
 
-        self.last_processed_ts = Some(candle_ts);
-
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bridge::Prediction;
+    use crate::db::{self, Candle, DbPool};
+    use crate::exec::paper::PaperExecutor;
+    use crate::normalize::NormStats;
+    use crate::strategy::StrategyParams;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn test_pool() -> DbPool {
+        let pool = SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for stmt in db::DDL.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+            sqlx::query(stmt).execute(&pool).await.unwrap();
+        }
+        pool
+    }
+
+    fn test_scheduler(pool: DbPool) -> Scheduler {
+        let executor = ExecutorKind::Paper(PaperExecutor::new(pool.clone(), 0.0015));
+        Scheduler {
+            pool,
+            bridge: None,
+            norm_stats: NormStats {
+                mean: [0.0; 3],
+                std: [1.0; 3],
+            },
+            feature_window_size: 10,
+            last_processed_ts: None,
+            strategy_params: StrategyParams {
+                magnitude_threshold: 0.005,
+                sma_window: 200,
+            },
+            executor,
+        }
+    }
+
+    async fn seed_candles(pool: &DbPool, count: usize) {
+        for i in 0..count {
+            let ts = (i as i64) * 3600;
+            let price = 50000.0 + (i as f64) * 10.0;
+            db::upsert_candle(pool, &Candle {
+                ts,
+                open: price,
+                high: price + 100.0,
+                low: price - 100.0,
+                close: price + 50.0,
+                volume: 1000.0,
+                vwap: price + 25.0,
+            }).await.unwrap();
+        }
+    }
+
+    fn fake_prediction() -> Prediction {
+        Prediction {
+            pred_1h: 0.01,
+            pred_4h: 0.02,
+            pred_24h: 0.03,
+        }
+    }
+
+    /// After `insert_prediction` succeeds, `last_processed_ts` must be set
+    /// even if subsequent strategy operations fail.
+    #[tokio::test]
+    async fn process_sets_last_processed_after_prediction() {
+        let pool = test_pool().await;
+        seed_candles(&pool, 15).await;
+
+        let mut sched = test_scheduler(pool.clone());
+        let candle_ts: i64 = 14 * 3600;
+
+        let pred = fake_prediction();
+        let feature_window = vec![[0.1, 0.2, 0.3]; 10];
+        let candles = db::fetch_recent_candles(&pool, 16).await.unwrap();
+
+        // finalize_candle persists prediction, sets last_processed_ts, runs strategy
+        let result = sched.finalize_candle(
+            candle_ts, &pred, &feature_window, &candles,
+        ).await;
+
+        assert!(result.is_ok(), "finalize_candle should return Ok");
+        assert_eq!(
+            sched.last_processed_ts, Some(candle_ts),
+            "last_processed_ts must be set after prediction persistence"
+        );
+
+        // Verify prediction was actually persisted
+        let preds = db::fetch_recent_predictions(&pool, 1).await.unwrap();
+        assert_eq!(preds.len(), 1);
+        assert_eq!(preds[0].candle_ts, candle_ts);
+    }
+
+    /// Strategy/execution errors must be logged but must NOT prevent the
+    /// candle from being marked as processed (prevents 30s retry loop).
+    #[tokio::test]
+    async fn process_does_not_retry_on_strategy_failure() {
+        let pool = test_pool().await;
+        seed_candles(&pool, 15).await;
+
+        // Drop signal_state table to force load_position to fail inside strategy
+        sqlx::query("DROP TABLE signal_state")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut sched = test_scheduler(pool.clone());
+        let candle_ts: i64 = 14 * 3600;
+
+        let pred = fake_prediction();
+        let feature_window = vec![[0.1, 0.2, 0.3]; 10];
+        let candles = db::fetch_recent_candles(&pool, 16).await.unwrap();
+
+        // finalize_candle should return Ok even though strategy fails
+        let result = sched.finalize_candle(
+            candle_ts, &pred, &feature_window, &candles,
+        ).await;
+
+        assert!(
+            result.is_ok(),
+            "finalize_candle must return Ok even when strategy fails (got: {:?})",
+            result.err()
+        );
+        assert_eq!(
+            sched.last_processed_ts, Some(candle_ts),
+            "last_processed_ts must be set despite strategy failure"
+        );
+
+        // Verify prediction was persisted (it happened before strategy)
+        let preds = db::fetch_recent_predictions(&pool, 1).await.unwrap();
+        assert_eq!(preds.len(), 1);
+        assert_eq!(preds[0].candle_ts, candle_ts);
     }
 }
