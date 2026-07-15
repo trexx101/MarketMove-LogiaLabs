@@ -40,18 +40,11 @@
     header Referrer-Policy "strict-origin-when-cross-origin"
 }
 
-# ── Domain-specific site (when HOST is set to a public hostname) ─────────────
-# When HOST is set, Caddy auto-issues a Let's Encrypt cert for that domain
-# and enables HSTS (production-appropriate).
-{$HOST:localhost} {
-    import backend
-    header Strict-Transport-Security "max-age=31536000; includeSubDomains"
-}
-
-# ── Catch-all for dev/staging without a domain ───────────────────────────────
-# When accessing via VPS IP, localhost, or port forwarding, this block matches
-# any host on ports 80 and 443. Uses self-signed cert (no HSTS to avoid
-# locking browsers into HTTPS with an untrusted cert).
-:80 :443 {
+# ── Catch-all site block ─────────────────────────────────────────────────────
+# Serves all hosts on ports 80 and 443. Uses internal CA for self-signed
+# certs with on-demand TLS — Caddy generates a cert for any SNI presented
+# during the TLS handshake (localhost, VPS IP, port-forwarded address, etc.).
+:80, :443 {
+    tls internal
     import backend
 }

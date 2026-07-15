@@ -127,11 +127,12 @@ services:
     image: caddy:2-alpine
     container_name: mmn-proxy
     <<: *restart_policy
-    # The only service publishing ports to the host. UFW on the VPS must
-    # allow 80 and 443; nothing else is open.
+    # The only service publishing ports to the host. We use 9080/9443
+    # to avoid conflict with k3s Traefik which hijacks ports 80/443
+    # via CNI iptables DNAT rules.
     ports:
-      - "80:80"
-      - "443:443"
+      - "9080:80"
+      - "9443:443"
     environment:
       HOST: ${HOST:-localhost}
     volumes:
