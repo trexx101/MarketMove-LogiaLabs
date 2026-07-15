@@ -88,6 +88,14 @@ async fn main() {
         }
     };
 
+    // Run REST backfill synchronously BEFORE spawning the scheduler.
+    // If the scheduler runs first, its first tick may see only 1-2 candles
+    // (seq_len=1), producing garbage features and stale predictions.
+    if let Err(e) = data::backfill(pool.clone(), &cfg.symbol, cfg.sma_window).await {
+        eprintln!("data backfill fatal error: {:#}", e);
+        process::exit(1);
+    }
+
     // Spawn the hourly scheduler (inference pipeline) as a background task.
     let scheduler_pool = pool.clone();
     let zmq_endpoint = cfg.zmq_endpoint.clone();
@@ -126,10 +134,9 @@ async fn main() {
         }
     }
 
-    // Run the data pipeline (REST backfill → retention loop → WS ingestion).
-    // This blocks until a fatal error.
-    if let Err(e) = data::run(pool, &cfg.symbol, cfg.sma_window).await {
-        eprintln!("data pipeline fatal error: {:#}", e);
+    // Run the WS loop + retention task. This blocks until a fatal error.
+    if let Err(e) = data::run_ws_and_retention(pool, &cfg.symbol).await {
+        eprintln!("data ws/retention fatal error: {:#}", e);
         process::exit(1);
     }
 }
