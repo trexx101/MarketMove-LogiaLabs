@@ -93,8 +93,35 @@ pub async fn open(database_url: &str) -> Result<DbPool> {
             .with_context(|| format!("running DDL: {stmt}"))?;
     }
 
+    migrate_predictions(&pool).await?;
+
     info!("database ready at {database_url}");
     Ok(pool)
+}
+
+/// Add nullable `actual_*` columns to the predictions table if they don't exist.
+/// SQLite does not support `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, so we
+/// query `PRAGMA table_info` first and only add missing columns.
+pub async fn migrate_predictions(pool: &DbPool) -> Result<()> {
+    let rows = sqlx::query("PRAGMA table_info(predictions)")
+        .fetch_all(pool)
+        .await
+        .context("PRAGMA table_info(predictions)")?;
+
+    let existing: Vec<String> = rows.iter().map(|r| r.get::<String, _>(1)).collect();
+
+    for col in &["actual_1h", "actual_4h", "actual_24h"] {
+        if !existing.iter().any(|name| name == col) {
+            let sql = format!("ALTER TABLE predictions ADD COLUMN {col} REAL");
+            sqlx::query(&sql)
+                .execute(pool)
+                .await
+                .with_context(|| format!("adding column {col}"))?;
+            info!("migrated predictions: added column {col}");
+        }
+    }
+
+    Ok(())
 }
 
 /// Insert or update a candle row identified by its open-time unix timestamp.
@@ -168,8 +195,14 @@ pub async fn insert_prediction(
 ) -> Result<()> {
     let created_at = Utc::now().timestamp();
     sqlx::query(
-        "INSERT OR REPLACE INTO predictions (candle_ts, pred_1h, pred_4h, pred_24h, features_json, created_at)
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO predictions (candle_ts, pred_1h, pred_4h, pred_24h, features_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(candle_ts) DO UPDATE SET
+           pred_1h = excluded.pred_1h,
+           pred_4h = excluded.pred_4h,
+           pred_24h = excluded.pred_24h,
+           features_json = excluded.features_json,
+           created_at = excluded.created_at",
     )
     .bind(candle_ts)
     .bind(pred_1h)
@@ -310,6 +343,9 @@ pub struct PredictionRow {
     pub pred_24h: f64,
     pub features_json: String,
     pub created_at: i64,
+    pub actual_1h: Option<f64>,
+    pub actual_4h: Option<f64>,
+    pub actual_24h: Option<f64>,
 }
 
 /// A trade row as returned by the API read queries.
@@ -329,7 +365,8 @@ pub struct TradeRow {
 /// Fetch the `limit` most recent predictions, ordered newest-first.
 pub async fn fetch_recent_predictions(pool: &DbPool, limit: usize) -> Result<Vec<PredictionRow>> {
     let rows = sqlx::query(
-        "SELECT id, candle_ts, pred_1h, pred_4h, pred_24h, features_json, created_at
+        "SELECT id, candle_ts, pred_1h, pred_4h, pred_24h, features_json, created_at,
+                actual_1h, actual_4h, actual_24h
          FROM predictions
          ORDER BY candle_ts DESC
          LIMIT ?",
@@ -349,6 +386,9 @@ pub async fn fetch_recent_predictions(pool: &DbPool, limit: usize) -> Result<Vec
             pred_24h: row.get(4),
             features_json: row.get(5),
             created_at: row.get(6),
+            actual_1h: row.get(7),
+            actual_4h: row.get(8),
+            actual_24h: row.get(9),
         })
         .collect())
 }
@@ -421,4 +461,74 @@ pub async fn fetch_entry_trade_price(pool: &DbPool) -> Result<Option<f64>> {
         .await
         .context("fetch_entry_trade_price")?;
     Ok(row.map(|r| r.get(0)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn test_pool() -> DbPool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for stmt in DDL.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+            sqlx::query(stmt).execute(&pool).await.unwrap();
+        }
+        pool
+    }
+
+    #[tokio::test]
+    async fn migrate_predictions_adds_columns() {
+        let pool = test_pool().await;
+        migrate_predictions(&pool).await.unwrap();
+
+        let rows = sqlx::query("PRAGMA table_info(predictions)")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        let names: Vec<String> = rows.iter().map(|r| r.get::<String, _>(1)).collect();
+
+        assert!(names.contains(&"actual_1h".to_string()));
+        assert!(names.contains(&"actual_4h".to_string()));
+        assert!(names.contains(&"actual_24h".to_string()));
+    }
+
+    #[tokio::test]
+    async fn migrate_predictions_is_idempotent() {
+        let pool = test_pool().await;
+        migrate_predictions(&pool).await.unwrap();
+        migrate_predictions(&pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn insert_prediction_preserves_actuals_on_conflict() {
+        let pool = test_pool().await;
+        migrate_predictions(&pool).await.unwrap();
+
+        insert_prediction(&pool, 1_000_000, 0.1, 0.2, 0.3, "[]")
+            .await
+            .unwrap();
+
+        sqlx::query("UPDATE predictions SET actual_1h = ? WHERE candle_ts = ?")
+            .bind(42.0_f64)
+            .bind(1_000_000_i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        insert_prediction(&pool, 1_000_000, 0.4, 0.5, 0.6, "[1]")
+            .await
+            .unwrap();
+
+        let rows = fetch_recent_predictions(&pool, 1).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert!((row.pred_1h - 0.4).abs() < 1e-9);
+        assert!((row.pred_4h - 0.5).abs() < 1e-9);
+        assert!((row.pred_24h - 0.6).abs() < 1e-9);
+        assert_eq!(row.features_json, "[1]");
+        assert!((row.actual_1h.unwrap() - 42.0).abs() < 1e-9);
+    }
 }

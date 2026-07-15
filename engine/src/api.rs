@@ -79,6 +79,9 @@ struct PredictionDto {
     pred_4h: f64,
     pred_24h: f64,
     created_at: String,
+    actual_1h: Option<f64>,
+    actual_4h: Option<f64>,
+    actual_24h: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -221,6 +224,9 @@ fn prediction_to_dto(row: &db::PredictionRow) -> PredictionDto {
         pred_4h: row.pred_4h,
         pred_24h: row.pred_24h,
         created_at: ts_to_rfc3339(row.created_at),
+        actual_1h: row.actual_1h,
+        actual_4h: row.actual_4h,
+        actual_24h: row.actual_24h,
     }
 }
 
@@ -258,6 +264,7 @@ mod tests {
         for stmt in db::DDL.split(';').map(str::trim).filter(|s| !s.is_empty()) {
             sqlx::query(stmt).execute(&pool).await.unwrap();
         }
+        db::migrate_predictions(&pool).await.unwrap();
         pool
     }
 
