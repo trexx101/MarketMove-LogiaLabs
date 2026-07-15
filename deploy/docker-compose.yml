@@ -132,6 +132,8 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    environment:
+      HOST: ${HOST:-localhost}
     volumes:
       # Caddyfile is read-only from the deploy directory.
       - ./Caddyfile:/etc/caddy/Caddyfile:ro

@@ -8,8 +8,8 @@
 # Operators set `HOST` in the workspace-root .env file:
 #   - HOST=btc.example.com  → Caddy auto-issues a Let's Encrypt cert,
 #                             terminates TLS on :443, redirects :80 → :443.
-#   - HOST=localhost        → plain HTTP on :80 only (no ACME, no TLS).
-#     (or simply leave HOST unset; the default is "localhost")
+#   - HOST not set          → Self-signed cert, serves on :80 and :443,
+#                             works with localhost, VPS IP, port forwarding.
 #
 # The engine serves:
 #   - GET /              → static SPA (uPlot control room)
@@ -21,28 +21,37 @@
 # endpoint (it would publish an unauthenticated HTTP API).
 {
     admin off
-    default_sni {$HOST:localhost}
+    auto_https disable_redirects
 }
 
-# ── Primary site ────────────────────────────────────────────────────────────
-# `{$HOST:localhost}` resolves to the value of the HOST env var, falling
-# back to "localhost" if unset. Caddy auto-issues a Let's Encrypt cert
-# for any public hostname. For "localhost" it serves plain HTTP on :80
-# only (and skips the HTTPS listener entirely).
-{$HOST:localhost} {
+# Shared backend configuration (snippet to avoid duplication).
+(backend) {
     encode zstd gzip
     reverse_proxy engine:8080 {
         header_up Host {host}
         header_up X-Real-IP {remote_host}
-        header_up X-Forwarded-For {remote_host}
-        header_up X-Forwarded-Proto {scheme}
         transport http {
             dial_timeout 5s
             response_header_timeout 30s
         }
     }
-    header Strict-Transport-Security "max-age=31536000; includeSubDomains"
     header X-Content-Type-Options "nosniff"
     header X-Frame-Options "DENY"
     header Referrer-Policy "strict-origin-when-cross-origin"
+}
+
+# ── Domain-specific site (when HOST is set to a public hostname) ─────────────
+# When HOST is set, Caddy auto-issues a Let's Encrypt cert for that domain
+# and enables HSTS (production-appropriate).
+{$HOST:localhost} {
+    import backend
+    header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+}
+
+# ── Catch-all for dev/staging without a domain ───────────────────────────────
+# When accessing via VPS IP, localhost, or port forwarding, this block matches
+# any host on ports 80 and 443. Uses self-signed cert (no HSTS to avoid
+# locking browsers into HTTPS with an untrusted cert).
+:80 :443 {
+    import backend
 }
