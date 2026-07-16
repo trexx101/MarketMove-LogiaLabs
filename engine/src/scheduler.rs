@@ -255,6 +255,7 @@ mod tests {
         for stmt in db::DDL.split(';').map(str::trim).filter(|s| !s.is_empty()) {
             sqlx::query(stmt).execute(&pool).await.unwrap();
         }
+        db::migrate_predictions(&pool).await.unwrap();
         pool
     }
 

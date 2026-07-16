@@ -44,7 +44,9 @@ COPY engine/ engine/
 COPY frontend/ frontend/
 
 # Build the actual binary.
-RUN cargo build --release --manifest-path engine/Cargo.toml \
+# Touch main.rs to force cargo to detect the source change from the placeholder.
+RUN touch engine/src/main.rs \
+    && cargo build --release --manifest-path engine/Cargo.toml \
     && strip target/release/engine \
     && cp target/release/engine /usr/local/bin/engine
 

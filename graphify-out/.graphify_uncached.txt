@@ -1,0 +1,43 @@
+/home/ubuntu/projects/MarketMoves/.agents/skills/find-skills/SKILL.md
+/home/ubuntu/projects/MarketMoves/.agents/skills/plan-to-features/SKILL.md
+/home/ubuntu/projects/MarketMoves/.agents/skills/prompt/plan-to-features-prompt.md
+/home/ubuntu/projects/MarketMoves/.agents/skills/rust-best-practices/SKILL.md
+/home/ubuntu/projects/MarketMoves/.agents/skills/rust-best-practices/references/chapter_01.md
+/home/ubuntu/projects/MarketMoves/.agents/skills/rust-best-practices/references/chapter_02.md
+/home/ubuntu/projects/MarketMoves/.agents/skills/rust-best-practices/references/chapter_03.md
+/home/ubuntu/projects/MarketMoves/.agents/skills/rust-best-practices/references/chapter_04.md
+/home/ubuntu/projects/MarketMoves/.agents/skills/rust-best-practices/references/chapter_05.md
+/home/ubuntu/projects/MarketMoves/.agents/skills/rust-best-practices/references/chapter_06.md
+/home/ubuntu/projects/MarketMoves/.agents/skills/rust-best-practices/references/chapter_07.md
+/home/ubuntu/projects/MarketMoves/.agents/skills/rust-best-practices/references/chapter_08.md
+/home/ubuntu/projects/MarketMoves/.agents/skills/rust-best-practices/references/chapter_09.md
+/home/ubuntu/projects/MarketMoves/.agents/skills/technical-analysis/SKILL.md
+/home/ubuntu/projects/MarketMoves/AGENTS.md
+/home/ubuntu/projects/MarketMoves/DEPLOYMENT_SUMMARY.md
+/home/ubuntu/projects/MarketMoves/README.md
+/home/ubuntu/projects/MarketMoves/Training_model_Design.md
+/home/ubuntu/projects/MarketMoves/deploy/KRAKEN_KEYS.md
+/home/ubuntu/projects/MarketMoves/deploy/PROVISIONING.md
+/home/ubuntu/projects/MarketMoves/deploy/README.md
+/home/ubuntu/projects/MarketMoves/deploy/config.md
+/home/ubuntu/projects/MarketMoves/deploy/docker-compose.yml
+/home/ubuntu/projects/MarketMoves/frontend/README.md
+/home/ubuntu/projects/MarketMoves/frontend/index.html
+/home/ubuntu/projects/MarketMoves/inference/README.md
+/home/ubuntu/projects/MarketMoves/models/README.md
+/home/ubuntu/projects/MarketMoves/plans/market-markov-net/REQUIREMENTS.md
+/home/ubuntu/projects/MarketMoves/plans/market-markov-net/features/01 - repo scaffold.md
+/home/ubuntu/projects/MarketMoves/plans/market-markov-net/features/02 - vps hardening.md
+/home/ubuntu/projects/MarketMoves/plans/market-markov-net/features/03 - kraken credentials and config.md
+/home/ubuntu/projects/MarketMoves/plans/market-markov-net/features/04 - python inference microservice.md
+/home/ubuntu/projects/MarketMoves/plans/market-markov-net/features/05 - inference docker image.md
+/home/ubuntu/projects/MarketMoves/plans/market-markov-net/features/06 - rust data pipeline.md
+/home/ubuntu/projects/MarketMoves/plans/market-markov-net/features/07 - feature computation and zmq bridge.md
+/home/ubuntu/projects/MarketMoves/plans/market-markov-net/features/08 - logic engine.md
+/home/ubuntu/projects/MarketMoves/plans/market-markov-net/features/09 - execution layer.md
+/home/ubuntu/projects/MarketMoves/plans/market-markov-net/features/10 - axum telemetry api.md
+/home/ubuntu/projects/MarketMoves/plans/market-markov-net/features/11 - vanilla spa control room.md
+/home/ubuntu/projects/MarketMoves/plans/market-markov-net/features/12 - paper trading verification.md
+/home/ubuntu/projects/MarketMoves/plans/market-markov-net/features/13 - regression parity harness.md
+/home/ubuntu/projects/MarketMoves/plans/market-markov-net/features/14 - docker compose deploy and launch.md
+/home/ubuntu/projects/MarketMoves/tests/README.md
