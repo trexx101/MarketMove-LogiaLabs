@@ -67,6 +67,16 @@ impl Scheduler {
         let fetch_count = self.feature_window_size + 1;
         let candles = db::fetch_recent_candles(&self.pool, fetch_count).await?;
 
+        if candles.len() < self.feature_window_size + 1 {
+            warn!(
+                candle_ts,
+                count = candles.len(),
+                required = self.feature_window_size + 1,
+                "insufficient candles, skipping prediction"
+            );
+            return Ok(());
+        }
+
         let all_features = compute_features(&candles);
 
         // Take last feature_window_size rows (or all if fewer)
@@ -372,5 +382,26 @@ mod tests {
         let preds = db::fetch_recent_predictions(&pool, 1).await.unwrap();
         assert_eq!(preds.len(), 1);
         assert_eq!(preds[0].candle_ts, candle_ts);
+    }
+
+    /// With fewer candles than feature_window_size + 1, process() must skip
+    /// inference and return Ok without inserting a prediction.
+    #[tokio::test]
+    async fn process_skips_when_insufficient_candles() {
+        let pool = test_pool().await;
+        // Seed only 5 candles — less than feature_window_size(10) + 1 = 11
+        seed_candles(&pool, 5).await;
+
+        let mut sched = test_scheduler(pool.clone());
+        let candle_ts: i64 = 4 * 3600;
+
+        // Call process directly — bridge is None so if it reaches inference it will panic
+        // The guard should prevent that
+        let result = sched.process(candle_ts).await;
+        assert!(result.is_ok(), "process should return Ok when candles are insufficient");
+
+        // No prediction should have been inserted
+        let preds = db::fetch_recent_predictions(&pool, 1).await.unwrap();
+        assert_eq!(preds.len(), 0, "no prediction should be inserted when candles are insufficient");
     }
 }

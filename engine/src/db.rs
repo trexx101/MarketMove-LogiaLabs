@@ -463,6 +463,145 @@ pub async fn fetch_entry_trade_price(pool: &DbPool) -> Result<Option<f64>> {
     Ok(row.map(|r| r.get(0)))
 }
 
+/// Accuracy metrics computed over resolved predictions.
+#[derive(Debug, Clone)]
+pub struct AccuracyStats {
+    pub directional_1h: f64,
+    pub directional_4h: f64,
+    pub directional_24h: f64,
+    pub mae_1h: f64,
+    pub mae_4h: f64,
+    pub mae_24h: f64,
+    pub resolved_count: usize,
+}
+
+/// Fill in actual_1h/4h/24h for predictions where the future candle now exists.
+/// Returns the number of rows updated.
+pub async fn compute_actuals(pool: &DbPool) -> Result<u64> {
+    let mut updated: u64 = 0;
+
+    // Find predictions with at least one NULL actual
+    let rows = sqlx::query(
+        "SELECT p.candle_ts, p.id, p.actual_1h, p.actual_4h, p.actual_24h
+         FROM predictions p
+         WHERE p.actual_1h IS NULL OR p.actual_4h IS NULL OR p.actual_24h IS NULL"
+    )
+    .fetch_all(pool)
+    .await
+    .context("compute_actuals: fetch null predictions")?;
+
+    for row in &rows {
+        let candle_ts: i64 = row.get(0);
+        let pred_id: i64 = row.get(1);
+        let cur_1h: Option<f64> = row.get(2);
+        let cur_4h: Option<f64> = row.get(3);
+        let cur_24h: Option<f64> = row.get(4);
+
+        // Get the base candle's close price
+        let base_close: f64 = match sqlx::query("SELECT close FROM candles WHERE ts = ?")
+            .bind(candle_ts)
+            .fetch_optional(pool)
+            .await?
+        {
+            Some(r) => r.get(0),
+            None => continue,
+        };
+
+        let offsets: &[(i64, Option<f64>, &str)] = &[
+            (3600, cur_1h, "actual_1h"),
+            (14400, cur_4h, "actual_4h"),
+            (86400, cur_24h, "actual_24h"),
+        ];
+
+        for &(offset, current, col) in offsets {
+            if current.is_some() {
+                continue; // already computed
+            }
+            let future_ts = candle_ts + offset;
+            let future_close: Option<f64> = sqlx::query("SELECT close FROM candles WHERE ts = ?")
+                .bind(future_ts)
+                .fetch_optional(pool)
+                .await?
+                .map(|r| r.get(0));
+
+            if let Some(fc) = future_close {
+                if base_close > 0.0 {
+                    let actual = (fc / base_close).ln();
+                    let sql = format!("UPDATE predictions SET {col} = ? WHERE id = ?");
+                    sqlx::query(&sql)
+                        .bind(actual)
+                        .bind(pred_id)
+                        .execute(pool)
+                        .await
+                        .with_context(|| format!("compute_actuals: update {col}"))?;
+                    updated += 1;
+                }
+            }
+        }
+    }
+
+    Ok(updated)
+}
+
+/// Compute directional accuracy and MAE over resolved predictions.
+pub async fn fetch_accuracy(pool: &DbPool) -> Result<AccuracyStats> {
+    let rows = sqlx::query(
+        "SELECT pred_1h, pred_4h, pred_24h, actual_1h, actual_4h, actual_24h
+         FROM predictions
+         WHERE actual_1h IS NOT NULL OR actual_4h IS NOT NULL OR actual_24h IS NOT NULL"
+    )
+    .fetch_all(pool)
+    .await
+    .context("fetch_accuracy")?;
+
+    let mut count_1h: usize = 0;
+    let mut count_4h: usize = 0;
+    let mut count_24h: usize = 0;
+    let mut dir_1h: usize = 0;
+    let mut dir_4h: usize = 0;
+    let mut dir_24h: usize = 0;
+    let mut sum_ae_1h: f64 = 0.0;
+    let mut sum_ae_4h: f64 = 0.0;
+    let mut sum_ae_24h: f64 = 0.0;
+
+    for row in &rows {
+        let pred_1h: f64 = row.get(0);
+        let pred_4h: f64 = row.get(1);
+        let pred_24h: f64 = row.get(2);
+        let actual_1h: Option<f64> = row.get(3);
+        let actual_4h: Option<f64> = row.get(4);
+        let actual_24h: Option<f64> = row.get(5);
+
+        if let Some(a) = actual_1h {
+            count_1h += 1;
+            if (pred_1h >= 0.0) == (a >= 0.0) { dir_1h += 1; }
+            sum_ae_1h += (pred_1h - a).abs();
+        }
+        if let Some(a) = actual_4h {
+            count_4h += 1;
+            if (pred_4h >= 0.0) == (a >= 0.0) { dir_4h += 1; }
+            sum_ae_4h += (pred_4h - a).abs();
+        }
+        if let Some(a) = actual_24h {
+            count_24h += 1;
+            if (pred_24h >= 0.0) == (a >= 0.0) { dir_24h += 1; }
+            sum_ae_24h += (pred_24h - a).abs();
+        }
+    }
+
+    let resolved_count = rows.len();
+
+    Ok(AccuracyStats {
+        directional_1h: if count_1h > 0 { (dir_1h as f64 / count_1h as f64) * 100.0 } else { 0.0 },
+        directional_4h: if count_4h > 0 { (dir_4h as f64 / count_4h as f64) * 100.0 } else { 0.0 },
+        directional_24h: if count_24h > 0 { (dir_24h as f64 / count_24h as f64) * 100.0 } else { 0.0 },
+        mae_1h: if count_1h > 0 { sum_ae_1h / count_1h as f64 } else { 0.0 },
+        mae_4h: if count_4h > 0 { sum_ae_4h / count_4h as f64 } else { 0.0 },
+        mae_24h: if count_24h > 0 { sum_ae_24h / count_24h as f64 } else { 0.0 },
+        resolved_count,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,5 +669,73 @@ mod tests {
         assert!((row.pred_24h - 0.6).abs() < 1e-9);
         assert_eq!(row.features_json, "[1]");
         assert!((row.actual_1h.unwrap() - 42.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn compute_actuals_fills_null_columns() {
+        let pool = test_pool().await;
+        migrate_predictions(&pool).await.unwrap();
+
+        // Seed a base candle and future candles
+        upsert_candle(&pool, &Candle { ts: 1000, open: 100.0, high: 100.0, low: 100.0, close: 100.0, volume: 1.0, vwap: 100.0 }).await.unwrap();
+        upsert_candle(&pool, &Candle { ts: 4600, open: 110.0, high: 110.0, low: 110.0, close: 110.0, volume: 1.0, vwap: 110.0 }).await.unwrap();
+        upsert_candle(&pool, &Candle { ts: 15400, open: 105.0, high: 105.0, low: 105.0, close: 105.0, volume: 1.0, vwap: 105.0 }).await.unwrap();
+        upsert_candle(&pool, &Candle { ts: 87400, open: 95.0, high: 95.0, low: 95.0, close: 95.0, volume: 1.0, vwap: 95.0 }).await.unwrap();
+
+        // Insert a prediction
+        insert_prediction(&pool, 1000, 0.01, 0.02, 0.03, "[]").await.unwrap();
+
+        let updated = compute_actuals(&pool).await.unwrap();
+        assert!(updated > 0, "should have updated at least one actual");
+
+        let preds = fetch_recent_predictions(&pool, 1).await.unwrap();
+        assert!(preds[0].actual_1h.is_some(), "actual_1h should be filled");
+        assert!(preds[0].actual_4h.is_some(), "actual_4h should be filled");
+        assert!(preds[0].actual_24h.is_some(), "actual_24h should be filled");
+
+        // Verify 1h actual = ln(110/100)
+        let expected_1h = (110.0_f64 / 100.0).ln();
+        assert!((preds[0].actual_1h.unwrap() - expected_1h).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn compute_actuals_skips_unresolved_horizons() {
+        let pool = test_pool().await;
+        migrate_predictions(&pool).await.unwrap();
+
+        upsert_candle(&pool, &Candle { ts: 1000, open: 100.0, high: 100.0, low: 100.0, close: 100.0, volume: 1.0, vwap: 100.0 }).await.unwrap();
+        // Only add 1h candle, no 4h or 24h
+        upsert_candle(&pool, &Candle { ts: 4600, open: 110.0, high: 110.0, low: 110.0, close: 110.0, volume: 1.0, vwap: 110.0 }).await.unwrap();
+
+        insert_prediction(&pool, 1000, 0.01, 0.02, 0.03, "[]").await.unwrap();
+
+        compute_actuals(&pool).await.unwrap();
+
+        let preds = fetch_recent_predictions(&pool, 1).await.unwrap();
+        assert!(preds[0].actual_1h.is_some(), "actual_1h should be filled");
+        assert!(preds[0].actual_4h.is_none(), "actual_4h should remain NULL");
+        assert!(preds[0].actual_24h.is_none(), "actual_24h should remain NULL");
+    }
+
+    #[tokio::test]
+    async fn fetch_accuracy_computes_directional_and_mae() {
+        let pool = test_pool().await;
+        migrate_predictions(&pool).await.unwrap();
+
+        // Insert prediction with known actuals
+        insert_prediction(&pool, 1000, 0.01, 0.02, -0.03, "[]").await.unwrap();
+        sqlx::query("UPDATE predictions SET actual_1h = 0.015, actual_4h = -0.01, actual_24h = -0.025 WHERE candle_ts = 1000")
+            .execute(&pool).await.unwrap();
+
+        let stats = fetch_accuracy(&pool).await.unwrap();
+        assert_eq!(stats.resolved_count, 1);
+        // 1h: pred=0.01 (+), actual=0.015 (+) → direction match
+        assert!((stats.directional_1h - 100.0).abs() < 1e-9);
+        // 4h: pred=0.02 (+), actual=-0.01 (-) → mismatch
+        assert!((stats.directional_4h - 0.0).abs() < 1e-9);
+        // 24h: pred=-0.03 (-), actual=-0.025 (-) → match
+        assert!((stats.directional_24h - 100.0).abs() < 1e-9);
+        // MAE: |0.01 - 0.015| = 0.005
+        assert!((stats.mae_1h - 0.005).abs() < 1e-9);
     }
 }

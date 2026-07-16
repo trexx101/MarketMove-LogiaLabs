@@ -22,6 +22,19 @@ pub async fn backfill(pool: DbPool, symbol: &str, min_candles: usize) -> Result<
     Ok(())
 }
 
+/// Return how many seconds the latest candle is behind the current time.
+/// Returns u64::MAX if no candles exist.
+pub async fn staleness_secs(pool: &DbPool) -> Result<u64> {
+    match crate::db::latest_ts(pool).await? {
+        Some(ts) => {
+            let now = chrono::Utc::now().timestamp();
+            let gap = now.saturating_sub(ts);
+            Ok(gap.max(0) as u64)
+        }
+        None => Ok(u64::MAX),
+    }
+}
+
 /// Spawn the hourly retention task and run the persistent WebSocket loop.
 ///
 /// The retention task is a background job that prunes old rows every hour.
@@ -38,6 +51,22 @@ pub async fn run_ws_and_retention(pool: DbPool, symbol: &str) -> Result<()> {
                 Ok(n) if n > 0 => info!(pruned = n, "retention: removed old candles"),
                 Ok(_) => {}
                 Err(e) => tracing::warn!("retention prune error: {e:#}"),
+            }
+        }
+    });
+
+    // --- Staleness monitor (every 5 min) ---
+    let staleness_pool = pool.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        loop {
+            interval.tick().await;
+            match staleness_secs(&staleness_pool).await {
+                Ok(gap) if gap > 7200 => {
+                    tracing::warn!(staleness_secs = gap, "candle staleness: no confirmed candle in {gap}s");
+                }
+                Err(e) => tracing::warn!("staleness check error: {e:#}"),
+                _ => {}
             }
         }
     });
