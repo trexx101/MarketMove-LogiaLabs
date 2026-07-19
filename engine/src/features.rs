@@ -1,6 +1,15 @@
 use crate::db::Candle;
 
 /// Per-candle features that mirror the Colab training pipeline.
+///
+/// Feature contract (must stay byte-identical to the Colab `SwingTradingDataset`):
+///   - `log_return` = ln(close[t] / close[t-1]); 0.0 for the first candle.
+///   - `atr_72`     = simple rolling mean of True Range, window = 72.
+///   - `vwap_dev`   = ln(close / rolling_vwap) where `rolling_vwap` is the
+///                    Colab-style rolling VWAP = Σ(typical_price × volume) /
+///                    Σ(volume) over the same 72-window. We do NOT use the
+///                    exchange-reported `vwap` field — that diverges from the
+///                    training definition and silently shifts model inputs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FeatureRow {
     /// ln(close[t] / close[t-1]); 0.0 for the first candle.
@@ -8,7 +17,7 @@ pub struct FeatureRow {
     /// Rolling mean of True Range, window = 72, min_periods = 1
     /// (pandas-style simple rolling mean, **not** Wilder's EMA).
     pub atr_72: f64,
-    /// (close - vwap) / vwap; 0.0 when vwap == 0.0.
+    /// ln(close / rolling_vwap); 0.0 when rolling_vwap <= 0.0.
     pub vwap_dev: f64,
 }
 
@@ -60,11 +69,25 @@ pub fn compute_features(candles: &[Candle]) -> Vec<FeatureRow> {
         let slice = &tr[start..=i];
         let atr_72 = slice.iter().sum::<f64>() / slice.len() as f64;
 
-        // VWAP deviation
-        let vwap_dev = if c.vwap == 0.0 {
-            0.0
+        // Rolling VWAP (Colab definition): Σ(typical_price × volume) /
+        // Σ(volume) over the same 72-window. typical_price = (H + L + C) / 3.
+        // We deliberately do NOT use the exchange-reported `vwap` field.
+        let vstart = i.saturating_sub(WINDOW - 1);
+        let mut num = 0.0_f64;
+        let mut den = 0.0_f64;
+        for j in vstart..=i {
+            let cj = &candles[j];
+            let tp = (cj.high + cj.low + cj.close) / 3.0;
+            num += tp * cj.volume;
+            den += cj.volume;
+        }
+        let rolling_vwap = if den > 0.0 { num / den } else { 0.0 };
+
+        // vwap_dev = ln(close / rolling_vwap) — matches Colab np.log(close / vwap).
+        let vwap_dev = if rolling_vwap > 0.0 && c.close > 0.0 {
+            (c.close / rolling_vwap).ln()
         } else {
-            (c.close - c.vwap) / c.vwap
+            0.0
         };
 
         rows.push(FeatureRow {
@@ -110,11 +133,36 @@ mod tests {
             row.atr_72
         );
 
-        let expected_vwap_dev = (105.0 - 102.0) / 102.0;
+        // vwap_dev = ln(close / rolling_vwap). For a single candle the rolling
+        // VWAP equals typical_price = (H+L+C)/3.
+        let tp = (110.0 + 90.0 + 105.0) / 3.0;
+        let expected_vwap_dev = (105.0_f64 / tp).ln();
         assert!(
             (row.vwap_dev - expected_vwap_dev).abs() < 1e-12,
             "vwap_dev mismatch: expected {expected_vwap_dev}, got {}",
             row.vwap_dev
+        );
+    }
+
+    #[test]
+    fn compute_features_vwap_dev_is_log_of_close_over_rolling_vwap() {
+        // Two candles; verify rolling VWAP over the 72-window and the log form.
+        let c0 = candle(0, 100.0, 110.0, 90.0, 105.0, 1000.0, 102.0);
+        let c1 = candle(3600, 105.0, 115.0, 95.0, 110.0, 2000.0, 108.0);
+        let rows = compute_features(&[c0, c1]);
+        assert_eq!(rows.len(), 2);
+
+        // At index 1: rolling VWAP = Σ(tp*vol)/Σ(vol) over c0,c1.
+        let tp0 = (110.0 + 90.0 + 105.0) / 3.0; // 101.666...
+        let tp1 = (115.0 + 95.0 + 110.0) / 3.0; // 106.666...
+        let num = tp0 * 1000.0 + tp1 * 2000.0;
+        let den = 1000.0 + 2000.0;
+        let rvwap = num / den;
+        let expected = (110.0_f64 / rvwap).ln();
+        assert!(
+            (rows[1].vwap_dev - expected).abs() < 1e-12,
+            "vwap_dev at index 1 expected {expected}, got {}",
+            rows[1].vwap_dev
         );
     }
 
@@ -189,5 +237,89 @@ mod tests {
             (atr - 1.0).abs() < 1e-12,
             "atr_72 at index 79 should be 1.0, got {atr}"
         );
+    }
+
+    #[test]
+    fn compute_features_parity_contract_matches_colab() {
+        // Load the parity golden fixture (168h of candles) and assert that the
+        // engineered features obey the Colab `SwingTradingDataset` contract:
+        //   - vwap_dev == ln(close / rolling_vwap)  (rolling VWAP, NOT the
+        //     exchange-reported `vwap` field)
+        //   - rolling_vwap == Σ(typical_price*vol)/Σ(vol) over the 72-window
+        //   - atr_72 == simple rolling mean of True Range over the 72-window
+        use std::path::PathBuf;
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures/parity_golden_168h.json");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {:?}: {e}", path));
+        let v: serde_json::Value = serde_json::from_str(&text).expect("parse fixture");
+        let candles_json = v["candles"].as_array().expect("candles array");
+
+        let mut candles = Vec::with_capacity(candles_json.len());
+        for c in candles_json {
+            candles.push(Candle {
+                ts: c["ts"].as_i64().unwrap(),
+                open: c["open"].as_f64().unwrap(),
+                high: c["high"].as_f64().unwrap(),
+                low: c["low"].as_f64().unwrap(),
+                close: c["close"].as_f64().unwrap(),
+                volume: c["volume"].as_f64().unwrap(),
+                vwap: c["vwap"].as_f64().unwrap(),
+            });
+        }
+        assert!(candles.len() >= 80, "fixture too small");
+
+        let rows = compute_features(&candles);
+
+        // Verify at several indices >= 71 (where the full 72-window is available)
+        for i in (71..candles.len()).step_by(17) {
+            let c = &candles[i];
+            let row = &rows[i];
+
+            // Independent recomputation of rolling VWAP over [i-71 .. i].
+            let start = i - 71;
+            let mut num = 0.0_f64;
+            let mut den = 0.0_f64;
+            let mut tr_sum = 0.0_f64;
+            for j in start..=i {
+                let cj = &candles[j];
+                let tp = (cj.high + cj.low + cj.close) / 3.0;
+                num += tp * cj.volume;
+                den += cj.volume;
+                // True Range for j
+                let tr = if j == 0 {
+                    cj.high - cj.low
+                } else {
+                    let pc = candles[j - 1].close;
+                    (cj.high - cj.low)
+                        .max((cj.high - pc).abs())
+                        .max((cj.low - pc).abs())
+                };
+                tr_sum += tr;
+            }
+            let rvwap = num / den;
+            let expected_vwap_dev = (c.close / rvwap).ln();
+            assert!(
+                (row.vwap_dev - expected_vwap_dev).abs() < 1e-9,
+                "vwap_dev mismatch at {i}: got {}, expected {expected_vwap_dev}",
+                row.vwap_dev
+            );
+
+            // ATR is the simple rolling mean of TR over the 72-window.
+            let expected_atr = tr_sum / 72.0;
+            assert!(
+                (row.atr_72 - expected_atr).abs() < 1e-9,
+                "atr_72 mismatch at {i}: got {}, expected {expected_atr}",
+                row.atr_72
+            );
+
+            // Guard: if we accidentally used the candle `vwap` field instead of
+            // the rolling VWAP, this would differ. Enforce the rolling definition.
+            let wrong = (c.close / c.vwap).ln();
+            assert!(
+                (row.vwap_dev - wrong).abs() > 1e-6 || (rvwap - c.vwap).abs() < 1e-9,
+                "vwap_dev appears to use the candle vwap field at {i} — parity broken"
+            );
+        }
     }
 }
