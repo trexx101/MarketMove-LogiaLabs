@@ -44,7 +44,7 @@ function renderHistory(container, history) {
   const rows = history.slice(-10).reverse();
 
   let html = '<table class="pred-history">';
-  html += "<thead><tr><th>candle_ts</th><th>1H</th><th>4H</th><th>24H</th></tr></thead>";
+  html += "<thead><tr><th>candle_ts</th><th>1H</th><th>4H</th><th>24H</th><th>Act 1H</th><th>Act 4H</th><th>Act 24H</th></tr></thead>";
   html += "<tbody>";
   for (const row of rows) {
     html += "<tr>";
@@ -52,6 +52,9 @@ function renderHistory(container, history) {
     html += '<td class="' + predClass(row.pred_1h) + '">' + fmtPred(row.pred_1h) + "</td>";
     html += '<td class="' + predClass(row.pred_4h) + '">' + fmtPred(row.pred_4h) + "</td>";
     html += '<td class="' + predClass(row.pred_24h) + '">' + fmtPred(row.pred_24h) + "</td>";
+    html += '<td class="' + predClass(row.actual_1h) + '">' + fmtPred(row.actual_1h) + "</td>";
+    html += '<td class="' + predClass(row.actual_4h) + '">' + fmtPred(row.actual_4h) + "</td>";
+    html += '<td class="' + predClass(row.actual_24h) + '">' + fmtPred(row.actual_24h) + "</td>";
     html += "</tr>";
   }
   html += "</tbody></table>";

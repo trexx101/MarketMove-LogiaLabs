@@ -24,3 +24,7 @@ export function fetchPredictions() {
 export function fetchChart() {
   return request("/api/chart");
 }
+
+export function fetchAccuracy() {
+  return request("/api/accuracy");
+}

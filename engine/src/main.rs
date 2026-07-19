@@ -115,6 +115,23 @@ async fn main() {
         }
     });
 
+    // Spawn the hourly actuals-computation task. Runs every hour with a 5-min
+    // initial delay so it doesn't race the first scheduler tick. Follows the
+    // same pattern as the retention task in engine/src/data/mod.rs.
+    let actuals_pool = pool.clone();
+    tokio::spawn(async move {
+        // First tick 5 minutes from now, then every hour.
+        let start = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+        let mut interval = tokio::time::interval_at(start, std::time::Duration::from_secs(3600));
+        loop {
+            interval.tick().await;
+            match db::compute_actuals(&actuals_pool).await {
+                Ok(n) => info!(updated = n, "actuals: updated predictions"),
+                Err(e) => tracing::error!("actuals: compute error: {e:#}"),
+            }
+        }
+    });
+
     // Build and spawn the Axum telemetry server.
     let app = api::router(pool.clone(), &cfg);
     let bind_addr = format!("0.0.0.0:{}", cfg.http_port);

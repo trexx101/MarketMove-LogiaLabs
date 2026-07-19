@@ -38,6 +38,7 @@ pub fn router(pool: db::DbPool, config: &Config) -> Router {
     Router::new()
         .route("/api/status", get(handle_status))
         .route("/api/predictions", get(handle_predictions))
+        .route("/api/accuracy", get(handle_accuracy))
         .route("/api/chart", get(handle_chart))
         .layer(cors)
         .with_state(state)
@@ -64,6 +65,18 @@ struct StatusResponse {
     pred_1h: Option<f64>,
     pred_4h: Option<f64>,
     pred_24h: Option<f64>,
+    staleness_secs: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct AccuracyResponse {
+    directional_1h: f64,
+    directional_4h: f64,
+    directional_24h: f64,
+    mae_1h: f64,
+    mae_4h: f64,
+    mae_24h: f64,
+    resolved_count: usize,
 }
 
 #[derive(Serialize)]
@@ -151,6 +164,18 @@ async fn handle_status(State(state): State<AppState>) -> ApiResult<StatusRespons
         .map_err(|e| internal_error("fetch_recent_predictions", e))?;
     let latest_pred = predictions.first();
 
+    // Compute staleness of the latest candle, if any.
+    let staleness_secs = match db::latest_ts(pool)
+        .await
+        .map_err(|e| internal_error("latest_ts", e))?
+    {
+        Some(ts) => {
+            let now = chrono::Utc::now().timestamp();
+            now.saturating_sub(ts).max(0) as u64
+        }
+        None => u64::MAX,
+    };
+
     Ok(Json(StatusResponse {
         mode: state.trading_mode.to_string(),
         symbol: state.symbol,
@@ -163,6 +188,7 @@ async fn handle_status(State(state): State<AppState>) -> ApiResult<StatusRespons
         pred_1h: latest_pred.map(|p| p.pred_1h),
         pred_4h: latest_pred.map(|p| p.pred_4h),
         pred_24h: latest_pred.map(|p| p.pred_24h),
+        staleness_secs,
     }))
 }
 
@@ -204,6 +230,29 @@ async fn handle_chart(State(state): State<AppState>) -> ApiResult<ChartResponse>
     Ok(Json(ChartResponse {
         candles: candle_dtos,
         sma: sma_points,
+    }))
+}
+
+async fn handle_accuracy(State(state): State<AppState>) -> ApiResult<AccuracyResponse> {
+    let stats = db::fetch_accuracy(&state.pool)
+        .await
+        .map_err(|e| internal_error("fetch_accuracy", e))?;
+
+    if stats.resolved_count == 0 {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no resolved predictions yet".to_string(),
+        ));
+    }
+
+    Ok(Json(AccuracyResponse {
+        directional_1h: stats.directional_1h,
+        directional_4h: stats.directional_4h,
+        directional_24h: stats.directional_24h,
+        mae_1h: stats.mae_1h,
+        mae_4h: stats.mae_4h,
+        mae_24h: stats.mae_24h,
+        resolved_count: stats.resolved_count,
     }))
 }
 
@@ -290,6 +339,18 @@ mod tests {
         assert!(status.unrealized_pnl.is_none());
         assert!(status.last_candle_ts.is_none());
         assert!(status.pred_1h.is_none());
+        // No candles in the empty-state DB, so staleness should be u64::MAX.
+        assert_eq!(status.staleness_secs, u64::MAX);
+    }
+
+    #[tokio::test]
+    async fn accuracy_returns_503_when_no_resolved() {
+        let pool = test_pool().await;
+        let result = handle_accuracy(test_state(pool)).await;
+
+        let err = result.unwrap_err();
+        assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(err.1.contains("no resolved predictions"), "got: {}", err.1);
     }
 
     #[tokio::test]

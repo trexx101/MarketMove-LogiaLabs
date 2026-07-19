@@ -17,10 +17,11 @@
  * with the corresponding data.  Errors are logged but do not stop the loop.
  */
 
-import { fetchStatus, fetchPredictions, fetchChart } from "./api.js";
+import { fetchStatus, fetchPredictions, fetchChart, fetchAccuracy } from "./api.js";
 import * as statusView from "./views/status.js";
 import * as predictionsView from "./views/predictions.js";
 import * as chartView from "./views/chart.js";
+import * as accuracyView from "./views/accuracy.js";
 
 // ── View registry ──────────────────────────────────────────
 
@@ -29,6 +30,22 @@ const views = [
   { id: "predictions-panel", api: fetchPredictions, module: predictionsView },
   { id: "chart-panel", api: fetchChart, module: chartView },
 ];
+
+// Accuracy is polled less frequently (every 60s) since it only changes
+// when predictions resolve. The /api/accuracy endpoint may return 503
+// when no predictions have resolved yet — that's handled gracefully here.
+
+async function tickAccuracy() {
+  try {
+    const data = await fetchAccuracy();
+    const rootEl = document.getElementById("accuracy-panel");
+    accuracyView.render(rootEl, data);
+  } catch (err) {
+    // 503 (no resolved predictions) or any other error → render fallback
+    const rootEl = document.getElementById("accuracy-panel");
+    accuracyView.render(rootEl, null);
+  }
+}
 
 // ── Mode badge ─────────────────────────────────────────────
 
@@ -73,7 +90,12 @@ async function tick() {
 tick();
 const intervalId = setInterval(tick, 5000);
 
+// Accuracy polled every 60 seconds (separate, slower cadence)
+tickAccuracy();
+const accuracyIntervalId = setInterval(tickAccuracy, 60000);
+
 // Clean up on page hide (optional)
 window.addEventListener("pagehide", () => {
   clearInterval(intervalId);
+  clearInterval(accuracyIntervalId);
 });
