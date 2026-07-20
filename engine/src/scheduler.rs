@@ -300,6 +300,9 @@ mod tests {
                 close: price + 50.0,
                 volume: 1000.0,
                 vwap: price + 25.0,
+                funding_rate: 0.0,
+                basis_z: 0.0,
+                ob_imbalance: 0.0,
             }).await.unwrap();
         }
     }

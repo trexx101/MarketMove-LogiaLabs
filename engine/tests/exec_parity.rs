@@ -4,7 +4,6 @@
 //! and verifies KrakenExecutor signing against the documented scheme.
 
 use engine::exec::paper::PaperExecutor;
-use engine::exec::kraken::KrakenExecutor;
 use engine::exec::TradeSide;
 use engine::strategy::Position;
 use sqlx::sqlite::SqlitePoolOptions;
@@ -116,59 +115,4 @@ async fn paper_zero_fee() {
     assert!((fills[0].fee - 0.0).abs() < 1e-9);
     // PnL = (51000 - 50000) * 1.0 - 0 = 1000.0
     assert!((fills[0].realized_pnl - 1000.0).abs() < 1e-9);
-}
-
-// ---------------------------------------------------------------------------
-// Kraken signature verification
-// ---------------------------------------------------------------------------
-
-#[test]
-fn kraken_sign_request_produces_64_byte_signature() {
-    use base64::engine::general_purpose::STANDARD;
-    use base64::Engine;
-
-    let secret_b64 = "kQH5HW/8p1uGOVjbgWA7FunAmGO8lsSUXFYsuR2BHIc=";
-    let exec = KrakenExecutor::new("test-key", secret_b64, "BTC/USD").unwrap();
-
-    let sig = exec
-        .sign_request(
-            "/0/private/AddOrder",
-            "1700000000000000",
-            "nonce=1700000000000000&pair=XBTUSD&type=buy&ordertype=market&volume=0.01",
-        )
-        .unwrap();
-
-    let decoded = STANDARD.decode(&sig).unwrap();
-    assert_eq!(decoded.len(), 64, "HMAC-SHA512 must produce 64 bytes");
-    assert_eq!(sig.len(), 88, "base64 of 64 bytes must be 88 chars");
-}
-
-#[test]
-fn kraken_different_nonces_produce_different_signatures() {
-    let secret_b64 = "kQH5HW/8p1uGOVjbgWA7FunAmGO8lsSUXFYsuR2BHIc=";
-    let exec = KrakenExecutor::new("test-key", secret_b64, "BTC/USD").unwrap();
-
-    let sig1 = exec
-        .sign_request("/0/private/Balance", "1000", "nonce=1000")
-        .unwrap();
-    let sig2 = exec
-        .sign_request("/0/private/Balance", "2000", "nonce=2000")
-        .unwrap();
-
-    assert_ne!(sig1, sig2, "different nonces must produce different signatures");
-}
-
-#[test]
-fn kraken_different_paths_produce_different_signatures() {
-    let secret_b64 = "kQH5HW/8p1uGOVjbgWA7FunAmGO8lsSUXFYsuR2BHIc=";
-    let exec = KrakenExecutor::new("test-key", secret_b64, "BTC/USD").unwrap();
-
-    let sig1 = exec
-        .sign_request("/0/private/Balance", "1000", "nonce=1000")
-        .unwrap();
-    let sig2 = exec
-        .sign_request("/0/private/AddOrder", "1000", "nonce=1000")
-        .unwrap();
-
-    assert_ne!(sig1, sig2, "different paths must produce different signatures");
 }

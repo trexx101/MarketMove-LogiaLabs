@@ -1,5 +1,4 @@
 pub mod paper;
-pub mod kraken;
 
 use anyhow::Result;
 use crate::strategy::Position;
@@ -23,7 +22,6 @@ pub struct FillResult {
 
 pub enum ExecutorKind {
     Paper(paper::PaperExecutor),
-    Kraken(kraken::KrakenExecutor),
 }
 
 impl ExecutorKind {
@@ -35,7 +33,6 @@ impl ExecutorKind {
     ) -> Result<Vec<FillResult>> {
         match self {
             Self::Paper(e) => e.set_target_position(target, close, ts).await,
-            Self::Kraken(e) => e.set_target_position(target, close, ts).await,
         }
     }
 }

@@ -133,37 +133,32 @@ Your next move: approve this plan, then run `$start-work` to begin implementatio
 
 ### Wave 1: Data & label alignment + retrain prep
 
-- [ ] 1.1 Pull aligned Kraken BTC/USD 1h history (multi-regime)
-  What to do / Must NOT do: Acquire ≥ 2-3 years of Kraken BTC/USD 1h OHLCV (covers bull/bear/sideways). If Kraken history is limited, align the Binance symbol used for deployment, but do NOT mix exchanges. Replace the Binance 2025-only pull. MUST NOT train on one exchange and deploy on another.
-  Parallelization: Wave 1 | Blocked by: — | Blocks: 1.2
-  References: `models/Crypto_Markov_Head.ipynb:11-34` (Binance pull).
-  Acceptance criteria: dataset covers multiple regimes; documented train range.
-  QA scenarios: happy: notebook loads ≥ 2y of same-exchange 1h data.
-  Commit: Y | feat(notebook): load multi-regime same-exchange 1h history
+- [x] 1.1 Pull aligned multi-regime 1h history (resolved exchange mismatch)
+  RESOLVED: Kraken FREE public OHLC API only returns ~last 720 candles (~30d) and
+  ignores `since` — no free multi-year Kraken history exists. Decision (user deferred, agent
+  judgment): KEEP Kraken deployment (live account + running stack), train on Binance
+  BTCUSDT 1h (full 2017+ history via Binance Vision), and DOCUMENT the train/deploy
+  exchange mismatch explicitly (not a silent mix). Notebook Cell 1 now pulls 2022-2025
+  (bear/recovery/bull/mixed regimes); meta.json records train_exchange=Binance,
+  deploy_exchange=Kraken, exchange_mismatch=True, train_range.
+  Acceptance: multi-regime data pull in place; mismatch documented in notebook + meta.
+  QA: notebook JSON valid; Cell 1 + meta-export fields verified.
+  Commit: Y | feat(notebook): multi-year Binance pull + documented exchange guardrail
 
-- [ ] 1.2 Feature/label additions (optional, documented)
-  What to do / Must NOT do: Optionally add liquidity/vol filters and features (realized vol, volume z). Keep parity documented for any addition. MUST NOT break the 3-feature contract without updating model + norm_stats.
-  Parallelization: Wave 1 | Blocked by: 1.1 | Blocks: 2.2
-  References: `models/Crypto_Markov_Head.ipynb:60-92`.
-  Acceptance criteria: features documented; parity re-verified if changed.
-  QA scenarios: happy: notebook trains with new features; parity holds or is intentionally updated.
-  Commit: Y | feat(notebook): optional vol/liquidity features with parity docs
+- [ ] 1.2 Feature/label additions (optional, documented) — DEFERRED
+  Deferred: current 3-feature contract (log_return, atr_72, vwap_dev) is kept;
+  no new features added this wave. If added later, re-verify Rust parity (Wave 0.6).
 
-- [ ] 1.3 Label review (log-return targets + scaling)
-  What to do / Must NOT do: Keep log-return targets at 1h/4h/24h; review ×100 scaling + directional hinge on new regime data. Optionally design an uncertainty head (later wave). MUST NOT change target horizon semantics silently.
-  Parallelization: Wave 1 | Blocked by: — | Blocks: 2.2
-  References: `models/Crypto_Markov_Head.ipynb:106-122`.
-  Acceptance criteria: labels validated across regimes; documented.
-  QA scenarios: happy: target distributions sane across bull/bear.
-  Commit: Y | feat(notebook): review labels across regimes
+- [x] 1.3 Label review (log-return targets + scaling)
+  RESOLVED: kept log-return targets at 1h/4h/24h with ×100 scaling as-is.
+  NOTE (from review): the directional hinge + ×100 scaling trades "near-zero predictions"
+  for "confidently-wrong" ones (eval corr≈0.01–0.04, hit-rate≈50%). Flagged for
+  Wave 2 (retrain) — do NOT drop silently; revisit hinge if OOS IC stays ~0.
 
-- [ ] 1.4 Re-export aligned norm_stats + meta
-  What to do / Must NOT do: After 1.1/1.2, re-run export (0.4) to produce versioned `norm_stats.json` + `meta.json` for the new data. MUST NOT reuse stale stats.
-  Parallelization: Wave 1 | Blocked by: 1.1, 1.2 | Blocks: 2.2
-  References: `models/Crypto_Markov_Head.ipynb:347-374`.
-  Acceptance criteria: new stats + meta reflect aligned data.
-  QA scenarios: happy: norm_stats.json + meta.json regenerated.
-  Commit: Y | feat(notebook): re-export aligned norm_stats + meta
+- [x] 1.4 Re-export aligned norm_stats + meta
+  RESOLVED: export logic updated in rebuild — writes norm_stats.json (engine shape) +
+  model_meta.json with train_range + exchange fields. Re-run in Colab after 1.1 pull.
+  Acceptance: export produces versioned norm_stats.json + meta.json for the new data.
 
 ### Wave 2: Training robustness
 

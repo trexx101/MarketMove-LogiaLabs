@@ -385,6 +385,9 @@ mod tests {
                     close: *close,
                     volume: 1.0,
                     vwap: *close,
+                    funding_rate: 0.0,
+                    basis_z: 0.0,
+                    ob_imbalance: 0.0,
                 },
             )
             .await
@@ -417,6 +420,9 @@ mod tests {
                 close: 110.0,
                 volume: 1.0,
                 vwap: 110.0,
+                funding_rate: 0.0,
+                basis_z: 0.0,
+                ob_imbalance: 0.0,
             },
         )
         .await
@@ -449,8 +455,6 @@ mod tests {
                 sma_window: 3,
                 http_port: 0,
                 symbol: "BTC/USD".to_string(),
-                kraken_api_key: None,
-                kraken_api_secret: None,
                 database_url: ":memory:".to_string(),
                 norm_stats_path: "models/norm_stats.json".to_string(),
                 feature_window_size: 72,

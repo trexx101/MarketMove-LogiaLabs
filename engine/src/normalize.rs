@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::features::FeatureRow;
+use crate::features::core::{FeatureRowV2, FEATURE_DIM};
 
 /// Global z-score statistics for the three model features:
 /// index 0 → `log_return`, 1 → `atr_72`, 2 → `vwap_dev`.
@@ -39,6 +40,66 @@ pub fn normalize_row(feat: &FeatureRow, stats: &NormStats) -> [f64; 3] {
         };
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// V2 normalization (Wave 5) — schema_versioned, backward-compatible.
+// ---------------------------------------------------------------------------
+
+fn default_schema_version() -> u32 { 1 }
+
+/// V2 norm stats: supports both v1 (3 features, no schema field) and v2
+/// (FEATURE_DIM features, schema_version=2). `mean`/`std` are `Vec` to handle
+/// variable dimensionality at deserialization time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NormStatsV2 {
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    pub mean: Vec<f64>,
+    pub std: Vec<f64>,
+}
+
+impl NormStatsV2 {
+    /// Load V2 norm stats from a JSON file. Accepts both v1 (3-feature) and
+    /// v2 (N-feature) shapes; validates dimensionality against `FEATURE_DIM`.
+    pub fn load(path: &str) -> Result<Self> {
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("reading norm stats v2 file: {path}"))?;
+        let stats: NormStatsV2 = serde_json::from_str(&text)
+            .with_context(|| format!("parsing norm stats v2 JSON from: {path}"))?;
+
+        if stats.schema_version == 1 {
+            if stats.mean.len() != 3 || stats.std.len() != 3 {
+                anyhow::bail!("v1 schema requires exactly 3 features, got {}", stats.mean.len());
+            }
+        } else if stats.schema_version == 2 {
+            if stats.mean.len() != FEATURE_DIM || stats.std.len() != FEATURE_DIM {
+                anyhow::bail!(
+                    "v2 schema requires exactly {} features, got {}",
+                    FEATURE_DIM,
+                    stats.mean.len()
+                );
+            }
+        } else {
+            anyhow::bail!("unsupported schema_version: {}", stats.schema_version);
+        }
+
+        Ok(stats)
+    }
+
+    /// Normalize a V2 feature row into the fixed-size array for inference.
+    pub fn normalize_row_v2(&self, feat: &FeatureRowV2) -> Result<[f64; FEATURE_DIM]> {
+        if self.schema_version != 2 {
+            anyhow::bail!("attempted to normalize V2 features with non-v2 stats");
+        }
+        let raw = feat.to_array();
+        let mut out = [0.0_f64; FEATURE_DIM];
+        for i in 0..FEATURE_DIM {
+            let s = if self.std[i] == 0.0 { 1.0 } else { self.std[i] };
+            out[i] = (raw[i] - self.mean[i]) / s;
+        }
+        Ok(out)
+    }
 }
 
 // ---------------------------------------------------------------------------

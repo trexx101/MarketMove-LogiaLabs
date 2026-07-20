@@ -13,7 +13,7 @@ use engine::normalize::{normalize_row, NormStats};
 
 /// Candle constructor helper.
 fn c(ts: i64, open: f64, high: f64, low: f64, close: f64, volume: f64, vwap: f64) -> Candle {
-    Candle { ts, open, high, low, close, volume, vwap }
+    Candle { ts, open, high, low, close, volume, vwap, funding_rate: 0.0, basis_z: 0.0, ob_imbalance: 0.0 }
 }
 
 /// Normalization stats as exported from training (from `models/norm_stats.json`).

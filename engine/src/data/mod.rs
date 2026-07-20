@@ -1,5 +1,4 @@
-pub mod rest;
-pub mod ws;
+pub mod binance;
 
 use anyhow::Result;
 use tracing::info;
@@ -17,7 +16,7 @@ pub const RETENTION_CANDLES: usize = 250;
 /// the DB has enough history, the first inference tick will see `seq_len=1`
 /// and every downstream computation will be wrong.
 pub async fn backfill(pool: DbPool, symbol: &str, min_candles: usize) -> Result<()> {
-    let seeded = rest::backfill(&pool, symbol, min_candles).await?;
+    let seeded = binance::backfill(&pool, symbol, min_candles).await?;
     info!(seeded, "REST backfill complete");
     Ok(())
 }
@@ -72,5 +71,5 @@ pub async fn run_ws_and_retention(pool: DbPool, symbol: &str) -> Result<()> {
     });
 
     // --- 2. WebSocket loop ---
-    ws::run_loop(&pool, symbol).await
+    binance::run_loop(&pool, symbol).await
 }

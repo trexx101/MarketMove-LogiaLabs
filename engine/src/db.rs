@@ -7,13 +7,16 @@ pub type DbPool = SqlitePool;
 
 pub const DDL: &str = r#"
 CREATE TABLE IF NOT EXISTS candles (
-    ts      INTEGER PRIMARY KEY,
-    open    REAL    NOT NULL,
-    high    REAL    NOT NULL,
-    low     REAL    NOT NULL,
-    close   REAL    NOT NULL,
-    volume  REAL    NOT NULL,
-    vwap    REAL    NOT NULL
+    ts           INTEGER PRIMARY KEY,
+    open         REAL    NOT NULL,
+    high         REAL    NOT NULL,
+    low          REAL    NOT NULL,
+    close        REAL    NOT NULL,
+    volume       REAL    NOT NULL,
+    vwap         REAL    NOT NULL,
+    funding_rate REAL    NOT NULL DEFAULT 0,
+    basis_z      REAL    NOT NULL DEFAULT 0,
+    ob_imbalance REAL    NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS candles_ts_idx ON candles (ts DESC);
 CREATE TABLE IF NOT EXISTS predictions (
@@ -66,6 +69,12 @@ pub struct Candle {
     pub close: f64,
     pub volume: f64,
     pub vwap: f64,
+    /// Binance perpetual funding rate (per funding interval). 0.0 if unknown.
+    pub funding_rate: f64,
+    /// Spot-vs-perp basis Z-score (computed from spot vs futures price). 0.0 if unknown.
+    pub basis_z: f64,
+    /// Order-book imbalance from the depth stream in [-1, 1]. 0.0 if unknown.
+    pub ob_imbalance: f64,
 }
 
 /// Open (or create) the SQLite database and apply the startup DDL.
@@ -121,21 +130,48 @@ pub async fn migrate_predictions(pool: &DbPool) -> Result<()> {
         }
     }
 
+    migrate_candles(pool).await?;
+
+    Ok(())
+}
+
+/// Add the V2 feature columns to `candles` if they don't exist (Wave 5).
+pub async fn migrate_candles(pool: &DbPool) -> Result<()> {
+    let rows = sqlx::query("PRAGMA table_info(candles)")
+        .fetch_all(pool)
+        .await
+        .context("PRAGMA table_info(candles)")?;
+    let existing: Vec<String> = rows.iter().map(|r| r.get::<String, _>(1)).collect();
+
+    for col in &["funding_rate", "basis_z", "ob_imbalance"] {
+        if !existing.iter().any(|name| name == col) {
+            let sql = format!("ALTER TABLE candles ADD COLUMN {col} REAL NOT NULL DEFAULT 0");
+            sqlx::query(&sql)
+                .execute(pool)
+                .await
+                .with_context(|| format!("adding column candles.{col}"))?;
+            info!("migrated candles: added column {col}");
+        }
+    }
+
     Ok(())
 }
 
 /// Insert or update a candle row identified by its open-time unix timestamp.
 pub async fn upsert_candle(pool: &DbPool, c: &Candle) -> Result<()> {
     sqlx::query(
-        "INSERT INTO candles (ts, open, high, low, close, volume, vwap)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+        "INSERT INTO candles (ts, open, high, low, close, volume, vwap, funding_rate, basis_z, ob_imbalance)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(ts) DO UPDATE SET
            open   = excluded.open,
            high   = excluded.high,
            low    = excluded.low,
            close  = excluded.close,
            volume = excluded.volume,
-           vwap   = excluded.vwap",
+           vwap   = excluded.vwap,
+           funding_rate = excluded.funding_rate,
+           basis_z      = excluded.basis_z,
+           ob_imbalance = excluded.ob_imbalance",
     )
     .bind(c.ts)
     .bind(c.open)
@@ -144,6 +180,9 @@ pub async fn upsert_candle(pool: &DbPool, c: &Candle) -> Result<()> {
     .bind(c.close)
     .bind(c.volume)
     .bind(c.vwap)
+    .bind(c.funding_rate)
+    .bind(c.basis_z)
+    .bind(c.ob_imbalance)
     .execute(pool)
     .await
     .context("upsert_candle")?;
@@ -219,7 +258,7 @@ pub async fn insert_prediction(
 /// Fetch the `limit` most recent candles, ordered oldest-first (ascending ts).
 pub async fn fetch_recent_candles(pool: &DbPool, limit: usize) -> Result<Vec<Candle>> {
     let rows = sqlx::query(
-        "SELECT ts, open, high, low, close, volume, vwap
+        "SELECT ts, open, high, low, close, volume, vwap, funding_rate, basis_z, ob_imbalance
          FROM candles
          ORDER BY ts DESC
          LIMIT ?",
@@ -239,6 +278,9 @@ pub async fn fetch_recent_candles(pool: &DbPool, limit: usize) -> Result<Vec<Can
             close: row.get(4),
             volume: row.get(5),
             vwap: row.get(6),
+            funding_rate: row.get(7),
+            basis_z: row.get(8),
+            ob_imbalance: row.get(9),
         })
         .collect();
 
@@ -434,7 +476,7 @@ pub async fn sum_realized_pnl(pool: &DbPool) -> Result<f64> {
 /// Return the most recent candle, or `None` if the table is empty.
 pub async fn fetch_latest_candle(pool: &DbPool) -> Result<Option<Candle>> {
     let row = sqlx::query(
-        "SELECT ts, open, high, low, close, volume, vwap
+        "SELECT ts, open, high, low, close, volume, vwap, funding_rate, basis_z, ob_imbalance
          FROM candles
          ORDER BY ts DESC
          LIMIT 1",
@@ -451,6 +493,9 @@ pub async fn fetch_latest_candle(pool: &DbPool) -> Result<Option<Candle>> {
         close: r.get(4),
         volume: r.get(5),
         vwap: r.get(6),
+        funding_rate: r.get(7),
+        basis_z: r.get(8),
+        ob_imbalance: r.get(9),
     }))
 }
 
@@ -677,10 +722,10 @@ mod tests {
         migrate_predictions(&pool).await.unwrap();
 
         // Seed a base candle and future candles
-        upsert_candle(&pool, &Candle { ts: 1000, open: 100.0, high: 100.0, low: 100.0, close: 100.0, volume: 1.0, vwap: 100.0 }).await.unwrap();
-        upsert_candle(&pool, &Candle { ts: 4600, open: 110.0, high: 110.0, low: 110.0, close: 110.0, volume: 1.0, vwap: 110.0 }).await.unwrap();
-        upsert_candle(&pool, &Candle { ts: 15400, open: 105.0, high: 105.0, low: 105.0, close: 105.0, volume: 1.0, vwap: 105.0 }).await.unwrap();
-        upsert_candle(&pool, &Candle { ts: 87400, open: 95.0, high: 95.0, low: 95.0, close: 95.0, volume: 1.0, vwap: 95.0 }).await.unwrap();
+        upsert_candle(&pool, &Candle { ts: 1000, open: 100.0, high: 100.0, low: 100.0, close: 100.0, volume: 1.0, vwap: 100.0, funding_rate: 0.0, basis_z: 0.0, ob_imbalance: 0.0 }).await.unwrap();
+        upsert_candle(&pool, &Candle { ts: 4600, open: 110.0, high: 110.0, low: 110.0, close: 110.0, volume: 1.0, vwap: 110.0, funding_rate: 0.0, basis_z: 0.0, ob_imbalance: 0.0 }).await.unwrap();
+        upsert_candle(&pool, &Candle { ts: 15400, open: 105.0, high: 105.0, low: 105.0, close: 105.0, volume: 1.0, vwap: 105.0, funding_rate: 0.0, basis_z: 0.0, ob_imbalance: 0.0 }).await.unwrap();
+        upsert_candle(&pool, &Candle { ts: 87400, open: 95.0, high: 95.0, low: 95.0, close: 95.0, volume: 1.0, vwap: 95.0, funding_rate: 0.0, basis_z: 0.0, ob_imbalance: 0.0 }).await.unwrap();
 
         // Insert a prediction
         insert_prediction(&pool, 1000, 0.01, 0.02, 0.03, "[]").await.unwrap();
@@ -703,9 +748,9 @@ mod tests {
         let pool = test_pool().await;
         migrate_predictions(&pool).await.unwrap();
 
-        upsert_candle(&pool, &Candle { ts: 1000, open: 100.0, high: 100.0, low: 100.0, close: 100.0, volume: 1.0, vwap: 100.0 }).await.unwrap();
+        upsert_candle(&pool, &Candle { ts: 1000, open: 100.0, high: 100.0, low: 100.0, close: 100.0, volume: 1.0, vwap: 100.0, funding_rate: 0.0, basis_z: 0.0, ob_imbalance: 0.0 }).await.unwrap();
         // Only add 1h candle, no 4h or 24h
-        upsert_candle(&pool, &Candle { ts: 4600, open: 110.0, high: 110.0, low: 110.0, close: 110.0, volume: 1.0, vwap: 110.0 }).await.unwrap();
+        upsert_candle(&pool, &Candle { ts: 4600, open: 110.0, high: 110.0, low: 110.0, close: 110.0, volume: 1.0, vwap: 110.0, funding_rate: 0.0, basis_z: 0.0, ob_imbalance: 0.0 }).await.unwrap();
 
         insert_prediction(&pool, 1000, 0.01, 0.02, 0.03, "[]").await.unwrap();
 

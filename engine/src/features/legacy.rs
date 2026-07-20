@@ -1,3 +1,10 @@
+//! Legacy V1 feature pipeline (3 OHLCV features).
+//!
+//! Retained during the Wave 5 overhaul so the engine keeps running the existing
+//! model unchanged. The V2 pipeline lives in the sibling modules
+//! (`core`, `crypto`, ...) and is activated only after the new model clears the
+//! walk-forward OOS IC gate.
+
 use crate::db::Candle;
 
 /// Per-candle features that mirror the Colab training pipeline.
@@ -108,7 +115,7 @@ mod tests {
     use super::*;
 
     fn candle(ts: i64, open: f64, high: f64, low: f64, close: f64, volume: f64, vwap: f64) -> Candle {
-        Candle { ts, open, high, low, close, volume, vwap }
+        Candle { ts, open, high, low, close, volume, vwap, funding_rate: 0.0, basis_z: 0.0, ob_imbalance: 0.0 }
     }
 
     #[test]
@@ -146,15 +153,13 @@ mod tests {
 
     #[test]
     fn compute_features_vwap_dev_is_log_of_close_over_rolling_vwap() {
-        // Two candles; verify rolling VWAP over the 72-window and the log form.
         let c0 = candle(0, 100.0, 110.0, 90.0, 105.0, 1000.0, 102.0);
         let c1 = candle(3600, 105.0, 115.0, 95.0, 110.0, 2000.0, 108.0);
         let rows = compute_features(&[c0, c1]);
         assert_eq!(rows.len(), 2);
 
-        // At index 1: rolling VWAP = Σ(tp*vol)/Σ(vol) over c0,c1.
-        let tp0 = (110.0 + 90.0 + 105.0) / 3.0; // 101.666...
-        let tp1 = (115.0 + 95.0 + 110.0) / 3.0; // 106.666...
+        let tp0 = (110.0 + 90.0 + 105.0) / 3.0;
+        let tp1 = (115.0 + 95.0 + 110.0) / 3.0;
         let num = tp0 * 1000.0 + tp1 * 2000.0;
         let den = 1000.0 + 2000.0;
         let rvwap = num / den;
@@ -183,7 +188,6 @@ mod tests {
 
     #[test]
     fn compute_features_atr_rolling_mean() {
-        // Five candles; compute TR manually and verify atr_72 at index 4 = mean(TR[0..=4]).
         let candles = vec![
             candle(0,    100.0, 105.0,  98.0, 103.0, 1000.0, 101.0),
             candle(3600, 103.0, 108.0, 101.0, 106.0, 1100.0, 104.0),
@@ -192,12 +196,11 @@ mod tests {
             candle(14400,113.0, 120.0, 111.0, 118.0, 1400.0, 115.0),
         ];
 
-        // Manually compute TR for each candle.
-        let tr0 = 105.0 - 98.0; // 7.0
-        let tr1 = (108.0_f64 - 101.0_f64).max((108.0_f64 - 103.0_f64).abs()).max((101.0_f64 - 103.0_f64).abs()); // max(7,5,2)=7
-        let tr2 = (112.0_f64 - 104.0_f64).max((112.0_f64 - 106.0_f64).abs()).max((104.0_f64 - 106.0_f64).abs()); // max(8,6,2)=8
-        let tr3 = (115.0_f64 - 107.0_f64).max((115.0_f64 - 109.0_f64).abs()).max((107.0_f64 - 109.0_f64).abs()); // max(8,6,2)=8
-        let tr4 = (120.0_f64 - 111.0_f64).max((120.0_f64 - 113.0_f64).abs()).max((111.0_f64 - 113.0_f64).abs()); // max(9,7,2)=9
+        let tr0 = 105.0 - 98.0;
+        let tr1 = (108.0_f64 - 101.0_f64).max((108.0_f64 - 103.0_f64).abs()).max((101.0_f64 - 103.0_f64).abs());
+        let tr2 = (112.0_f64 - 104.0_f64).max((112.0_f64 - 106.0_f64).abs()).max((104.0_f64 - 106.0_f64).abs());
+        let tr3 = (115.0_f64 - 107.0_f64).max((115.0_f64 - 109.0_f64).abs()).max((107.0_f64 - 109.0_f64).abs());
+        let tr4 = (120.0_f64 - 111.0_f64).max((120.0_f64 - 113.0_f64).abs()).max((111.0_f64 - 113.0_f64).abs());
 
         let expected_atr = (tr0 + tr1 + tr2 + tr3 + tr4) / 5.0;
 
@@ -211,12 +214,8 @@ mod tests {
 
     #[test]
     fn compute_features_atr_window_clamp() {
-        // 80 candles all with TR = 1.0; at index 79 the window clamps to 72 values → mean = 1.0.
         let mut candles = Vec::with_capacity(80);
-        // First candle: TR = high - low = 1.0
         candles.push(candle(0, 100.0, 101.0, 100.0, 100.5, 1000.0, 100.25));
-        // Remaining candles: set high = prev_close + 0.5, low = prev_close - 0.5,
-        // so TR = max(1.0, 0.5, 0.5) = 1.0 for each.
         for i in 1..80_i64 {
             let prev_close = 100.5;
             candles.push(candle(
@@ -241,12 +240,6 @@ mod tests {
 
     #[test]
     fn compute_features_parity_contract_matches_colab() {
-        // Load the parity golden fixture (168h of candles) and assert that the
-        // engineered features obey the Colab `SwingTradingDataset` contract:
-        //   - vwap_dev == ln(close / rolling_vwap)  (rolling VWAP, NOT the
-        //     exchange-reported `vwap` field)
-        //   - rolling_vwap == Σ(typical_price*vol)/Σ(vol) over the 72-window
-        //   - atr_72 == simple rolling mean of True Range over the 72-window
         use std::path::PathBuf;
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../tests/fixtures/parity_golden_168h.json");
@@ -265,18 +258,19 @@ mod tests {
                 close: c["close"].as_f64().unwrap(),
                 volume: c["volume"].as_f64().unwrap(),
                 vwap: c["vwap"].as_f64().unwrap(),
+                funding_rate: 0.0,
+                basis_z: 0.0,
+                ob_imbalance: 0.0,
             });
         }
         assert!(candles.len() >= 80, "fixture too small");
 
         let rows = compute_features(&candles);
 
-        // Verify at several indices >= 71 (where the full 72-window is available)
         for i in (71..candles.len()).step_by(17) {
             let c = &candles[i];
             let row = &rows[i];
 
-            // Independent recomputation of rolling VWAP over [i-71 .. i].
             let start = i - 71;
             let mut num = 0.0_f64;
             let mut den = 0.0_f64;
@@ -286,7 +280,6 @@ mod tests {
                 let tp = (cj.high + cj.low + cj.close) / 3.0;
                 num += tp * cj.volume;
                 den += cj.volume;
-                // True Range for j
                 let tr = if j == 0 {
                     cj.high - cj.low
                 } else {
@@ -305,7 +298,6 @@ mod tests {
                 row.vwap_dev
             );
 
-            // ATR is the simple rolling mean of TR over the 72-window.
             let expected_atr = tr_sum / 72.0;
             assert!(
                 (row.atr_72 - expected_atr).abs() < 1e-9,
@@ -313,8 +305,6 @@ mod tests {
                 row.atr_72
             );
 
-            // Guard: if we accidentally used the candle `vwap` field instead of
-            // the rolling VWAP, this would differ. Enforce the rolling definition.
             let wrong = (c.close / c.vwap).ln();
             assert!(
                 (row.vwap_dev - wrong).abs() > 1e-6 || (rvwap - c.vwap).abs() < 1e-9,

@@ -15,7 +15,7 @@ mod strategy;
 
 use std::process;
 
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -36,7 +36,6 @@ async fn main() {
     };
 
     info!(mode = %cfg.trading_mode, symbol = %cfg.symbol, "engine configured");
-    info!(key_present = cfg.kraken_api_key.is_some(), "kraken key status");
     info!(zmq = %cfg.zmq_endpoint, "inference endpoint");
     info!(
         threshold = cfg.magnitude_threshold,
@@ -66,25 +65,18 @@ async fn main() {
         }
     };
 
-    // Construct executor based on trading mode
+    // Construct executor based on trading mode.
+    // NOTE: Kraken is retired (Wave 5). The engine runs paper mode only; live
+    // execution will be re-added against Binance when the new model graduates
+    // the walk-forward OOS IC gate.
     let executor = match cfg.trading_mode {
         config::TradingMode::Paper => {
             info!(fee = cfg.paper_fee, "using paper executor");
             exec::ExecutorKind::Paper(exec::paper::PaperExecutor::new(pool.clone(), cfg.paper_fee))
         }
         config::TradingMode::Live => {
-            let key = cfg.kraken_api_key.as_deref().expect("live mode requires key");
-            let secret = cfg.kraken_api_secret.as_deref().expect("live mode requires secret");
-            match exec::kraken::KrakenExecutor::new(key, secret, &cfg.symbol) {
-                Ok(k) => {
-                    info!(symbol = %cfg.symbol, "using Kraken executor");
-                    exec::ExecutorKind::Kraken(k)
-                }
-                Err(e) => {
-                    eprintln!("Kraken executor init error: {e:#}");
-                    process::exit(1);
-                }
-            }
+            warn!("TRADING_MODE=live requested but live execution is not yet wired to Binance; falling back to paper executor");
+            exec::ExecutorKind::Paper(exec::paper::PaperExecutor::new(pool.clone(), cfg.paper_fee))
         }
     };
 

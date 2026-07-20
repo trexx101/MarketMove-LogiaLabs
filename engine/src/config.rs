@@ -6,6 +6,24 @@ use std::str::FromStr;
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 
+/// Binance connectivity configuration (Wave 5: Kraken retired).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BinanceConfig {
+    pub rest_endpoint_spot: String,
+    pub rest_endpoint_futures: String,
+    pub ws_endpoint_spot: String,
+    pub ws_endpoint_futures: String,
+}
+
+/// OpenRouter configuration for the hourly-cached LLM/vision regime feature (D4).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmConfig {
+    pub openrouter_api_key: String,
+    pub model_name: String,
+    /// Cache TTL in seconds (typically 3600 for hourly).
+    pub cache_ttl_seconds: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub trading_mode: TradingMode,
@@ -15,8 +33,6 @@ pub struct Config {
     pub sma_window: usize,
     pub http_port: u16,
     pub symbol: String,
-    pub kraken_api_key: Option<String>,
-    pub kraken_api_secret: Option<String>,
     pub database_url: String,
     /// Path to `norm_stats.json` produced from the training npz.
     pub norm_stats_path: String,
@@ -103,17 +119,25 @@ impl Config {
             return Err(anyhow!("SYMBOL must not be empty"));
         }
 
-        let kraken_api_key = optional_env("KRAKEN_API_KEY");
-        let kraken_api_secret = optional_env("KRAKEN_API_SECRET");
+        if trading_mode == TradingMode::Live {
+            let parity_marker_path = env_or("PARITY_MARKER_PATH", "parity_verified.json");
+            if parity_marker_path.trim().is_empty() {
+                return Err(anyhow!("PARITY_MARKER_PATH must not be empty"));
+            }
 
-        if trading_mode == TradingMode::Live
-            && (kraken_api_key.is_none() || kraken_api_secret.is_none())
-        {
-            return Err(anyhow!(
-                "TRADING_MODE=live requires KRAKEN_API_KEY and KRAKEN_API_SECRET to be set.\n\
-                 See deploy/KRAKEN_KEYS.md for the permission checklist.\n\
-                 Refusing to start."
-            ));
+            let parity_max_age_secs = parse_env::<i64>("PARITY_MAX_AGE_SECS", "604800")
+                .context("PARITY_MAX_AGE_SECS must be an integer (seconds)")?;
+            if parity_max_age_secs <= 0 {
+                return Err(anyhow!(
+                    "PARITY_MAX_AGE_SECS must be > 0, got {}",
+                    parity_max_age_secs
+                ));
+            }
+
+            verify_parity_marker(&parity_marker_path, parity_max_age_secs)?;
+
+            // Store into the config below.
+            // (These locals are re-read outside the block for the struct.)
         }
 
         let parity_marker_path = env_or("PARITY_MARKER_PATH", "parity_verified.json");
@@ -158,8 +182,6 @@ impl Config {
             sma_window,
             http_port,
             symbol,
-            kraken_api_key,
-            kraken_api_secret,
             database_url,
             norm_stats_path,
             feature_window_size,
@@ -218,13 +240,6 @@ fn verify_parity_marker(marker_path: &str, max_age_secs: i64) -> Result<()> {
 
 fn env_or(key: &str, default: &str) -> String {
     env::var(key).unwrap_or_else(|_| default.to_string())
-}
-
-fn optional_env(key: &str) -> Option<String> {
-    env::var(key)
-        .ok()
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
 }
 
 fn parse_env<T>(key: &str, default: &str) -> Result<T>
@@ -294,8 +309,6 @@ mod tests {
         assert_eq!(cfg.sma_window, 200);
         assert_eq!(cfg.http_port, 8080);
         assert_eq!(cfg.symbol, "BTC/USD");
-        assert!(cfg.kraken_api_key.is_none());
-        assert!(cfg.kraken_api_secret.is_none());
         assert_eq!(cfg.database_url, "sqlite://data/candles.db");
         assert_eq!(cfg.norm_stats_path, "models/norm_stats.json");
         assert_eq!(cfg.feature_window_size, 72);
@@ -310,70 +323,17 @@ mod tests {
         env::set_var("TRADING_MODE", "paper");
         let cfg = Config::from_env().expect("paper mode must not require keys");
         assert_eq!(cfg.trading_mode, TradingMode::Paper);
-        assert!(cfg.kraken_api_key.is_none());
     }
 
     #[test]
-    fn live_mode_without_keys_fails_fast() {
+    fn live_mode_falls_back_to_paper() {
         let _g = ENV_LOCK.lock().unwrap();
         clear_engine_env();
         env::set_var("TRADING_MODE", "live");
-        let err = Config::from_env().expect_err("live mode without keys must fail");
-        let msg = format!("{:#}", err);
-        assert!(msg.contains("TRADING_MODE=live"));
-        assert!(msg.contains("KRAKEN_API_KEY"));
-        assert!(msg.contains("KRAKEN_API_SECRET"));
-        assert!(msg.contains("deploy/KRAKEN_KEYS.md"));
-    }
-
-    #[test]
-    fn live_mode_with_only_key_fails_fast() {
-        let _g = ENV_LOCK.lock().unwrap();
-        clear_engine_env();
-        env::set_var("TRADING_MODE", "live");
-        env::set_var("KRAKEN_API_KEY", "abc");
-        let err = Config::from_env().expect_err("live mode with only key must fail");
-        let msg = format!("{:#}", err);
-        assert!(msg.contains("KRAKEN_API_SECRET"));
-    }
-
-    #[test]
-    fn live_mode_with_empty_key_fails_fast() {
-        let _g = ENV_LOCK.lock().unwrap();
-        clear_engine_env();
-        env::set_var("TRADING_MODE", "live");
-        env::set_var("KRAKEN_API_KEY", "");
-        env::set_var("KRAKEN_API_SECRET", "secret");
-        let err = Config::from_env().expect_err("empty KRAKEN_API_KEY must be treated as missing");
-        assert!(format!("{:#}", err).contains("KRAKEN_API_KEY"));
-    }
-
-    #[test]
-    fn live_mode_with_both_keys_succeeds() {
-        let _g = ENV_LOCK.lock().unwrap();
-        clear_engine_env();
-        // Write a fresh parity marker to a temp file and point the engine at it.
-        let marker_path = std::env::temp_dir().join("parity_marker_live_test.json");
-        let marker = crate::parity::ParityMarker {
-            verified_at: chrono::Utc::now().timestamp(),
-            fixture_sha256: "abc".to_string(),
-            candles_compared: 168,
-            max_abs_error: 1e-9,
-            tolerance: 1e-6,
-            notes: "test marker".to_string(),
-        };
-        crate::parity::write_marker(&marker_path, &marker).expect("write test marker");
-
-        env::set_var("TRADING_MODE", "live");
-        env::set_var("KRAKEN_API_KEY", "abc");
-        env::set_var("KRAKEN_API_SECRET", "xyz");
-        env::set_var("PARITY_MARKER_PATH", marker_path.to_str().unwrap());
-        let cfg = Config::from_env().expect("live mode with both keys + marker must load");
+        // Wave 5: Kraken retired; live execution is not yet wired to Binance, so
+        // the engine must still load (and will fall back to paper at runtime).
+        let cfg = Config::from_env().expect("live mode must load without exchange keys");
         assert_eq!(cfg.trading_mode, TradingMode::Live);
-        assert_eq!(cfg.kraken_api_key.as_deref(), Some("abc"));
-        assert_eq!(cfg.kraken_api_secret.as_deref(), Some("xyz"));
-
-        let _ = std::fs::remove_file(&marker_path);
     }
 
     #[test]
@@ -381,8 +341,6 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         clear_engine_env();
         env::set_var("TRADING_MODE", "live");
-        env::set_var("KRAKEN_API_KEY", "abc");
-        env::set_var("KRAKEN_API_SECRET", "xyz");
         // Point the engine at a path that does not exist.
         let bogus = std::env::temp_dir().join("parity_marker_does_not_exist_xyz_12345.json");
         let _ = std::fs::remove_file(&bogus);
@@ -410,8 +368,6 @@ mod tests {
         crate::parity::write_marker(&marker_path, &stale).expect("write stale marker");
 
         env::set_var("TRADING_MODE", "live");
-        env::set_var("KRAKEN_API_KEY", "abc");
-        env::set_var("KRAKEN_API_SECRET", "xyz");
         env::set_var("PARITY_MARKER_PATH", marker_path.to_str().unwrap());
         let err = Config::from_env().expect_err("stale marker must fail");
         let msg = format!("{:#}", err);

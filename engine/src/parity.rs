@@ -62,6 +62,9 @@ impl From<GoldenCandle> for Candle {
             close: g.close,
             volume: g.volume,
             vwap: g.vwap,
+            funding_rate: 0.0,
+            basis_z: 0.0,
+            ob_imbalance: 0.0,
         }
     }
 }

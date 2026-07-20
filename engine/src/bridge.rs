@@ -4,6 +4,8 @@ use std::time::Duration;
 use tracing::{debug, warn};
 use zeromq::{ReqSocket, Socket, SocketRecv, SocketSend, ZmqMessage};
 
+use crate::features::core::FEATURE_DIM;
+
 /// Predictions returned by the inference service.
 #[derive(Debug, Clone)]
 pub struct Prediction {
@@ -120,6 +122,74 @@ impl ZmqBridge {
             }
         }
 
+        Err(last_err)
+    }
+
+    // -----------------------------------------------------------------------
+    // V2 inference path (Wave 5) — 6-dim feature window + schema_version.
+    // Dormant until the new model clears the walk-forward OOS IC gate.
+    // -----------------------------------------------------------------------
+
+    /// Send a V2 (6-dim) feature window to the inference service.
+    pub async fn predict_v2(
+        &mut self,
+        feature_window: &[[f64; FEATURE_DIM]],
+        timeout: Duration,
+    ) -> Result<Prediction> {
+        let payload = json!({
+            "schema_version": 2,
+            "feature_window": feature_window,
+        })
+        .to_string();
+        debug!(bytes = payload.len(), "sending V2 inference request");
+
+        let fut = async {
+            self.socket
+                .send(ZmqMessage::from(payload.clone()))
+                .await
+                .map_err(|e| anyhow!("ZMQ send failed: {e}"))?;
+            let reply: ZmqMessage = self
+                .socket
+                .recv()
+                .await
+                .map_err(|e| anyhow!("ZMQ recv failed: {e}"))?;
+            let bytes = reply.get(0).map(|b| b.as_ref()).unwrap_or(b"");
+            let value: serde_json::Value = serde_json::from_slice(bytes)
+                .map_err(|e| anyhow!("failed to parse response JSON: {e}"))?;
+            if let Some(err_msg) = value.get("error") {
+                return Err(anyhow!("inference service error: {err_msg}"));
+            }
+            Ok(Prediction {
+                pred_1h: value.get("pred_1h").and_then(|v| v.as_f64())
+                    .ok_or_else(|| anyhow!("missing or invalid field 'pred_1h'"))?,
+                pred_4h: value.get("pred_4h").and_then(|v| v.as_f64())
+                    .ok_or_else(|| anyhow!("missing or invalid field 'pred_4h'"))?,
+                pred_24h: value.get("pred_24h").and_then(|v| v.as_f64())
+                    .ok_or_else(|| anyhow!("missing or invalid field 'pred_24h'"))?,
+            })
+        };
+
+        tokio::time::timeout(timeout, fut)
+            .await
+            .map_err(|_| anyhow!("V2 inference request timed out after {timeout:?}"))?
+    }
+
+    /// V2 retry wrapper (mirrors `predict_with_retry`).
+    #[allow(dead_code)]
+    pub async fn predict_v2_with_retry(
+        &mut self,
+        feature_window: &[[f64; FEATURE_DIM]],
+        timeout: Duration,
+        retries: u32,
+    ) -> Result<Prediction> {
+        let total_attempts = retries + 1;
+        let mut last_err = anyhow!("no attempts made");
+        for _ in 1..=total_attempts {
+            match self.predict_v2(feature_window, timeout).await {
+                Ok(pred) => return Ok(pred),
+                Err(e) => last_err = e,
+            }
+        }
         Err(last_err)
     }
 }
