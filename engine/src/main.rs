@@ -107,6 +107,12 @@ async fn main() {
         }
     });
 
+    // Spawn the hourly LLM regime cache task (D4). Runs in background; never
+    // blocks the per-bar path. If OPENROUTER_API_KEY is unset, it's a no-op
+    // (reads 0.5 neutral). Configurable via LLM_MODEL, LLM_API_BASE, LLM_CACHE_TTL.
+    let llm_cfg = features::llm::LlmRegimeConfig::from_env();
+    features::llm::spawn_regime_cache_task(llm_cfg).await;
+
     // Spawn the hourly actuals-computation task. Runs every hour with a 5-min
     // initial delay so it doesn't race the first scheduler tick. Follows the
     // same pattern as the retention task in engine/src/data/mod.rs.
