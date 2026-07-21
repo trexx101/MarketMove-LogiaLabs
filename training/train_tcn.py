@@ -4,15 +4,12 @@
 # !pip install torch scikit-learn pandas numpy tqdm scipy
 
 D3: TCN training + walk-forward evaluation + deploy gate.
-Fixes from first Colab run (all predictions were neutral, IC=nan):
-- Widened horizons to 12/36/72 bars (12h/36h/72h) — more penetration events.
-- Tightened barrier k to c=0.15 * ATR (was 0.50).
-- Replaced separate classification+magnitude heads + focal loss with a SINGLE
-  signed-regression target (direction * magnitude) trained with plain MSE.
-  This eliminates the class-imbalance degeneracy (>99% neutral class).
-- compute_ic returns 0.0 (not nan) on zero-variance predictions.
-- Prints penetration rates + label stats before training so you can verify
-  labels aren't degenerate.
+Changes from previous run:
+- barrier_c = 0.5 (was 0.15 — barriers now wider, ~1% instead of 0.21%)
+- Magnitude targets clipped to [-3, 3] (was unbounded — 50x outliers dominated loss)
+- Uses fetch_features.py to load REAL funding_rate, basis_z, ob_imbalance
+  from Binance Futures API + CSV taker volume (was all zeros).
+- Signed-regression MSE (no focal loss, no class-imbalance degeneracy).
 
 Train with: python training/train_tcn.py
 """
@@ -27,13 +24,15 @@ from sklearn.model_selection import TimeSeriesSplit
 from torch.utils.data import Dataset, DataLoader
 from scipy.stats import pearsonr
 
+MAG_CLIP = 3.0
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 class Config:
-    seq_len = 72            # lookback bars (matches engine feature_window_size)
-    horizons = [12, 36, 72] # 12h / 36h / 72h lookahead for penetration
+    seq_len = 72
+    horizons = [12, 36, 72]  # 12h / 36h / 72h lookahead
     horizon_labels = ['H1', 'H2', 'H3']
-    barrier_c = 0.15       # k = c * ATR (narrower = more penetration events)
+    barrier_c = 0.5           # k = c * ATR / close (was 0.15)
     batch_size = 64
     epochs = 50
     lr = 1e-3
@@ -42,8 +41,8 @@ class Config:
     hidden_dim = 64
     n_folds = 5
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    ic_gate = 0.03          # min mean OOS IC to deploy
-    equity_gate = 0.0       # min OOS equity to deploy
+    ic_gate = 0.03
+    equity_gate = 0.0
 
 
 # ── TCN Model ──────────────────────────────────────────────────────────────────
@@ -59,7 +58,6 @@ class CausalConv1d(nn.Module):
 
 
 class TCN(nn.Module):
-    """TCN with a single signed-regression head per horizon."""
     def __init__(self, in_dim=6, hidden_dim=64, dropout=0.1, n_horizons=3):
         super().__init__()
         dilations = [1, 2, 4, 8, 16, 32]
@@ -78,21 +76,21 @@ class TCN(nn.Module):
         ])
 
     def forward(self, x):
-        # x: (batch, seq_len, in_dim) → (batch, in_dim, seq_len)
         x = x.permute(0, 2, 1)
-        feat = self.backbone(x)[:, :, -1]  # last timestep
+        feat = self.backbone(x)[:, :, -1]
         return [head(feat).squeeze(-1) for head in self.heads]
 
 
 # ── Dataset ────────────────────────────────────────────────────────────────────
 
 class WindowDataset(Dataset):
-    """Sliding-window: (seq_len, 6) → 3 signed-regression targets."""
-    def __init__(self, X, labels_dict, seq_len, horizon_labels):
+    """Sliding-window: (seq_len, 6) → 3 signed-regression targets (clipped)."""
+    def __init__(self, X, labels_dict, seq_len, horizon_labels, mag_clip=MAG_CLIP):
         self.X = X
         self.labels = labels_dict
         self.seq_len = seq_len
         self.horizon_labels = horizon_labels
+        self.mag_clip = mag_clip
         self.n = len(X) - seq_len
 
     def __len__(self):
@@ -101,12 +99,12 @@ class WindowDataset(Dataset):
     def __getitem__(self, idx):
         window = torch.FloatTensor(self.X[idx: idx + self.seq_len])
         sample = {'features': window}
-        li = idx + self.seq_len  # label aligned with last bar of window
+        li = idx + self.seq_len
         for hkey in self.horizon_labels:
             dirs, mags = self.labels[hkey]
-            # Target = signed magnitude (direction * magnitude), already signed.
             if li < len(mags):
-                sample[f'target_{hkey}'] = torch.FloatTensor([mags[li]])
+                target = float(np.clip(mags[li], -self.mag_clip, self.mag_clip))
+                sample[f'target_{hkey}'] = torch.FloatTensor([target])
             else:
                 sample[f'target_{hkey}'] = torch.FloatTensor([0.0])
         return sample
@@ -116,7 +114,7 @@ class WindowDataset(Dataset):
 
 def compute_ic(preds, trues):
     if len(preds) < 2 or np.std(preds) < 1e-12 or np.std(trues) < 1e-12:
-        return 0.0  # not nan — 0 means no edge, gate eval stays sane
+        return 0.0
     return float(pearsonr(preds, trues)[0])
 
 
@@ -149,10 +147,9 @@ def train_walk_forward(X, labels_dict):
             for batch in train_loader:
                 feat = batch['features'].to(Config.device)
                 preds = model(feat)
-                loss = 0.0
-                for i, hkey in enumerate(Config.horizon_labels):
-                    target = batch[f'target_{hkey}'].to(Config.device).squeeze(-1)
-                    loss += loss_fn(preds[i], target)
+                loss = loss_fn(preds[0], batch[f'target_{Config.horizon_labels[0]}'].to(Config.device).squeeze(-1))
+                for i in range(1, len(Config.horizon_labels)):
+                    loss = loss + loss_fn(preds[i], batch[f'target_{Config.horizon_labels[i]}'].to(Config.device).squeeze(-1))
                 opt.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -205,57 +202,82 @@ def check_deploy_gate(fold_metrics):
     return False
 
 
+def _train_full(X, labels, norm_stats):
+    """Train final model on full dataset, export artifacts."""
+    full_ds = WindowDataset(X, labels, Config.seq_len, Config.horizon_labels)
+    full_loader = DataLoader(full_ds, batch_size=Config.batch_size, shuffle=False, drop_last=True)
+    model = TCN(in_dim=6, hidden_dim=Config.hidden_dim, dropout=Config.dropout,
+                n_horizons=len(Config.horizons)).to(Config.device)
+    opt = optim.AdamW(model.parameters(), lr=Config.lr, weight_decay=Config.weight_decay)
+    loss_fn = nn.MSELoss()
+    for epoch in range(Config.epochs):
+        model.train()
+        for batch in full_loader:
+            feat = batch['features'].to(Config.device)
+            preds = model(feat)
+            loss = loss_fn(preds[0], batch[f'target_{Config.horizon_labels[0]}'].to(Config.device).squeeze(-1))
+            for i in range(1, len(Config.horizon_labels)):
+                loss = loss + loss_fn(preds[i], batch[f'target_{Config.horizon_labels[i]}'].to(Config.device).squeeze(-1))
+            opt.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            opt.step()
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    os.makedirs("models", exist_ok=True)
+    torch.save(model.state_dict(), f"models/market_markov_net_v2_{ts}.pt")
+    with open(f"models/norm_stats_{ts}.json", 'w') as f:
+        json.dump(norm_stats, f, indent=2)
+    meta = {"train_date": ts, "features": 6, "horizons": Config.horizons,
+            "barrier_c": Config.barrier_c, "mag_clip": MAG_CLIP}
+    with open(f"models/model_meta_{ts}.json", 'w') as f:
+        json.dump(meta, f, indent=2)
+    print(f"Exported: models/market_markov_net_v2_{ts}.pt + norm_stats_{ts}.json + meta_{ts}.json")
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
     from labels import volatility_scaled_labels, build_feature_matrix
-    import pandas as pd
-    import glob
+    from fetch_features import fetch_and_merge_features
 
     data_dir = os.environ.get('DATA_DIR', '/content/drive/MyDrive/QuantData/BTCUSDT_1H')
-    all_files = sorted(glob.glob(os.path.join(data_dir, "*.csv")))
-    columns = ['open_time', 'open', 'high', 'low', 'close', 'volume', 'close_time',
-               'quote_vol', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore']
-    df_list = [pd.read_csv(f, names=columns) for f in all_files]
-    df = pd.concat(df_list, ignore_index=True)
-    df['open_time'] = df['open_time'].astype('int64')
-    df = df.sort_values('open_time').reset_index(drop=True)
+    spot_columns = ['open_time', 'open', 'high', 'low', 'close', 'volume', 'close_time',
+                    'quote_vol', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore']
 
-    if 'funding_rate' not in df.columns:
-        df['funding_rate'] = 0.0
-    if 'basis_z' not in df.columns:
-        df['basis_z'] = 0.0
-    if 'ob_imbalance' not in df.columns:
-        df['ob_imbalance'] = 0.0
-
-    print(f"Loaded {len(df)} candles from {len(all_files)} files")
+    # ── Load spot + fetch real funding/basis/ob data ───────────────────────────
+    print("=== Fetching real Binance Futures data (funding, basis, ob_imbalance) ===")
+    df = fetch_and_merge_features(data_dir, spot_columns, symbol="BTCUSDT")
+    print(f"Loaded {len(df)} candles\n")
 
     # ── Build features ─────────────────────────────────────────────────────────
     X, norm_stats = build_feature_matrix(df, lookback=Config.seq_len)
     print(f"Features: {X.shape}")
+    # Print feature stats so you can verify they're not all zeros
+    for i, name in enumerate(['vol_regime', 'vol_break', 'funding_rate', 'basis_z', 'llm_bull_prob', 'ob_imbalance']):
+        print(f"  {name}: mean={np.nanmean(X[:, i]):.6f} std={np.nanstd(X[:, i]):.6f}")
 
     # ── Build labels ───────────────────────────────────────────────────────────
     labels = volatility_scaled_labels(
         df, lookback=Config.seq_len, c=Config.barrier_c,
-        horizons_bars=tuple(Config.horizons),
+        horizons_bars=tuple(Config.horizons), mag_clip=MAG_CLIP,
     )
-    print(f"Labels: {len(labels['H1'][0])} samples  Embargo: {labels['embargo']}")
+    print(f"\nLabels: {len(labels['H1'][0])} samples  Embargo: {labels['embargo']}")
     print(f"Penetration rates: {labels['penetration_rates']}")
-    # Sanity: print label stats per horizon
     for hkey in Config.horizon_labels:
         dirs, mags = labels[hkey]
         n_up = int(np.sum(dirs > 0))
         n_dn = int(np.sum(dirs < 0))
         n_neutral = int(np.sum(dirs == 0))
         print(f"  {hkey}: up={n_up} down={n_dn} neutral={n_neutral} "
-              f"mag_mean={np.mean(mags):.4f} mag_std={np.std(mags):.4f}")
+              f"mag_mean={np.mean(mags):.4f} mag_std={np.std(mags):.4f} mag_max={np.max(np.abs(mags)):.1f}")
 
-    # Check for degenerate labels
     for hkey in Config.horizon_labels:
         pen_rate = labels['penetration_rates'][hkey]
         if pen_rate < 0.02:
-            print(f"WARNING: {hkey} penetration rate {pen_rate:.2%} is very low — "
-                  "consider widening horizons or tightening barrier c.")
+            print(f"WARNING: {hkey} penetration rate {pen_rate:.2%} is very low.")
+        if pen_rate > 0.95:
+            print(f"WARNING: {hkey} penetration rate {pen_rate:.2%} is very high — widen barrier c.")
 
     # ── Walk-forward training ─────────────────────────────────────────────────
     fold_metrics = train_walk_forward(X, labels)
@@ -265,36 +287,11 @@ def main():
     passes = check_deploy_gate(fold_metrics)
     if passes:
         print("DEPLOY GATE PASSED — training final model on full dataset")
-        # Train on full data
-        full_ds = WindowDataset(X, labels, Config.seq_len, Config.horizon_labels)
-        full_loader = DataLoader(full_ds, batch_size=Config.batch_size, shuffle=False, drop_last=True)
-        model = TCN(in_dim=6, hidden_dim=Config.hidden_dim, dropout=Config.dropout,
-                    n_horizons=len(Config.horizons)).to(Config.device)
-        opt = optim.AdamW(model.parameters(), lr=Config.lr, weight_decay=Config.weight_decay)
-        loss_fn = nn.MSELoss()
-        for epoch in range(Config.epochs):
-            model.train()
-            for batch in full_loader:
-                feat = batch['features'].to(Config.device)
-                preds = model(feat)
-                loss = loss_fn(preds[0], batch[f'target_{Config.horizon_labels[0]}'].to(Config.device).squeeze(-1))
-                for i in range(1, len(Config.horizon_labels)):
-                    loss += loss_fn(preds[i], batch[f'target_{Config.horizon_labels[i]}'].to(Config.device).squeeze(-1))
-                opt.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                opt.step()
-        # Export
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        os.makedirs("models", exist_ok=True)
-        torch.save(model.state_dict(), f"models/market_markov_net_v2_{ts}.pt")
-        with open(f"models/norm_stats_{ts}.json", 'w') as f:
-            json.dump(norm_stats, f, indent=2)
-        print(f"Exported: models/market_markov_net_v2_{ts}.pt + models/norm_stats_{ts}.json")
+        _train_full(X, labels, norm_stats)
     else:
         print("NO EDGE — DO NOT DEPLOY")
         print("Mean OOS IC did not exceed 0.03 on any horizon with positive equity.")
-        print("Reconsider alpha source (funding/basis/order-flow may not carry edge at this horizon).")
+        print("Reconsider alpha source or feature engineering.")
         exit(1)
 
 
