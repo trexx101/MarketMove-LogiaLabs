@@ -1,167 +1,88 @@
 #!/usr/bin/env python3
 """
-Fetches real Binance Futures data (funding rates, futures klines for basis)
-and computes order-flow imbalance from spot kline taker volume.
-
-Usage:
-    from fetch_features import fetch_and_merge_features
-    df = fetch_and_merge_features(data_dir, spot_columns)
-
-Or run standalone to produce a merged CSV:
-    python fetch_features.py --data-dir /path/to/BTCUSDT_1H --output merged.csv
+Fetches Binance Futures data from data.binance.vision ZIP downloads (no geo-block).
+Funding rates + futures klines. Also computes ob_imbalance from CSV taker volume.
 """
-import json
-import os
-import sys
-import time
-import urllib.request
+import json, os, time, urllib.request, zipfile, io, glob
 import numpy as np
 import pandas as pd
+from datetime import datetime, timedelta
 from typing import List
 
-
-# Binance Futures endpoints — try multiple to avoid geo-block (HTTP 451).
-FUTURES_ENDPOINTS = [
-    "https://fapi.binance.com",
-    "https://www.binance.com",
-    "https://data.binance.com",
-]
+VISION = "https://data.binance.vision/data/futures/um/daily"
 
 
-def _fetch_json(url: str, max_retries: int = 3) -> list:
-    """Fetch JSON from URL with retry."""
-    for attempt in range(max_retries):
+def _fetch_zip_url(url: str) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read()
+
+
+def _read_csv_from_zip(raw: bytes) -> pd.DataFrame:
+    with zipfile.ZipFile(io.BytesIO(raw)) as z:
+        return pd.read_csv(z.open(z.namelist()[0]), header=None)
+
+
+def fetch_binance_vision_funding(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """Daily funding rate ZIPs from data.binance.vision. No geo-block."""
+    all_days = []
+    cur = datetime.strptime(start_date, '%Y-%m-%d')
+    end = datetime.strptime(end_date, '%Y-%m-%d')
+    while cur <= end:
+        ds = cur.strftime('%Y-%m-%d')
+        url = f"{VISION}/fundingRate/{symbol}/{symbol}-fundingRate-{ds}.zip"
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                return json.loads(resp.read().decode())
-        except Exception as e:
-            if attempt < max_retries - 1:
-                print(f"  retry {attempt+1}/{max_retries}: {e}")
-                time.sleep(1)
-            else:
-                raise
+            raw = _fetch_zip_url(url)
+            df = _read_csv_from_zip(raw)
+            # Columns: symbol, fundingTime, fundingRate, markPrice
+            df.columns = ['symbol', 'funding_time_ms', 'funding_rate', 'mark_price']
+            df = df[['funding_time_ms', 'funding_rate']].astype({'funding_time_ms': 'int64', 'funding_rate': 'float64'})
+            all_days.append(df)
+        except Exception:
+            pass  # skip missing days (weekends, holidays)
+        cur += timedelta(days=1)
+        time.sleep(0.05)
+    return pd.concat(all_days, ignore_index=True).sort_values('funding_time_ms').reset_index(drop=True) if all_days else pd.DataFrame()
 
 
-def _try_endpoints(path: str) -> list:
-    """Try multiple Binance endpoints to avoid geo-block. Returns JSON or raises."""
-    last_err = None
-    for base in FUTURES_ENDPOINTS:
-        url = base + path
+def fetch_binance_vision_klines(symbol: str, interval: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """Daily futures kline ZIPs from data.binance.vision."""
+    all_days = []
+    cur = datetime.strptime(start_date, '%Y-%m-%d')
+    end = datetime.strptime(end_date, '%Y-%m-%d')
+    while cur <= end:
+        ds = cur.strftime('%Y-%m-%d')
+        url = f"{VISION}/klines/{symbol}/{interval}/{symbol}-{interval}-{ds}.zip"
         try:
-            return _fetch_json(url, max_retries=1)
-        except Exception as e:
-            last_err = e
-            print(f"  {base} failed: {e}")
-            continue
-    raise last_err
-
-
-def fetch_funding_rates(symbol: str, start_ms: int, end_ms: int) -> pd.DataFrame:
-    """
-    Fetch historical funding rates from Binance Futures.
-    Returns DataFrame with columns: [funding_time, funding_rate].
-    """
-    all_records = []
-    cursor = start_ms
-    while cursor < end_ms:
-        path = (f"/fapi/v1/fundingRate?symbol={symbol}"
-                f"&startTime={cursor}&endTime={end_ms}&limit=1000")
-        data = _try_endpoints(path)
-        if not data:
-            break
-        for r in data:
-            all_records.append({
-                'funding_time': int(r['fundingTime']),
-                'funding_rate': float(r['fundingRate']),
-            })
-        cursor = int(data[-1]['fundingTime']) + 1
-        if len(data) < 1000:
-            break
-        time.sleep(0.2)
-
-    if not all_records:
-        return pd.DataFrame(columns=['funding_time', 'funding_rate'])
-
-    df = pd.DataFrame(all_records)
-    df['funding_time'] = df['funding_time'].astype('int64')
-    return df.sort_values('funding_time').reset_index(drop=True)
-
-
-def fetch_futures_klines(symbol: str, interval: str, start_ms: int, end_ms: int) -> pd.DataFrame:
-    """
-    Fetch historical futures klines from Binance Futures.
-    Returns DataFrame with standard kline columns.
-    """
-    all_records = []
-    cursor = start_ms
-    while cursor < end_ms:
-        path = (f"/fapi/v1/klines?symbol={symbol}"
-                f"&interval={interval}&startTime={cursor}&endTime={end_ms}&limit=1000")
-        data = _try_endpoints(path)
-        if not data:
-            break
-        for r in data:
-            all_records.append({
-                'open_time': int(r[0]),
-                'open': float(r[1]),
-                'high': float(r[2]),
-                'low': float(r[3]),
-                'close': float(r[4]),
-                'volume': float(r[5]),
-                'close_time': int(r[6]),
-            })
-        cursor = int(data[-1][0]) + 1
-        if len(data) < 1000:
-            break
-        time.sleep(0.2)
-
-    if not all_records:
-        return pd.DataFrame(columns=['open_time', 'open', 'high', 'low', 'close', 'volume', 'close_time'])
-
-    df = pd.DataFrame(all_records)
-    df['open_time'] = df['open_time'].astype('int64')
-    return df.sort_values('open_time').reset_index(drop=True)
+            raw = _fetch_zip_url(url)
+            df = _read_csv_from_zip(raw)
+            df.columns = ['open_time', 'open', 'high', 'low', 'close', 'volume', 'close_time',
+                          'quote_vol', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore']
+            all_days.append(df[['open_time', 'close']].astype({'open_time': 'int64', 'close': 'float64'}))
+        except Exception:
+            pass
+        cur += timedelta(days=1)
+        time.sleep(0.05)
+    return pd.concat(all_days, ignore_index=True).drop_duplicates('open_time').sort_values('open_time').reset_index(drop=True) if all_days else pd.DataFrame()
 
 
 def compute_ob_imbalance(df: pd.DataFrame) -> pd.Series:
-    """
-    Order-flow imbalance from taker buy volume vs total volume.
-    ob_imbalance = (2 * taker_buy_base / volume) - 1
-    Range: [-1, 1] where +1 = all buys, -1 = all sells, 0 = balanced.
-    """
     vol = df['volume'].replace(0, np.nan)
-    ob = (2.0 * df['taker_buy_base'] / vol) - 1.0
-    return ob.fillna(0.0).clip(-1.0, 1.0)
+    return ((2.0 * df['taker_buy_base'] / vol) - 1.0).fillna(0.0).clip(-1.0, 1.0)
 
 
-def compute_basis_z(spot_close: pd.Series, futures_close: pd.Series, window: int = 72) -> pd.Series:
-    """
-    Basis = (futures_close - spot_close) / spot_close.
-    Z-scored over rolling window to normalize.
-    """
-    basis = (futures_close - spot_close) / spot_close
-    rolling_mean = basis.rolling(window=window, min_periods=10).mean()
-    rolling_std = basis.rolling(window=window, min_periods=10).std().replace(0, np.nan)
-    z = (basis - rolling_mean) / rolling_std
-    return z.fillna(0.0).clip(-5.0, 5.0)
+def compute_basis_z(sc: pd.Series, fc: pd.Series, window: int = 72) -> pd.Series:
+    b = (fc - sc) / sc
+    m = b.rolling(window, min_periods=10).mean()
+    s = b.rolling(window, min_periods=10).std().replace(0, np.nan)
+    return ((b - m) / s).fillna(0.0).clip(-5.0, 5.0)
 
 
-def fetch_and_merge_features(
-    data_dir: str,
-    spot_columns: List[str],
-    symbol: str = "BTCUSDT",
-) -> pd.DataFrame:
-    """
-    Load spot kline CSVs, fetch futures funding rates + futures klines,
-    compute funding_rate, basis_z, ob_imbalance, and merge into one DataFrame.
+def ms_to_date(ms: int) -> str:
+    return datetime.utcfromtimestamp(ms / 1000).strftime('%Y-%m-%d')
 
-    If funding/basis fetch fails (geo-block, network), falls back to 0.0
-    with a warning — the pipeline continues with ob_imbalance + vol features.
-    """
-    import glob
 
-    # ── 1. Load spot klines ──────────────────────────────────────────────────
+def fetch_and_merge_features(data_dir: str, spot_columns: List[str], symbol: str = "BTCUSDT") -> pd.DataFrame:
     all_files = sorted(glob.glob(os.path.join(data_dir, "*.csv")))
     df_list = [pd.read_csv(f, names=spot_columns) for f in all_files]
     df = pd.concat(df_list, ignore_index=True)
@@ -169,60 +90,40 @@ def fetch_and_merge_features(
     df = df.sort_values('open_time').reset_index(drop=True)
     print(f"Loaded {len(df)} spot candles from {len(all_files)} files")
 
-    # ── 2. Compute ob_imbalance from taker volume (already in CSV) ───────────
+    # ob_imbalance from CSV taker volume
     df['ob_imbalance'] = compute_ob_imbalance(df)
     print(f"ob_imbalance: mean={df['ob_imbalance'].mean():.4f} std={df['ob_imbalance'].std():.4f}")
 
-    # ── 3. Fetch funding rates from Binance Futures ──────────────────────────
-    # open_time in Binance CSVs is already in MILLISECONDS.
-    start_ms = int(df['open_time'].iloc[0])
-    end_ms = int(df['open_time'].iloc[-1]) + 3_600_000
-    print(f"Fetching funding rates {symbol} from {start_ms} to {end_ms}...")
-    try:
-        funding_df = fetch_funding_rates(symbol, start_ms, end_ms)
-    except Exception as e:
-        print(f"WARNING: funding rate fetch failed ({e}) — using 0.0")
-        funding_df = pd.DataFrame()
-
+    # Funding rates from Binance Vision ZIPs
+    start_ms, end_ms = int(df['open_time'].iloc[0]), int(df['open_time'].iloc[-1]) + 3_600_000
+    print(f"Fetching funding rates {symbol} from data.binance.vision...")
+    funding_df = fetch_binance_vision_funding(symbol, ms_to_date(start_ms), ms_to_date(end_ms))
     if len(funding_df) > 0:
-        # Forward-fill funding rate from 8h to 1h.
-        funding_df['funding_hour'] = funding_df['funding_time'] // 3_600_000
+        funding_df['funding_hour'] = funding_df['funding_time_ms'] // 3_600_000
         df['funding_hour'] = df['open_time'] // 3_600_000
-        # Merge: each spot bar gets the most recent funding rate.
         merged = df.merge(funding_df[['funding_hour', 'funding_rate']], on='funding_hour', how='left')
-        merged['funding_rate'] = merged['funding_rate'].ffill().fillna(0.0)
-        df['funding_rate'] = merged['funding_rate']
+        df['funding_rate'] = merged['funding_rate'].ffill().fillna(0.0)
         df = df.drop(columns=['funding_hour'])
         print(f"funding_rate: mean={df['funding_rate'].mean():.6f} std={df['funding_rate'].std():.6f}")
     else:
-        print("WARNING: no funding rate data fetched — using 0.0")
-        df['funding_rate'] = 0.0
+        print("WARNING: no funding data — using 0.0"); df['funding_rate'] = 0.0
 
-    # ── 4. Fetch futures klines for basis calculation ────────────────────────
-    print(f"Fetching futures klines {symbol} 1h...")
-    try:
-        fut_df = fetch_futures_klines(symbol, "1h", start_ms, end_ms)
-    except Exception as e:
-        print(f"WARNING: futures klines fetch failed ({e}) — basis_z using 0.0")
-        fut_df = pd.DataFrame()
-
+    # Futures klines for basis_z
+    print("Fetching futures klines from data.binance.vision...")
+    fut_df = fetch_binance_vision_klines(symbol, "1h", ms_to_date(start_ms), ms_to_date(end_ms))
     if len(fut_df) > 0:
-        # Align by open_time (both are 1h bars starting at same hour).
-        df = df.merge(fut_df[['open_time', 'close']].rename(columns={'close': 'fut_close'}),
-                      on='open_time', how='left')
+        df = df.merge(fut_df.rename(columns={'close': 'fut_close'}), on='open_time', how='left')
         df['fut_close'] = df['fut_close'].ffill().fillna(df['close'])
         df['basis_z'] = compute_basis_z(df['close'], df['fut_close'], window=72)
         df = df.drop(columns=['fut_close'])
         print(f"basis_z: mean={df['basis_z'].mean():.4f} std={df['basis_z'].std():.4f}")
     else:
-        print("WARNING: no futures klines fetched — basis_z using 0.0")
-        df['basis_z'] = 0.0
+        print("WARNING: no futures klines — basis_z using 0.0"); df['basis_z'] = 0.0
 
-    # ── 5. Fill any remaining NaNs ────────────────────────────────────────────
     for col in ['funding_rate', 'basis_z', 'ob_imbalance']:
         df[col] = df[col].replace([np.inf, -np.inf], 0.0).fillna(0.0)
 
-    print(f"Final DataFrame: {df.shape} with columns: {[c for c in df.columns if c != 'ignore']}")
+    print(f"Final: {df.shape}")
     return df
 
 
@@ -232,9 +133,8 @@ if __name__ == "__main__":
     parser.add_argument("--data-dir", default=os.environ.get('DATA_DIR', '/content/drive/MyDrive/QuantData/BTCUSDT_1H'))
     parser.add_argument("--output", default="merged_features.csv")
     args = parser.parse_args()
-
-    columns = ['open_time', 'open', 'high', 'low', 'close', 'volume', 'close_time',
-               'quote_vol', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore']
-    df = fetch_and_merge_features(args.data_dir, columns)
+    cols = ['open_time', 'open', 'high', 'low', 'close', 'volume', 'close_time',
+            'quote_vol', 'trades', 'taker_buy_base', 'taker_buy_quote', 'ignore']
+    df = fetch_and_merge_features(args.data_dir, cols)
     df.to_csv(args.output, index=False)
-    print(f"Saved merged features to {args.output}")
+    print(f"Saved {args.output}")
