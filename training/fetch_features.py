@@ -20,15 +20,19 @@ import pandas as pd
 from typing import List
 
 
-FUTURES_REST = "https://fapi.binance.com"
-SPOT_REST = "https://api.binance.com"
+# Binance Futures endpoints — try multiple to avoid geo-block (HTTP 451).
+FUTURES_ENDPOINTS = [
+    "https://fapi.binance.com",
+    "https://www.binance.com",
+    "https://data.binance.com",
+]
 
 
 def _fetch_json(url: str, max_retries: int = 3) -> list:
     """Fetch JSON from URL with retry."""
     for attempt in range(max_retries):
         try:
-            req = urllib.request.Request(url)
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return json.loads(resp.read().decode())
         except Exception as e:
@@ -39,6 +43,20 @@ def _fetch_json(url: str, max_retries: int = 3) -> list:
                 raise
 
 
+def _try_endpoints(path: str) -> list:
+    """Try multiple Binance endpoints to avoid geo-block. Returns JSON or raises."""
+    last_err = None
+    for base in FUTURES_ENDPOINTS:
+        url = base + path
+        try:
+            return _fetch_json(url, max_retries=1)
+        except Exception as e:
+            last_err = e
+            print(f"  {base} failed: {e}")
+            continue
+    raise last_err
+
+
 def fetch_funding_rates(symbol: str, start_ms: int, end_ms: int) -> pd.DataFrame:
     """
     Fetch historical funding rates from Binance Futures.
@@ -47,9 +65,9 @@ def fetch_funding_rates(symbol: str, start_ms: int, end_ms: int) -> pd.DataFrame
     all_records = []
     cursor = start_ms
     while cursor < end_ms:
-        url = (f"{FUTURES_REST}/fapi/v1/fundingRate?symbol={symbol}"
-               f"&startTime={cursor}&endTime={end_ms}&limit=1000")
-        data = _fetch_json(url)
+        path = (f"/fapi/v1/fundingRate?symbol={symbol}"
+                f"&startTime={cursor}&endTime={end_ms}&limit=1000")
+        data = _try_endpoints(path)
         if not data:
             break
         for r in data:
@@ -60,7 +78,7 @@ def fetch_funding_rates(symbol: str, start_ms: int, end_ms: int) -> pd.DataFrame
         cursor = int(data[-1]['fundingTime']) + 1
         if len(data) < 1000:
             break
-        time.sleep(0.1)  # rate limit
+        time.sleep(0.2)
 
     if not all_records:
         return pd.DataFrame(columns=['funding_time', 'funding_rate'])
@@ -78,9 +96,9 @@ def fetch_futures_klines(symbol: str, interval: str, start_ms: int, end_ms: int)
     all_records = []
     cursor = start_ms
     while cursor < end_ms:
-        url = (f"{FUTURES_REST}/fapi/v1/klines?symbol={symbol}"
-               f"&interval={interval}&startTime={cursor}&endTime={end_ms}&limit=1000")
-        data = _fetch_json(url)
+        path = (f"/fapi/v1/klines?symbol={symbol}"
+                f"&interval={interval}&startTime={cursor}&endTime={end_ms}&limit=1000")
+        data = _try_endpoints(path)
         if not data:
             break
         for r in data:
@@ -96,7 +114,7 @@ def fetch_futures_klines(symbol: str, interval: str, start_ms: int, end_ms: int)
         cursor = int(data[-1][0]) + 1
         if len(data) < 1000:
             break
-        time.sleep(0.1)
+        time.sleep(0.2)
 
     if not all_records:
         return pd.DataFrame(columns=['open_time', 'open', 'high', 'low', 'close', 'volume', 'close_time'])
@@ -138,9 +156,8 @@ def fetch_and_merge_features(
     Load spot kline CSVs, fetch futures funding rates + futures klines,
     compute funding_rate, basis_z, ob_imbalance, and merge into one DataFrame.
 
-    Returns DataFrame with columns:
-        open_time, open, high, low, close, volume, close_time, quote_vol, trades,
-        taker_buy_base, taker_buy_quote, funding_rate, basis_z, ob_imbalance
+    If funding/basis fetch fails (geo-block, network), falls back to 0.0
+    with a warning — the pipeline continues with ob_imbalance + vol features.
     """
     import glob
 
@@ -157,15 +174,20 @@ def fetch_and_merge_features(
     print(f"ob_imbalance: mean={df['ob_imbalance'].mean():.4f} std={df['ob_imbalance'].std():.4f}")
 
     # ── 3. Fetch funding rates from Binance Futures ──────────────────────────
-    start_ms = int(df['open_time'].iloc[0]) * 1000
-    end_ms = int(df['open_time'].iloc[-1]) * 1000 + 3600_000
+    # open_time in Binance CSVs is already in MILLISECONDS.
+    start_ms = int(df['open_time'].iloc[0])
+    end_ms = int(df['open_time'].iloc[-1]) + 3_600_000
     print(f"Fetching funding rates {symbol} from {start_ms} to {end_ms}...")
-    funding_df = fetch_funding_rates(symbol, start_ms, end_ms)
+    try:
+        funding_df = fetch_funding_rates(symbol, start_ms, end_ms)
+    except Exception as e:
+        print(f"WARNING: funding rate fetch failed ({e}) — using 0.0")
+        funding_df = pd.DataFrame()
 
     if len(funding_df) > 0:
         # Forward-fill funding rate from 8h to 1h.
         funding_df['funding_hour'] = funding_df['funding_time'] // 3_600_000
-        df['funding_hour'] = df['open_time'] // 3600
+        df['funding_hour'] = df['open_time'] // 3_600_000
         # Merge: each spot bar gets the most recent funding rate.
         merged = df.merge(funding_df[['funding_hour', 'funding_rate']], on='funding_hour', how='left')
         merged['funding_rate'] = merged['funding_rate'].ffill().fillna(0.0)
@@ -178,7 +200,11 @@ def fetch_and_merge_features(
 
     # ── 4. Fetch futures klines for basis calculation ────────────────────────
     print(f"Fetching futures klines {symbol} 1h...")
-    fut_df = fetch_futures_klines(symbol, "1h", start_ms, end_ms)
+    try:
+        fut_df = fetch_futures_klines(symbol, "1h", start_ms, end_ms)
+    except Exception as e:
+        print(f"WARNING: futures klines fetch failed ({e}) — basis_z using 0.0")
+        fut_df = pd.DataFrame()
 
     if len(fut_df) > 0:
         # Align by open_time (both are 1h bars starting at same hour).
