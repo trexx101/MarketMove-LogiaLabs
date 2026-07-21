@@ -28,8 +28,9 @@ def fetch_binance_vision_funding(symbol: str, start_date: str, end_date: str) ->
 
     CSV format: calc_time (ms), funding_interval_hours (8), last_funding_rate (decimal).
     Records every 8h — forward-filled to hourly.
+    Returns: DataFrame with columns ['funding_time_ms', 'funding_rate'].
     """
-    all_months = []
+    rows = []  # list of (funding_time_ms, funding_rate) tuples
     start = pd.Timestamp(start_date)
     end = pd.Timestamp(end_date)
     cur = start.replace(day=1)
@@ -40,25 +41,25 @@ def fetch_binance_vision_funding(symbol: str, start_date: str, end_date: str) ->
             raw = _fetch_zip_url(url)
             with zipfile.ZipFile(io.BytesIO(raw)) as z:
                 df = pd.read_csv(z.open(z.namelist()[0]), header=0)
-            df['calc_time'] = pd.to_numeric(df['calc_time'], errors='coerce')
-            df['last_funding_rate'] = pd.to_numeric(df['last_funding_rate'], errors='coerce')
-            df = df.dropna(subset=['calc_time', 'last_funding_rate'])
-            df['calc_time'] = df['calc_time'].astype('int64')
-            # Binance records funding every 8h → resample to hourly forward-fill
-            df['datetime'] = pd.to_datetime(df['calc_time'], unit='ms')
-            df = df.set_index('datetime')[['last_funding_rate']].sort_index()
-            hourly = df.resample('1h').ffill()
-            hourly.index = (hourly.index.astype('int64') // 10**6).astype('int64')
-            hourly = hourly.rename(columns={'last_funding_rate': 'funding_rate'})
-            all_months.append(hourly)
+            times = pd.to_numeric(df['calc_time'], errors='coerce')
+            rates = pd.to_numeric(df['last_funding_rate'], errors='coerce')
+            for t, r in zip(times, rates):
+                if pd.notna(t) and pd.notna(r):
+                    rows.append((int(t), float(r)))
         except Exception as e:
             print(f"  skip {ms}: {e}")
         cur = (cur + pd.offsets.MonthEnd(1)) + pd.Timedelta(days=1)
         time.sleep(0.1)
-    if not all_months:
+    if not rows:
         return pd.DataFrame()
-    full = pd.concat(all_months).sort_index()
-    return full.reset_index().rename(columns={'index': 'funding_time_ms'})[['funding_time_ms', 'funding_rate']]
+    # Build dense 1h grid, forward-filling funding rates (recorded every 8h)
+    df = pd.DataFrame(rows, columns=['funding_time_ms', 'funding_rate'])
+    df = df.drop_duplicates('funding_time_ms').sort_values('funding_time_ms')
+    df['datetime'] = pd.to_datetime(df['funding_time_ms'], unit='ms')
+    df = df.set_index('datetime')[['funding_rate']].sort_index()
+    hourly = df.resample('1h').ffill().reset_index()
+    hourly['funding_time_ms'] = hourly['datetime'].astype('int64') // 10**6
+    return hourly[['funding_time_ms', 'funding_rate']]
 
 
 def fetch_binance_vision_klines(symbol: str, interval: str, start_date: str, end_date: str) -> pd.DataFrame:
