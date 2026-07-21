@@ -88,7 +88,7 @@ def volatility_scaled_labels(
     """
     df = df.copy()
     df['atr'] = compute_atr(df, window=lookback)
-    df['k'] = c * df['atr']
+    df['k'] = c * df['atr'] / df['close']
 
     max_horizon = max(horizons_bars)
     n = len(df)
