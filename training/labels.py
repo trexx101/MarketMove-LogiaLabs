@@ -66,8 +66,8 @@ def compute_atr(df: pd.DataFrame, window: int = 14) -> pd.Series:
 def volatility_scaled_labels(
     df: pd.DataFrame,
     lookback: int = 200,
-    c: float = 0.5,
-    horizons_bars: Tuple[int, int, int] = (60, 240, 1440),
+    c: float = 0.15,
+    horizons_bars: Tuple[int, int, int] = (12, 36, 72),
 ) -> Dict[str, np.ndarray]:
     """
     Compute volatility-scaled penetration labels for 1H/4H/24H horizons.
@@ -139,13 +139,21 @@ def volatility_scaled_labels(
     embargo = max(72, max_horizon + lookback)
     valid_slice = slice(lookback, n - max_horizon)
 
-    return {
-        '1H': (directions[60][valid_slice], magnitudes[60][valid_slice]),
-        '4H': (directions[240][valid_slice], magnitudes[240][valid_slice]),
-        '24H': (directions[1440][valid_slice], magnitudes[1440][valid_slice]),
-        'timestamps': df.index[valid_slice].values if hasattr(df.index, 'values') else np.arange(valid_slice.start, valid_slice.stop),
+    h_keys = list(horizons_bars)
+    h_labels = ['H1', 'H2', 'H3']
+
+    result = {
         'embargo': embargo,
+        'horizon_bars': horizons_bars,
+        'timestamps': df.index[valid_slice].values if hasattr(df.index, 'values') else np.arange(valid_slice.start, valid_slice.stop),
     }
+    pen_rates = {}
+    for h, lbl in zip(h_keys, h_labels):
+        result[lbl] = (directions[h][valid_slice], magnitudes[h][valid_slice])
+        pen_rates[lbl] = float(np.mean(directions[h][valid_slice] != 0))
+    result['penetration_rates'] = pen_rates
+
+    return result
 
 
 # ── Feature matrix ─────────────────────────────────────────────────────────────
@@ -205,8 +213,9 @@ if __name__ == "__main__":
 
     # Test label generation
     labels = volatility_scaled_labels(df, lookback=50, horizons_bars=(10, 20, 30))
-    assert len(labels['1H'][0]) > 0, "labels should be non-empty"
-    print(f"Label test passed: {len(labels['1H'][0])} samples, embargo={labels['embargo']}")
+    assert len(labels['H1'][0]) > 0, "labels should be non-empty"
+    print(f"Label test passed: {len(labels['H1'][0])} samples, embargo={labels['embargo']}")
+    print(f"Penetration rates: {labels['penetration_rates']}")
 
     # Test feature building
     X, stats = build_feature_matrix(df, lookback=50)
