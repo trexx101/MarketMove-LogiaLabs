@@ -79,7 +79,14 @@ def compute_basis_z(sc: pd.Series, fc: pd.Series, window: int = 72) -> pd.Series
 
 
 def ms_to_date(ms: int) -> str:
-    return datetime.utcfromtimestamp(ms / 1000).strftime('%Y-%m-%d')
+    """Convert epoch timestamp (in ms, µs, or seconds) to date string."""
+    # Handle auto-detection: if > 1e15 it's microseconds, if > 1e12 it's milliseconds.
+    ts = ms
+    if ts > 1_000_000_000_000_000:  # > 1e15 → microseconds
+        ts //= 1000
+    if ts > 1_000_000_000_000:     # > 1e12 → milliseconds
+        ts //= 1000
+    return datetime.utcfromtimestamp(ts).strftime('%Y-%m-%d')
 
 
 def fetch_and_merge_features(data_dir: str, spot_columns: List[str], symbol: str = "BTCUSDT") -> pd.DataFrame:
