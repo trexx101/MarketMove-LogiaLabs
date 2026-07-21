@@ -24,7 +24,7 @@ def _read_csv_from_zip(raw: bytes) -> pd.DataFrame:
 
 
 def fetch_binance_vision_funding(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """Daily funding rate ZIPs from data.binance.vision. No geo-block."""
+    """Daily funding rate ZIPs from data.binance.vision."""
     all_days = []
     cur = datetime.strptime(start_date, '%Y-%m-%d')
     end = datetime.strptime(end_date, '%Y-%m-%d')
@@ -33,13 +33,21 @@ def fetch_binance_vision_funding(symbol: str, start_date: str, end_date: str) ->
         url = f"{VISION}/fundingRate/{symbol}/{symbol}-fundingRate-{ds}.zip"
         try:
             raw = _fetch_zip_url(url)
-            df = _read_csv_from_zip(raw)
-            # Columns: symbol, fundingTime, fundingRate, markPrice
-            df.columns = ['symbol', 'funding_time_ms', 'funding_rate', 'mark_price']
-            df = df[['funding_time_ms', 'funding_rate']].astype({'funding_time_ms': 'int64', 'funding_rate': 'float64'})
+            with zipfile.ZipFile(io.BytesIO(raw)) as z:
+                df = pd.read_csv(z.open(z.namelist()[0]), header=0)
+            # Rename columns to match our expected format.
+            # Format: fundingTime (epoch ms), fundingRate (decimal).
+            df = df.rename(columns={
+                df.columns[1]: 'funding_time_ms',
+                df.columns[2]: 'funding_rate',
+            })
+            df['funding_time_ms'] = pd.to_numeric(df['funding_time_ms'], errors='coerce')
+            df['funding_rate'] = pd.to_numeric(df['funding_rate'], errors='coerce')
+            df = df.dropna(subset=['funding_time_ms'])[['funding_time_ms', 'funding_rate']]
+            df['funding_time_ms'] = df['funding_time_ms'].astype('int64')
             all_days.append(df)
         except Exception:
-            pass  # skip missing days (weekends, holidays)
+            pass
         cur += timedelta(days=1)
         time.sleep(0.05)
     return pd.concat(all_days, ignore_index=True).sort_values('funding_time_ms').reset_index(drop=True) if all_days else pd.DataFrame()

@@ -25,8 +25,8 @@ class Config:
     horizon_labels = ['H1', 'H2', 'H3']
     barrier_c = 2.0
     batch_size = 64
-    epochs = 50
-    lr = 1e-3
+    epochs = 150
+    lr = 5e-4
     weight_decay = 1e-4
     dropout = 0.1
     hidden_dim = 64
