@@ -57,7 +57,7 @@ def compute_atr(df: pd.DataFrame, window: int = 14) -> pd.Series:
     high_low = df['high'] - df['low']
     high_close = np.abs(df['high'] - df['close'].shift(1))
     low_close = np.abs(df['low'] - df['close'].shift(1))
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1).fillna(0)
     return tr.ewm(span=window, adjust=False).mean()
 
 

@@ -277,8 +277,9 @@ def main():
             for batch in full_loader:
                 feat = batch['features'].to(Config.device)
                 preds = model(feat)
-                loss = sum(loss_fn(preds[i], batch[f'target_{h}'].to(Config.device).squeeze(-1))
-                           for i, h in enumerate(Config.horizon_labels))
+                loss = loss_fn(preds[0], batch[f'target_{Config.horizon_labels[0]}'].to(Config.device).squeeze(-1))
+                for i in range(1, len(Config.horizon_labels)):
+                    loss += loss_fn(preds[i], batch[f'target_{Config.horizon_labels[i]}'].to(Config.device).squeeze(-1))
                 opt.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), 1.0)
