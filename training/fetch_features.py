@@ -24,33 +24,41 @@ def _read_csv_from_zip(raw: bytes) -> pd.DataFrame:
 
 
 def fetch_binance_vision_funding(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """Daily funding rate ZIPs from data.binance.vision."""
-    all_days = []
-    cur = datetime.strptime(start_date, '%Y-%m-%d')
-    end = datetime.strptime(end_date, '%Y-%m-%d')
+    """Monthly funding rate ZIPs from data.binance.vision.
+
+    CSV format: calc_time (ms), funding_interval_hours (8), last_funding_rate (decimal).
+    Records every 8h — forward-filled to hourly.
+    """
+    all_months = []
+    start = pd.Timestamp(start_date)
+    end = pd.Timestamp(end_date)
+    cur = start.replace(day=1)
     while cur <= end:
-        ds = cur.strftime('%Y-%m-%d')
-        url = f"{VISION}/fundingRate/{symbol}/{symbol}-fundingRate-{ds}.zip"
+        ms = cur.strftime('%Y-%m')
+        url = f"{VISION.replace('daily', 'monthly')}/fundingRate/{symbol}/{symbol}-fundingRate-{ms}.zip"
         try:
             raw = _fetch_zip_url(url)
             with zipfile.ZipFile(io.BytesIO(raw)) as z:
                 df = pd.read_csv(z.open(z.namelist()[0]), header=0)
-            # Rename columns to match our expected format.
-            # Format: fundingTime (epoch ms), fundingRate (decimal).
-            df = df.rename(columns={
-                df.columns[1]: 'funding_time_ms',
-                df.columns[2]: 'funding_rate',
-            })
-            df['funding_time_ms'] = pd.to_numeric(df['funding_time_ms'], errors='coerce')
-            df['funding_rate'] = pd.to_numeric(df['funding_rate'], errors='coerce')
-            df = df.dropna(subset=['funding_time_ms'])[['funding_time_ms', 'funding_rate']]
-            df['funding_time_ms'] = df['funding_time_ms'].astype('int64')
-            all_days.append(df)
-        except Exception:
-            pass
-        cur += timedelta(days=1)
-        time.sleep(0.05)
-    return pd.concat(all_days, ignore_index=True).sort_values('funding_time_ms').reset_index(drop=True) if all_days else pd.DataFrame()
+            df['calc_time'] = pd.to_numeric(df['calc_time'], errors='coerce')
+            df['last_funding_rate'] = pd.to_numeric(df['last_funding_rate'], errors='coerce')
+            df = df.dropna(subset=['calc_time', 'last_funding_rate'])
+            df['calc_time'] = df['calc_time'].astype('int64')
+            # Binance records funding every 8h → resample to hourly forward-fill
+            df['datetime'] = pd.to_datetime(df['calc_time'], unit='ms')
+            df = df.set_index('datetime')[['last_funding_rate']].sort_index()
+            hourly = df.resample('1h').ffill()
+            hourly.index = (hourly.index.astype('int64') // 10**6).astype('int64')
+            hourly = hourly.rename(columns={'last_funding_rate': 'funding_rate'})
+            all_months.append(hourly)
+        except Exception as e:
+            print(f"  skip {ms}: {e}")
+        cur = (cur + pd.offsets.MonthEnd(1)) + pd.Timedelta(days=1)
+        time.sleep(0.1)
+    if not all_months:
+        return pd.DataFrame()
+    full = pd.concat(all_months).sort_index()
+    return full.reset_index().rename(columns={'index': 'funding_time_ms'})[['funding_time_ms', 'funding_rate']]
 
 
 def fetch_binance_vision_klines(symbol: str, interval: str, start_date: str, end_date: str) -> pd.DataFrame:
