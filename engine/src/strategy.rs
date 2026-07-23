@@ -122,6 +122,75 @@ pub fn next_position(current: Position, input: &SignalInput, params: &StrategyPa
 }
 
 // ---------------------------------------------------------------------------
+// Equities strategy (Wave C) — daily horizons, long/flat only
+// ---------------------------------------------------------------------------
+
+/// Strategy parameters for the QQQ daily equities strategy.
+#[derive(Debug, Clone)]
+pub struct EquityStrategyParams {
+    /// Entry threshold: pred_1d must exceed this (absolute) to go long.
+    pub entry_threshold: f64,
+    /// Exit threshold: if pred_1d falls below this (negative), exit to flat.
+    pub exit_threshold: f64,
+    /// Rolling window for SMA regime filter (e.g. 200).
+    pub sma_window: usize,
+}
+
+impl Default for EquityStrategyParams {
+    fn default() -> Self {
+        Self {
+            entry_threshold: 0.003,
+            exit_threshold: -0.001,
+            sma_window: 200,
+        }
+    }
+}
+
+/// Signal input for the daily equities strategy.
+#[derive(Debug, Clone)]
+pub struct EquitySignalInput {
+    pub pred_1d: f64,
+    pub pred_5d: f64,
+    pub pred_21d: f64,
+    pub current_close: f64,
+    pub sma: f64,
+    pub sma_valid: bool,
+}
+
+/// Daily equities position state machine.
+/// Long/flat only (no shorting — QQQ has persistent positive drift).
+/// Uses pred_1d as the primary signal with pred_5d confirmation,
+/// filtered by SMA200 regime.
+pub fn next_equity_position(
+    current: Position,
+    input: &EquitySignalInput,
+    params: &EquityStrategyParams,
+) -> Position {
+    // Regime filter: if SMA invalid or close below SMA200, block new longs.
+    if !input.sma_valid || input.current_close <= input.sma {
+        // Allow exits in bearish regime but no new entries.
+        if current == Position::Long && input.pred_1d < params.exit_threshold {
+            return Position::Flat;
+        }
+        return if current == Position::Long { Position::Long } else { Position::Flat };
+    }
+
+    // Bullish regime (close > SMA200).
+    // Entry: pred_1d > entry_threshold AND pred_5d > 0 (confirmation).
+    if input.pred_1d > params.entry_threshold && input.pred_5d > 0.0 {
+        return Position::Long;
+    }
+
+    // Exit: pred_1d < exit_threshold.
+    if current == Position::Long && input.pred_1d < params.exit_threshold {
+        return Position::Flat;
+    }
+
+    // Hold current position.
+    current
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

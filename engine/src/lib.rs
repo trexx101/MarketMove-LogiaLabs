@@ -1,6 +1,7 @@
 pub mod api;
 pub mod bridge;
 pub mod config;
+pub mod data;
 pub mod db;
 pub mod exec;
 pub mod features;

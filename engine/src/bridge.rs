@@ -5,6 +5,7 @@ use tracing::{debug, warn};
 use zeromq::{ReqSocket, Socket, SocketRecv, SocketSend, ZmqMessage};
 
 use crate::features::core::FEATURE_DIM;
+use crate::features::equities_v2::EQ_FEATURE_DIM;
 
 /// Predictions returned by the inference service.
 #[derive(Debug, Clone)]
@@ -12,6 +13,15 @@ pub struct Prediction {
     pub pred_1h: f64,
     pub pred_4h: f64,
     pub pred_24h: f64,
+}
+
+/// Predictions for the QQQ daily equities model (Wave C).
+/// Three horizons: 1-day, 5-day, 21-day expected returns.
+#[derive(Debug, Clone)]
+pub struct EquityPrediction {
+    pub pred_1d: f64,
+    pub pred_5d: f64,
+    pub pred_21d: f64,
 }
 
 /// ZeroMQ REQ client that sends feature windows to a Python inference service.
@@ -188,6 +198,76 @@ impl ZmqBridge {
             match self.predict_v2(feature_window, timeout).await {
                 Ok(pred) => return Ok(pred),
                 Err(e) => last_err = e,
+            }
+        }
+        Err(last_err)
+    }
+
+    // -----------------------------------------------------------------------
+    // V3 inference path (Wave C) — 8-dim equities feature window.
+    // Returns EquityPrediction (1d/5d/21d horizons).
+    // -----------------------------------------------------------------------
+
+    /// Send a V3 (8-dim) equities feature window to the inference service.
+    pub async fn predict_v3(
+        &mut self,
+        feature_window: &[[f64; EQ_FEATURE_DIM]],
+        timeout: Duration,
+    ) -> Result<EquityPrediction> {
+        let payload = json!({
+            "schema_version": 3,
+            "feature_window": feature_window,
+        })
+        .to_string();
+        debug!(bytes = payload.len(), "sending V3 inference request");
+
+        let fut = async {
+            self.socket
+                .send(ZmqMessage::from(payload.clone()))
+                .await
+                .map_err(|e| anyhow!("ZMQ send failed: {e}"))?;
+            let reply: ZmqMessage = self
+                .socket
+                .recv()
+                .await
+                .map_err(|e| anyhow!("ZMQ recv failed: {e}"))?;
+            let bytes = reply.get(0).map(|b| b.as_ref()).unwrap_or(b"");
+            let value: serde_json::Value = serde_json::from_slice(bytes)
+                .map_err(|e| anyhow!("failed to parse response JSON: {e}"))?;
+            if let Some(err_msg) = value.get("error") {
+                return Err(anyhow!("inference service error: {err_msg}"));
+            }
+            Ok(EquityPrediction {
+                pred_1d: value.get("pred_1d").and_then(|v| v.as_f64())
+                    .ok_or_else(|| anyhow!("missing or invalid field 'pred_1d'"))?,
+                pred_5d: value.get("pred_5d").and_then(|v| v.as_f64())
+                    .ok_or_else(|| anyhow!("missing or invalid field 'pred_5d'"))?,
+                pred_21d: value.get("pred_21d").and_then(|v| v.as_f64())
+                    .ok_or_else(|| anyhow!("missing or invalid field 'pred_21d'"))?,
+            })
+        };
+
+        tokio::time::timeout(timeout, fut)
+            .await
+            .map_err(|_| anyhow!("V3 inference request timed out after {timeout:?}"))?
+    }
+
+    /// V3 retry wrapper.
+    pub async fn predict_v3_with_retry(
+        &mut self,
+        feature_window: &[[f64; EQ_FEATURE_DIM]],
+        timeout: Duration,
+        retries: u32,
+    ) -> Result<EquityPrediction> {
+        let total_attempts = retries + 1;
+        let mut last_err = anyhow!("no attempts made");
+        for attempt in 1..=total_attempts {
+            match self.predict_v3(feature_window, timeout).await {
+                Ok(pred) => return Ok(pred),
+                Err(e) => {
+                    last_err = e;
+                    warn!(attempt, total_attempts, error = %last_err, "V3 inference attempt failed");
+                }
             }
         }
         Err(last_err)

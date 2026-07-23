@@ -56,6 +56,62 @@ CREATE TABLE IF NOT EXISTS trades (
     created_at    INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS trades_candle_ts_idx ON trades (candle_ts DESC);
+
+-- Wave A (2026-07-22): equities data layer.
+-- Independent of crypto `candles` table. Coexists for the transition period.
+CREATE TABLE IF NOT EXISTS equity_candles (
+    symbol TEXT    NOT NULL,
+    ts     INTEGER NOT NULL,
+    open   REAL    NOT NULL,
+    high   REAL    NOT NULL,
+    low    REAL    NOT NULL,
+    close  REAL    NOT NULL,
+    volume INTEGER NOT NULL DEFAULT 0,
+    source TEXT    NOT NULL DEFAULT 'yahoo',
+    PRIMARY KEY (symbol, ts)
+);
+CREATE INDEX IF NOT EXISTS equity_candles_symbol_ts_idx
+    ON equity_candles (symbol, ts DESC);
+
+CREATE TABLE IF NOT EXISTS equity_predictions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol        TEXT    NOT NULL,
+    candle_ts     INTEGER NOT NULL UNIQUE,
+    pred_1d       REAL    NOT NULL,
+    pred_5d       REAL    NOT NULL,
+    pred_21d      REAL    NOT NULL,
+    regime        TEXT    NOT NULL DEFAULT 'unknown',
+    features_json TEXT    NOT NULL DEFAULT '{}',
+    created_at    INTEGER NOT NULL,
+    source        TEXT    NOT NULL DEFAULT 'qqq_tcn_v1'
+);
+CREATE INDEX IF NOT EXISTS equity_predictions_ts_idx
+    ON equity_predictions (candle_ts DESC);
+
+CREATE TABLE IF NOT EXISTS equity_trades (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol        TEXT    NOT NULL,
+    candle_ts     INTEGER NOT NULL,
+    side          TEXT    NOT NULL,
+    qty           REAL    NOT NULL,
+    price         REAL    NOT NULL,
+    fee           REAL    NOT NULL,
+    realized_pnl  REAL    NOT NULL DEFAULT 0,
+    created_at    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS equity_trades_symbol_ts_idx
+    ON equity_trades (symbol, candle_ts DESC);
+
+CREATE TABLE IF NOT EXISTS equity_ingest_state (
+    source       TEXT    NOT NULL,
+    symbol       TEXT    NOT NULL,
+    last_ts      INTEGER NOT NULL DEFAULT 0,
+    last_run_at  INTEGER NOT NULL DEFAULT 0,
+    rows_loaded  INTEGER NOT NULL DEFAULT 0,
+    error_count  INTEGER NOT NULL DEFAULT 0,
+    last_error   TEXT    NOT NULL DEFAULT '',
+    PRIMARY KEY (source, symbol)
+);
 "#;
 
 /// A single OHLCV + VWAP candle as stored in the database.
@@ -77,6 +133,24 @@ pub struct Candle {
     pub ob_imbalance: f64,
 }
 
+/// A single equity OHLCV candle as stored in the `equity_candles` table.
+/// Wave A: separate type from crypto `Candle` to keep the two pipelines
+/// isolated during the transition.
+#[derive(Debug, Clone)]
+pub struct EquityCandle {
+    /// Ticker symbol: 'QQQ', 'AAPL', '^VIX', 'TLT', 'GLD', 'NVDA', ...
+    pub symbol: String,
+    /// Unix timestamp (seconds) at midnight UTC of the trading day.
+    pub ts: i64,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: i64,
+    /// 'yahoo' | 'moomoo' | 'fred'
+    pub source: String,
+}
+
 /// Open (or create) the SQLite database and apply the startup DDL.
 pub async fn open(database_url: &str) -> Result<DbPool> {
     // SQLite URLs like `sqlite://data/candles.db` need the parent directory to exist.
@@ -87,6 +161,15 @@ pub async fn open(database_url: &str) -> Result<DbPool> {
                     .with_context(|| format!("creating database directory {:?}", parent))?;
             }
         }
+        // sqlx 0.8 does not auto-create the .db file on connect — only the
+        // directory above. A missing file causes "unable to open database
+        // file" (code 14). Pre-create an empty file so the first connect
+        // succeeds on a fresh deploy.
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .with_context(|| format!("creating database file {path}"))?;
     }
 
     let pool = SqlitePoolOptions::new()
@@ -647,6 +730,195 @@ pub async fn fetch_accuracy(pool: &DbPool) -> Result<AccuracyStats> {
     })
 }
 
+// =========================================================================
+// Wave A: equities data layer — public API
+// =========================================================================
+
+/// Insert or update an equity candle row.
+pub async fn upsert_equity_candle(pool: &DbPool, c: &EquityCandle) -> Result<()> {
+    sqlx::query(
+        r#"INSERT INTO equity_candles (symbol, ts, open, high, low, close, volume, source)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+           ON CONFLICT(symbol, ts) DO UPDATE SET
+               open=excluded.open, high=excluded.high, low=excluded.low,
+               close=excluded.close, volume=excluded.volume, source=excluded.source"#,
+    )
+    .bind(&c.symbol)
+    .bind(c.ts)
+    .bind(c.open)
+    .bind(c.high)
+    .bind(c.low)
+    .bind(c.close)
+    .bind(c.volume)
+    .bind(&c.source)
+    .execute(pool)
+    .await
+    .context("upsert_equity_candle")?;
+    Ok(())
+}
+
+/// Count equity candles for a symbol.
+pub async fn count_equity_candles(pool: &DbPool, symbol: &str) -> Result<i64> {
+    let row = sqlx::query("SELECT COUNT(*) AS n FROM equity_candles WHERE symbol = ?1")
+        .bind(symbol)
+        .fetch_one(pool)
+        .await
+        .context("count_equity_candles")?;
+    Ok(row.get::<i64, _>("n"))
+}
+
+/// Fetch recent equity candles for a symbol, newest first.
+pub async fn fetch_equity_candles(
+    pool: &DbPool,
+    symbol: &str,
+    limit: i64,
+) -> Result<Vec<EquityCandle>> {
+    let rows = sqlx::query(
+        r#"SELECT symbol, ts, open, high, low, close, volume, source
+           FROM equity_candles
+           WHERE symbol = ?1
+           ORDER BY ts DESC
+           LIMIT ?2"#,
+    )
+    .bind(symbol)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .context("fetch_equity_candles")?;
+    Ok(rows
+        .iter()
+        .map(|r| EquityCandle {
+            symbol: r.get::<String, _>("symbol"),
+            ts: r.get::<i64, _>("ts"),
+            open: r.get::<f64, _>("open"),
+            high: r.get::<f64, _>("high"),
+            low: r.get::<f64, _>("low"),
+            close: r.get::<f64, _>("close"),
+            volume: r.get::<i64, _>("volume"),
+            source: r.get::<String, _>("source"),
+        })
+        .collect())
+}
+
+/// Fetch equity candles for a symbol, **oldest first** (ascending ts).
+/// Used by the feature pipeline which needs chronological order.
+pub async fn fetch_equity_candles_asc(
+    pool: &DbPool,
+    symbol: &str,
+    limit: i64,
+) -> Result<Vec<EquityCandle>> {
+    let rows = sqlx::query(
+        r#"SELECT symbol, ts, open, high, low, close, volume, source
+           FROM equity_candles
+           WHERE symbol = ?1
+           ORDER BY ts ASC
+           LIMIT ?2"#,
+    )
+    .bind(symbol)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .context("fetch_equity_candles_asc")?;
+    Ok(rows
+        .iter()
+        .map(|r| EquityCandle {
+            symbol: r.get::<String, _>("symbol"),
+            ts: r.get::<i64, _>("ts"),
+            open: r.get::<f64, _>("open"),
+            high: r.get::<f64, _>("high"),
+            low: r.get::<f64, _>("low"),
+            close: r.get::<f64, _>("close"),
+            volume: r.get::<i64, _>("volume"),
+            source: r.get::<String, _>("source"),
+        })
+        .collect())
+}
+
+/// Insert (or replace) a prediction row for the QQQ daily equities model.
+pub async fn insert_equity_prediction(
+    pool: &DbPool,
+    symbol: &str,
+    candle_ts: i64,
+    pred_1d: f64,
+    pred_5d: f64,
+    pred_21d: f64,
+    regime: &str,
+    features_json: &str,
+) -> Result<()> {
+    let now = Utc::now().timestamp();
+    sqlx::query(
+        r#"INSERT INTO equity_predictions
+               (symbol, candle_ts, pred_1d, pred_5d, pred_21d, regime, features_json, created_at, source)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'qqq_tcn_v1')
+           ON CONFLICT(candle_ts) DO UPDATE SET
+               pred_1d=excluded.pred_1d,
+               pred_5d=excluded.pred_5d,
+               pred_21d=excluded.pred_21d,
+               regime=excluded.regime,
+               features_json=excluded.features_json"#,
+    )
+    .bind(symbol)
+    .bind(candle_ts)
+    .bind(pred_1d)
+    .bind(pred_5d)
+    .bind(pred_21d)
+    .bind(regime)
+    .bind(features_json)
+    .bind(now)
+    .execute(pool)
+    .await
+    .context("insert_equity_prediction")?;
+    Ok(())
+}
+
+/// Fetch the latest equity candle timestamp for a symbol (newest first).
+/// Returns `None` if no candles exist.
+pub async fn latest_equity_candle_ts(pool: &DbPool, symbol: &str) -> Result<Option<i64>> {
+    let row = sqlx::query(
+        r#"SELECT ts FROM equity_candles WHERE symbol = ?1 ORDER BY ts DESC LIMIT 1"#,
+    )
+    .bind(symbol)
+    .fetch_optional(pool)
+    .await
+    .context("latest_equity_candle_ts")?;
+    Ok(row.map(|r| r.get::<i64, _>("ts")))
+}
+
+/// Update the ingest watermark for a (source, symbol) pair.
+pub async fn update_ingest_state(
+    pool: &DbPool,
+    source: &str,
+    symbol: &str,
+    last_ts: i64,
+    rows_loaded: i64,
+    error_msg: Option<&str>,
+) -> Result<()> {
+    let now = Utc::now().timestamp();
+    let err_increment = if error_msg.is_some() { 1 } else { 0 };
+    sqlx::query(
+        r#"INSERT INTO equity_ingest_state
+               (source, symbol, last_ts, last_run_at, rows_loaded, error_count, last_error)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+           ON CONFLICT(source, symbol) DO UPDATE SET
+               last_ts=excluded.last_ts,
+               last_run_at=excluded.last_run_at,
+               rows_loaded=excluded.rows_loaded,
+               error_count=equity_ingest_state.error_count + ?6,
+               last_error=COALESCE(NULLIF(?7, ''), equity_ingest_state.last_error)"#,
+    )
+    .bind(source)
+    .bind(symbol)
+    .bind(last_ts)
+    .bind(now)
+    .bind(rows_loaded)
+    .bind(err_increment)
+    .bind(error_msg.unwrap_or(""))
+    .execute(pool)
+    .await
+    .context("update_ingest_state")?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -782,5 +1054,81 @@ mod tests {
         assert!((stats.directional_24h - 100.0).abs() < 1e-9);
         // MAE: |0.01 - 0.015| = 0.005
         assert!((stats.mae_1h - 0.005).abs() < 1e-9);
+    }
+
+    // ===== Wave A: equity data layer tests ============================
+    // (Helper functions live at module level above.)
+
+    #[tokio::test]
+    async fn equity_candles_upsert_and_count() {
+        let pool = test_pool().await;
+        let c = EquityCandle {
+            symbol: "QQQ".into(),
+            ts: 1_700_000_000,
+            open: 400.0,
+            high: 405.0,
+            low: 399.0,
+            close: 404.5,
+            volume: 1_000_000,
+            source: "yahoo".into(),
+        };
+        upsert_equity_candle(&pool, &c).await.unwrap();
+        assert_eq!(count_equity_candles(&pool, "QQQ").await.unwrap(), 1);
+
+        // Upsert same key with new close — count should stay 1.
+        let c2 = EquityCandle { close: 410.0, ..c.clone() };
+        upsert_equity_candle(&pool, &c2).await.unwrap();
+        assert_eq!(count_equity_candles(&pool, "QQQ").await.unwrap(), 1);
+
+        // Different symbol
+        let c3 = EquityCandle {
+            symbol: "TLT".into(),
+            ts: 1_700_000_000,
+            open: 100.0, high: 101.0, low: 99.0, close: 100.5,
+            volume: 500_000, source: "yahoo".into(),
+        };
+        upsert_equity_candle(&pool, &c3).await.unwrap();
+        assert_eq!(count_equity_candles(&pool, "TLT").await.unwrap(), 1);
+        assert_eq!(count_equity_candles(&pool, "QQQ").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn fetch_equity_candles_returns_recent_first() {
+        let pool = test_pool().await;
+        for i in 0..5 {
+            let c = EquityCandle {
+                symbol: "QQQ".into(),
+                ts: 1_700_000_000 + i * 86_400,
+                open: 400.0, high: 405.0, low: 399.0, close: 404.0,
+                volume: 1_000_000, source: "yahoo".into(),
+            };
+            upsert_equity_candle(&pool, &c).await.unwrap();
+        }
+        let rows = fetch_equity_candles(&pool, "QQQ", 3).await.unwrap();
+        assert_eq!(rows.len(), 3);
+        // Newest first.
+        assert!(rows[0].ts > rows[1].ts);
+        assert!(rows[1].ts > rows[2].ts);
+    }
+
+    #[tokio::test]
+    async fn ingest_state_tracks_errors() {
+        let pool = test_pool().await;
+        update_ingest_state(&pool, "yahoo", "QQQ", 1_700_000_000, 250, None)
+            .await.unwrap();
+        // Calling again with an error should not lose the prior last_ts.
+        update_ingest_state(&pool, "yahoo", "QQQ", 1_700_086_400, 251, Some("timeout"))
+            .await.unwrap();
+        let row = sqlx::query(
+            "SELECT last_ts, rows_loaded, error_count, last_error
+             FROM equity_ingest_state WHERE source='yahoo' AND symbol='QQQ'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let last_ts: i64 = row.get("last_ts");
+        let err: String = row.get("last_error");
+        assert_eq!(last_ts, 1_700_086_400);
+        assert_eq!(err, "timeout");
     }
 }

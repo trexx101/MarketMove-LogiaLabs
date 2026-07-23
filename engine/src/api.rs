@@ -40,6 +40,10 @@ pub fn router(pool: db::DbPool, config: &Config) -> Router {
         .route("/api/predictions", get(handle_predictions))
         .route("/api/accuracy", get(handle_accuracy))
         .route("/api/chart", get(handle_chart))
+        .route("/api/equity/data", get(handle_equity_data))
+        .route("/api/equity/backfill", get(handle_equity_backfill))
+        .route("/api/equity/macro", get(handle_equity_macro))
+        .route("/api/equity/features", get(handle_equity_features))
         .layer(cors)
         .with_state(state)
         .fallback_service(
@@ -463,6 +467,8 @@ mod tests {
                     .to_string_lossy()
                     .into_owned(),
                 parity_max_age_secs: 7 * 24 * 60 * 60,
+                moomoo_creds_path: "~/.moomoo/credentials.json".to_string(),
+                fred_api_key: "".to_string(),
             };
 
             let app = router(pool, &config);
@@ -515,4 +521,260 @@ mod tests {
         std::env::set_current_dir(original_cwd).unwrap();
         result
     }
+}
+
+// ---------------------------------------------------------------------------
+// Wave A: equities data endpoints
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct EquityDataPoint {
+    ts: i64,
+    open: f64,
+    high: f64,
+    low: f64,
+    close: f64,
+    volume: i64,
+}
+
+#[derive(serde::Serialize)]
+struct EquityDataResponse {
+    symbol: String,
+    count: usize,
+    source: String,
+    data: Vec<EquityDataPoint>,
+}
+
+/// `GET /api/equity/data?symbol=QQQ&range=500&limit=5000`
+/// Returns most recent equity candles (newest first), capped at `limit`.
+async fn handle_equity_data(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult<EquityDataResponse> {
+    let symbol = params
+        .get("symbol")
+        .cloned()
+        .unwrap_or_else(|| "QQQ".to_string());
+    let limit: i64 = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(500)
+        .clamp(1, 20_000);
+
+    let candles = match db::fetch_equity_candles(&state.pool, &symbol, limit).await {
+        Ok(c) => c,
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}"))),
+    };
+    let source = candles.first().map(|c| c.source.clone()).unwrap_or_else(|| "yahoo".to_string());
+    let data: Vec<EquityDataPoint> = candles
+        .iter()
+        .map(|c| EquityDataPoint {
+            ts: c.ts,
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+            volume: c.volume,
+        })
+        .collect();
+    Ok(Json(EquityDataResponse {
+        count: data.len(),
+        symbol,
+        source,
+        data,
+    }))
+}
+
+#[derive(serde::Serialize)]
+struct BackfillResponse {
+    symbol: String,
+    rows_loaded: usize,
+    already_had: i64,
+    source: String,
+}
+
+/// `GET /api/equity/backfill?symbol=QQQ&range=5y`
+/// Triggers a Yahoo backfill for one symbol. Used for Wave A bring-up.
+async fn handle_equity_backfill(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult<BackfillResponse> {
+    let symbol = params
+        .get("symbol")
+        .cloned()
+        .unwrap_or_else(|| "QQQ".to_string());
+    let range = params.get("range").cloned().unwrap_or_else(|| "5y".to_string());
+
+    let already = db::count_equity_candles(&state.pool, &symbol)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
+
+    let rows = crate::data::yahoo::backfill(&state.pool, &symbol, 0, &range)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("yahoo: {e:#}")))?;
+
+    Ok(Json(BackfillResponse {
+        symbol,
+        rows_loaded: rows,
+        already_had: already,
+        source: "yahoo".to_string(),
+    }))
+}
+
+#[derive(serde::Serialize)]
+struct MacroResponse {
+    rows: Vec<EquityDataPoint>,
+    symbol: String,
+}
+
+/// `GET /api/equity/macro?symbol=$VIX&range=730`
+/// Returns macro series from `equity_candles` (populated by FRED or Yahoo).
+async fn handle_equity_macro(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult<MacroResponse> {
+    let symbol = params
+        .get("symbol")
+        .cloned()
+        .unwrap_or_else(|| "$VIX".to_string());
+    let limit: i64 = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1000)
+        .clamp(1, 20_000);
+
+    let candles = db::fetch_equity_candles(&state.pool, &symbol, limit)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
+    let rows: Vec<EquityDataPoint> = candles
+        .iter()
+        .map(|c| EquityDataPoint {
+            ts: c.ts,
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close,
+            volume: c.volume,
+        })
+        .collect();
+    Ok(Json(MacroResponse { symbol, rows }))
+}
+
+// ---------------------------------------------------------------------------
+// Wave B: equities features endpoint
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct EquityFeatureResponse {
+    symbol: String,
+    count: usize,
+    /// The most recent feature vector (8-dim).
+    latest: crate::features::equities_v2::EquityFeatureRow,
+    /// All computed feature rows (oldest first, capped at `limit`).
+    rows: Vec<crate::features::equities_v2::EquityFeatureRow>,
+}
+
+/// `GET /api/equity/features?symbol=QQQ&limit=500`
+///
+/// Computes the 8-feature equities vector from stored daily OHLCV + macro
+/// series. Pulls QQQ (or the requested symbol), VIX, and TLT candles from
+/// `equity_candles`, aligns them by timestamp, and runs the feature pipeline.
+///
+/// If VIX or TLT data is missing (e.g. FRED timed out), the corresponding
+/// features are 0.0 — the pipeline degrades gracefully.
+async fn handle_equity_features(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> ApiResult<EquityFeatureResponse> {
+    let symbol = params
+        .get("symbol")
+        .cloned()
+        .unwrap_or_else(|| "QQQ".to_string());
+    let limit: i64 = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(500)
+        .clamp(1, 10_000);
+
+    // Fetch main symbol candles (oldest first for feature computation).
+    let candles = db::fetch_equity_candles_asc(&state.pool, &symbol, limit)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
+    if candles.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("no equity candles found for symbol '{symbol}' — run /api/equity/backfill first"),
+        ));
+    }
+
+    // Fetch VIX and TLT close-aligned series (best effort).
+    let vix_candles = db::fetch_equity_candles_asc(&state.pool, "$VIX", limit)
+        .await
+        .unwrap_or_default();
+    let tlt_candles = db::fetch_equity_candles_asc(&state.pool, "TLT", limit)
+        .await
+        .unwrap_or_default();
+
+    // Align VIX and TLT closes to the main symbol's timestamps.
+    let vix_close = align_series(&candles, &vix_candles);
+    let tlt_close = align_series(&candles, &tlt_candles);
+
+    let rows = crate::features::equities_v2::compute_equity_features(
+        &candles,
+        vix_close.as_deref(),
+        tlt_close.as_deref(),
+    );
+    let count = rows.len();
+    let latest = rows
+        .last()
+        .cloned()
+        .ok_or((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "feature computation returned 0 rows".to_string(),
+        ))?;
+
+    Ok(Json(EquityFeatureResponse {
+        symbol,
+        count,
+        latest,
+        rows,
+    }))
+}
+
+/// Align a secondary series (e.g. VIX, TLT) to the main symbol's timestamps.
+/// Returns `None` if the secondary series is empty.
+/// Uses nearest-prior timestamp matching (forward-fill).
+fn align_series(
+    primary: &[db::EquityCandle],
+    secondary: &[db::EquityCandle],
+) -> Option<Vec<f64>> {
+    if secondary.is_empty() {
+        return None;
+    }
+    // Build a map of ts → close for the secondary series.
+    let mut sec_map: std::collections::HashMap<i64, f64> =
+        std::collections::HashMap::with_capacity(secondary.len());
+    for c in secondary {
+        sec_map.insert(c.ts, c.close);
+    }
+    // Walk the primary timestamps; for each, find the matching close or the
+    // most recent prior close (forward-fill).
+    let mut aligned = Vec::with_capacity(primary.len());
+    let mut last_val: Option<f64> = None;
+    let sec_sorted: Vec<(i64, f64)> = {
+        let mut v: Vec<(i64, f64)> = sec_map.iter().map(|(k, v)| (*k, *v)).collect();
+        v.sort_by_key(|x| x.0);
+        v
+    };
+    for p in primary {
+        // Binary search for the nearest-prior timestamp.
+        let idx = sec_sorted
+            .binary_search_by_key(&p.ts, |x| x.0)
+            .unwrap_or_else(|i| i.saturating_sub(1));
+        if idx < sec_sorted.len() && sec_sorted[idx].0 <= p.ts {
+            last_val = Some(sec_sorted[idx].1);
+        }
+        aligned.push(last_val.unwrap_or(0.0));
+    }
+    Some(aligned)
 }

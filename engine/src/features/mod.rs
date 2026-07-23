@@ -7,11 +7,9 @@
 //! OOS IC gate.
 
 pub mod core;
-pub mod crypto;
-pub mod equities;
+pub mod equities_v2;
 pub mod llm;
 pub mod legacy;
-pub mod volatility;
 
 // Re-export V1 types so existing callers (`crate::features::compute_features`,
 // `crate::features::FeatureRow`) keep resolving during the transition.
@@ -21,9 +19,7 @@ use anyhow::Result;
 
 use crate::features::core::FeatureRowV2;
 
-/// Pluggable feature source. `BinanceFeatureSource` is the active impl; the
-/// `EquitiesFeatureSourceStub` is a placeholder for a future expansion wave
-/// (the core model is asset-agnostic).
+/// Pluggable feature source trait — kept as an extensibility point.
 #[async_trait::async_trait]
 pub trait FeatureSource: Send + Sync {
     /// Fetch the latest feature row for live inference.

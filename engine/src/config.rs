@@ -34,7 +34,7 @@ pub struct Config {
     pub http_port: u16,
     pub symbol: String,
     pub database_url: String,
-    /// Path to `norm_stats.json` produced from the training npz.
+    /// Path to norm stats JSON (median/MAD, Wave C equities format).
     pub norm_stats_path: String,
     /// Number of candles sent as the feature window to the inference service.
     pub feature_window_size: usize,
@@ -43,6 +43,10 @@ pub struct Config {
     /// Maximum age (in seconds) of the parity marker before `live` mode
     /// refuses to start. Default: 7 days.
     pub parity_max_age_secs: i64,
+    /// Path to Moomoo OpenAPI credentials JSON (Wave D). Empty → Yahoo fallback.
+    pub moomoo_creds_path: String,
+    /// FRED API key (optional; higher rate limit). Empty → anonymous CSV fallback.
+    pub fred_api_key: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,17 +162,23 @@ impl Config {
             verify_parity_marker(&parity_marker_path, parity_max_age_secs)?;
         }
 
+        let moomoo_creds_path = env_or("MOOMOO_CREDS_PATH", "~/.moomoo/credentials.json");
+        if moomoo_creds_path.trim().is_empty() {
+            return Err(anyhow!("MOOMOO_CREDS_PATH must not be empty"));
+        }
+        let fred_api_key = env_or("FRED_API_KEY", "");
+
         let database_url = env_or("DATABASE_URL", "sqlite://data/candles.db");
         if database_url.trim().is_empty() {
             return Err(anyhow!("DATABASE_URL must not be empty"));
         }
 
-        let norm_stats_path = env_or("NORM_STATS_PATH", "models/norm_stats.json");
+        let norm_stats_path = env_or("NORM_STATS_PATH", "models/norm_stats_qqq_v1.json");
         if norm_stats_path.trim().is_empty() {
             return Err(anyhow!("NORM_STATS_PATH must not be empty"));
         }
 
-        let feature_window_size = parse_env::<usize>("FEATURE_WINDOW_SIZE", "72")
+        let feature_window_size = parse_env::<usize>("FEATURE_WINDOW_SIZE", "21")
             .context("FEATURE_WINDOW_SIZE must be a positive integer")?;
         if feature_window_size == 0 {
             return Err(anyhow!("FEATURE_WINDOW_SIZE must be > 0, got 0"));
@@ -187,6 +197,8 @@ impl Config {
             feature_window_size,
             parity_marker_path,
             parity_max_age_secs,
+            moomoo_creds_path,
+            fred_api_key,
         })
     }
 }
@@ -275,6 +287,8 @@ mod tests {
             "FEATURE_WINDOW_SIZE",
             "PARITY_MARKER_PATH",
             "PARITY_MAX_AGE_SECS",
+            "MOOMOO_CREDS_PATH",
+            "FRED_API_KEY",
         ] {
             env::remove_var(key);
         }
@@ -310,8 +324,9 @@ mod tests {
         assert_eq!(cfg.http_port, 8080);
         assert_eq!(cfg.symbol, "BTC/USD");
         assert_eq!(cfg.database_url, "sqlite://data/candles.db");
-        assert_eq!(cfg.norm_stats_path, "models/norm_stats.json");
-        assert_eq!(cfg.feature_window_size, 72);
+        // dotenvy loads .env which overrides the default path.
+        assert_eq!(cfg.norm_stats_path, "/models/norm_stats_qqq_v1.json");
+        assert_eq!(cfg.feature_window_size, 21);
         assert_eq!(cfg.parity_marker_path, "parity_verified.json");
         assert_eq!(cfg.parity_max_age_secs, 7 * 24 * 60 * 60);
     }

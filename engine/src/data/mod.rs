@@ -1,75 +1,99 @@
-pub mod binance;
+pub mod fred;
+pub mod moomoo;
+pub mod yahoo;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing::info;
 
 use crate::db::DbPool;
 
-/// Backfill + retention constants.
-/// Keep 250 candles — comfortably above the 200-SMA + rolling-window requirement.
-pub const RETENTION_CANDLES: usize = 250;
+/// Symbols pulled from Yahoo Finance for the equities engine.
+/// QQQ (the trade target) + key constituents + cross-asset ETFs.
+pub const EQUITY_SYMBOLS: &[&str] = &[
+    "QQQ", "AAPL", "MSFT", "NVDA", "GOOG", "AMZN", "META", "TSLA", "TLT", "GLD", "UUP",
+];
 
-/// Run the REST backfill to ensure ≥ `min_candles` rows in the DB.
+/// Macro series sourced from FRED (stored in `equity_candles` with `$` prefixes).
+pub const MACRO_SYMBOLS: &[&str] = &["$VIX", "$UST10Y", "$DXY"];
+
+/// Backfill everything the Wave A engine needs: equity OHLCV + macro series.
 ///
-/// This is split out from the live-WS path so callers can `await` it
-/// synchronously before spawning the scheduler. If the scheduler runs before
-/// the DB has enough history, the first inference tick will see `seq_len=1`
-/// and every downstream computation will be wrong.
-pub async fn backfill(pool: DbPool, symbol: &str, min_candles: usize) -> Result<()> {
-    let seeded = binance::backfill(&pool, symbol, min_candles).await?;
-    info!(seeded, "REST backfill complete");
+/// Idempotent — each symbol respects its own min-candles gate in the clients,
+/// so re-running just tops up missing history. Errors from one symbol are
+/// logged and skipped (best-effort) so a single outage doesn't abort the rest.
+pub async fn backfill_equities(pool: &DbPool) -> Result<()> {
+    // Yahoo equity OHLCV — 5y of daily history is plenty for features + retrains.
+    let n_eq = yahoo::backfill_many(pool, EQUITY_SYMBOLS, 250, "5y").await?;
+    info!(rows = n_eq, "equity OHLCV backfill complete");
+
+    // FRED macro series — ~5y lookback cap.
+    let n_macro = fred::backfill_all_default_macros(pool, 5 * 365).await?;
+    info!(rows = n_macro, "macro series backfill complete");
+
     Ok(())
 }
 
-/// Return how many seconds the latest candle is behind the current time.
-/// Returns u64::MAX if no candles exist.
-pub async fn staleness_secs(pool: &DbPool) -> Result<u64> {
-    match crate::db::latest_ts(pool).await? {
-        Some(ts) => {
-            let now = chrono::Utc::now().timestamp();
-            let gap = now.saturating_sub(ts);
-            Ok(gap.max(0) as u64)
-        }
-        None => Ok(u64::MAX),
-    }
-}
-
-/// Spawn the hourly retention task and run the persistent WebSocket loop.
+/// Run the equities ingestion supervisor. Blocks until a fatal error.
 ///
-/// The retention task is a background job that prunes old rows every hour.
-/// The WS loop never returns under normal operation (reconnects on failure).
-pub async fn run_ws_and_retention(pool: DbPool, symbol: &str) -> Result<()> {
-    // --- 1. Retention task (every 1 h) ---
+/// Spawns:
+///   - a daily top-up task that re-pulls the most recent trading days for
+///     every equity + macro symbol (Yahoo/FRED clients are idempotent and
+///     only upsert rows newer than what's already stored);
+///   - a daily retention task that prunes `equity_candles` beyond the
+///     retention window so the table doesn't grow unbounded (deep history
+///     is re-fetched from the source on demand, not kept forever).
+///
+/// Daily cadence is appropriate for daily bars — no streaming feed needed.
+pub async fn run_equities_ingestion(pool: DbPool) -> Result<()> {
+    // --- 1. Daily equities top-up (02:00 local-ish, every 24h) ---
+    let topup_pool = pool.clone();
+    tokio::spawn(async move {
+        // Initial short delay so the startup backfill settles first.
+        let start =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut interval =
+            tokio::time::interval_at(start, std::time::Duration::from_secs(24 * 3_600));
+        loop {
+            interval.tick().await;
+            if let Err(e) = backfill_equities(&topup_pool).await {
+                tracing::error!(error = %e, "equities daily top-up failed");
+            }
+        }
+    });
+
+    // --- 2. Daily retention prune (keep 5y of daily bars) ---
     let retention_pool = pool.clone();
     tokio::spawn(async move {
+        let start =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(300);
         let mut interval =
-            tokio::time::interval(std::time::Duration::from_secs(3_600));
+            tokio::time::interval_at(start, std::time::Duration::from_secs(24 * 3_600));
         loop {
             interval.tick().await;
-            match crate::db::prune_old(&retention_pool, RETENTION_CANDLES).await {
-                Ok(n) if n > 0 => info!(pruned = n, "retention: removed old candles"),
+            match prune_equity_history(&retention_pool).await {
+                Ok(n) if n > 0 => info!(pruned = n, "equity retention: removed old rows"),
                 Ok(_) => {}
-                Err(e) => tracing::warn!("retention prune error: {e:#}"),
+                Err(e) => tracing::warn!("equity retention prune error: {e:#}"),
             }
         }
     });
 
-    // --- Staleness monitor (every 5 min) ---
-    let staleness_pool = pool.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
-        loop {
-            interval.tick().await;
-            match staleness_secs(&staleness_pool).await {
-                Ok(gap) if gap > 7200 => {
-                    tracing::warn!(staleness_secs = gap, "candle staleness: no confirmed candle in {gap}s");
-                }
-                Err(e) => tracing::warn!("staleness check error: {e:#}"),
-                _ => {}
-            }
-        }
-    });
+    // Block the process on an inert future so the supervisor owns the main thread.
+    // A Ctrl-C / process kill is the intended shutdown.
+    std::future::pending::<()>().await;
+    Ok(())
+}
 
-    // --- 2. WebSocket loop ---
-    binance::run_loop(&pool, symbol).await
+/// Prune `equity_candles` rows older than `keep_days` for every symbol.
+/// Daily bars at 11 symbols + 3 macros over 5y ≈ 14×~1,260 ≈ 17k rows — cheap
+/// to keep, but pruning guards against unbounded growth if cadence slips.
+async fn prune_equity_history(pool: &DbPool) -> Result<usize> {
+    let keep_days: i64 = 5 * 365;
+    let cutoff = chrono::Utc::now().timestamp() - keep_days * 86_400;
+    let res = sqlx::query("DELETE FROM equity_candles WHERE ts < ?1")
+        .bind(cutoff)
+        .execute(pool)
+        .await
+        .context("prune_equity_history")?;
+    Ok(res.rows_affected() as usize)
 }

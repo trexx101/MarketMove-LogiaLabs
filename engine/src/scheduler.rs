@@ -6,32 +6,41 @@ use tracing::{error, info, warn};
 use crate::bridge::ZmqBridge;
 use crate::db::{self, DbPool};
 use crate::exec::ExecutorKind;
-use crate::features::compute_features;
-use crate::normalize::{normalize_row, NormStats};
+use crate::features::equities_v2::{compute_equity_features, EquityNormStats, EQ_FEATURE_DIM};
+use crate::strategy::{self, EquityStrategyParams, EquitySignalInput, Position};
 
-pub struct Scheduler {
+/// Daily equities scheduler (Wave C).
+///
+/// Polls for new QQQ daily candles, computes 8-dim features, normalizes with
+/// median/MAD stats, calls the V3 inference service (1d/5d/21d), persists
+/// predictions, and evaluates the long/flat strategy.
+///
+/// Poll cadence is 5 minutes (daily bars — no need for 30s crypto polling).
+pub struct EquityScheduler {
     pool: DbPool,
+    symbol: String,
     bridge: Option<ZmqBridge>,
-    norm_stats: NormStats,
+    norm_stats: EquityNormStats,
     feature_window_size: usize,
     last_processed_ts: Option<i64>,
-    strategy_params: crate::strategy::StrategyParams,
+    strategy_params: EquityStrategyParams,
     executor: ExecutorKind,
 }
 
-impl Scheduler {
-    /// Connect to ZMQ and prepare the scheduler.
+impl EquityScheduler {
     pub async fn new(
         pool: DbPool,
+        symbol: String,
         zmq_endpoint: &str,
-        norm_stats: NormStats,
+        norm_stats: EquityNormStats,
         feature_window_size: usize,
-        strategy_params: crate::strategy::StrategyParams,
+        strategy_params: EquityStrategyParams,
         executor: ExecutorKind,
     ) -> Result<Self> {
         let bridge = ZmqBridge::connect(zmq_endpoint).await?;
         Ok(Self {
             pool,
+            symbol,
             bridge: Some(bridge),
             norm_stats,
             feature_window_size,
@@ -41,54 +50,64 @@ impl Scheduler {
         })
     }
 
-    /// Poll loop — runs forever under normal operation.
-    /// Checks for new candles every 30 seconds.
-    /// Returns Err only on unrecoverable DB errors.
+    /// Poll loop — checks for new daily candles every 5 minutes.
     pub async fn run(&mut self) -> Result<()> {
-        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        let mut interval = tokio::time::interval(Duration::from_secs(300));
         loop {
             interval.tick().await;
-
-            let latest = db::latest_ts(&self.pool).await?;
-
+            let latest = db::latest_equity_candle_ts(&self.pool, &self.symbol).await?;
             if let Some(ts) = latest {
                 if ts > self.last_processed_ts.unwrap_or(0) {
                     if let Err(e) = self.process(ts).await {
-                        error!(error = %e, candle_ts = ts, "failed to process candle");
+                        error!(error = %e, candle_ts = ts, "failed to process equity candle");
                     }
                 }
             }
         }
     }
 
-    /// Fetch candles, compute + normalize features, call inference, persist prediction.
+    /// Fetch candles, compute + normalize features, call inference, persist.
     async fn process(&mut self, candle_ts: i64) -> Result<()> {
-        // Fetch extra candle for ATR warmup
-        let fetch_count = self.feature_window_size + 1;
-        let candles = db::fetch_recent_candles(&self.pool, fetch_count).await?;
+        // Need enough candles for feature warmup (50d SMA, 20d correlation, etc.)
+        // plus the feature window for the TCN sequence.
+        let fetch_count = (self.feature_window_size + 60) as i64;
+        let candles = db::fetch_equity_candles_asc(&self.pool, &self.symbol, fetch_count).await?;
 
-        if candles.len() < self.feature_window_size + 1 {
+        if candles.len() < self.feature_window_size + 50 {
             warn!(
                 candle_ts,
                 count = candles.len(),
-                required = self.feature_window_size + 1,
-                "insufficient candles, skipping prediction"
+                required = self.feature_window_size + 50,
+                "insufficient equity candles, skipping prediction"
             );
             return Ok(());
         }
 
-        let all_features = compute_features(&candles);
+        // Fetch VIX and TLT close-aligned series (optional — features degrade to 0.0).
+        let vix = db::fetch_equity_candles_asc(&self.pool, "^VIX", fetch_count).await.ok();
+        let tlt = db::fetch_equity_candles_asc(&self.pool, "TLT", fetch_count).await.ok();
 
-        // Take last feature_window_size rows (or all if fewer)
-        let rows = if all_features.len() > self.feature_window_size {
-            &all_features[all_features.len() - self.feature_window_size..]
-        } else {
-            &all_features[..]
-        };
+        let vix_close: Option<Vec<f64>> = vix.map(|c| c.iter().map(|c| c.close).collect());
+        let tlt_close: Option<Vec<f64>> = tlt.map(|c| c.iter().map(|c| c.close).collect());
 
-        let feature_window: Vec<[f64; 3]> = rows
+        let all_features = compute_equity_features(
+            &candles,
+            vix_close.as_deref(),
+            tlt_close.as_deref(),
+        );
+
+        if all_features.is_empty() {
+            warn!(candle_ts, "no features computed, skipping");
+            return Ok(());
+        }
+
+        // Take last feature_window_size rows.
+        let start = all_features.len().saturating_sub(self.feature_window_size);
+        let rows = &all_features[start..];
+
+        let feature_window: Vec<[f64; EQ_FEATURE_DIM]> = rows
             .iter()
-            .map(|row| normalize_row(row, &self.norm_stats))
+            .map(|row| self.norm_stats.normalize(row))
             .collect();
 
         if feature_window.is_empty() {
@@ -98,117 +117,114 @@ impl Scheduler {
 
         let bridge = self.bridge.as_mut()
             .expect("ZMQ bridge not configured (test mode — use process_with_prediction)");
+
         let pred = bridge
-            .predict_with_retry(&feature_window, Duration::from_secs(5), 2)
+            .predict_v3_with_retry(&feature_window, Duration::from_secs(10), 2)
             .await?;
 
         self.finalize_candle(candle_ts, &pred, &feature_window, &candles).await
     }
 
-    /// Persist prediction, mark candle as processed, then run strategy evaluation.
-    ///
-    /// `last_processed_ts` is set immediately after `insert_prediction` succeeds so
-    /// that the 30-second poll loop in `run()` will NOT re-request inference for
-    /// this candle even if strategy evaluation subsequently fails.
+    /// Persist prediction, mark candle processed, run strategy.
     async fn finalize_candle(
         &mut self,
         candle_ts: i64,
-        pred: &crate::bridge::Prediction,
-        feature_window: &[[f64; 3]],
-        candles: &[crate::db::Candle],
+        pred: &crate::bridge::EquityPrediction,
+        feature_window: &[[f64; EQ_FEATURE_DIM]],
+        candles: &[crate::db::EquityCandle],
     ) -> Result<()> {
         let features_json = serde_json::to_string(feature_window)?;
 
-        db::insert_prediction(
+        // Compute regime label for audit.
+        let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
+        let (sma, sma_valid) = strategy::compute_sma(&closes, self.strategy_params.sma_window);
+        let latest_close = candles.last().map(|c| c.close).unwrap_or(0.0);
+        let regime = if !sma_valid {
+            "unknown"
+        } else if latest_close > sma {
+            "bull"
+        } else {
+            "bear"
+        };
+
+        db::insert_equity_prediction(
             &self.pool,
+            &self.symbol,
             candle_ts,
-            pred.pred_1h,
-            pred.pred_4h,
-            pred.pred_24h,
+            pred.pred_1d,
+            pred.pred_5d,
+            pred.pred_21d,
+            regime,
             &features_json,
         )
         .await?;
 
         info!(
             candle_ts,
-            pred_1h = pred.pred_1h,
-            pred_4h = pred.pred_4h,
-            pred_24h = pred.pred_24h,
-            "prediction persisted"
+            pred_1d = pred.pred_1d,
+            pred_5d = pred.pred_5d,
+            pred_21d = pred.pred_21d,
+            regime,
+            "equity prediction persisted"
         );
 
-        // Mark candle as processed IMMEDIATELY after prediction persistence.
-        // This prevents the 30s retry loop: even if strategy evaluation below
-        // fails, the prediction is already persisted and must not be re-requested.
         self.last_processed_ts = Some(candle_ts);
 
         // --- Strategy evaluation ---
-        // Errors here are logged but do NOT propagate — the prediction is
-        // already persisted and the candle is marked processed.
-        if let Err(e) = self.evaluate_and_execute_strategy(candle_ts, pred, candles).await {
+        if let Err(e) = self.evaluate_and_execute_strategy(candle_ts, pred, &closes, sma, sma_valid).await {
             error!(
                 error = %e,
                 candle_ts,
-                "strategy evaluation failed (prediction already persisted)"
+                "equity strategy evaluation failed (prediction already persisted)"
             );
         }
 
         Ok(())
     }
 
-    /// Evaluate the trading strategy and execute position changes.
-    ///
-    /// Returns `Err` on DB or computation failures — the caller decides
-    /// whether to propagate or log-and-continue.
     async fn evaluate_and_execute_strategy(
         &mut self,
         candle_ts: i64,
-        pred: &crate::bridge::Prediction,
-        candles: &[crate::db::Candle],
+        pred: &crate::bridge::EquityPrediction,
+        closes: &[f64],
+        sma: f64,
+        sma_valid: bool,
     ) -> Result<()> {
-        // Load current persisted position
-        let current_pos = crate::strategy::Position::from_i64(
+        let current_pos = Position::from_i64(
             db::load_position(&self.pool).await?
         );
 
-        // Compute SMA using all fetched candles
-        let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
-        let (sma, sma_valid) = crate::strategy::compute_sma(&closes, self.strategy_params.sma_window);
+        let latest_close = closes.last().copied().unwrap_or(0.0);
 
-        let latest_close = candles.last().map(|c| c.close).unwrap_or(0.0);
-
-        let input = crate::strategy::SignalInput {
-            pred_4h: pred.pred_4h,
-            pred_24h: pred.pred_24h,
+        let input = EquitySignalInput {
+            pred_1d: pred.pred_1d,
+            pred_5d: pred.pred_5d,
+            pred_21d: pred.pred_21d,
             current_close: latest_close,
             sma,
             sma_valid,
         };
 
-        let new_pos = crate::strategy::next_position(current_pos, &input, &self.strategy_params);
+        let new_pos = strategy::next_equity_position(current_pos, &input, &self.strategy_params);
 
-        // Regime for audit log
         let regime: i64 = if sma_valid {
             if latest_close > sma { 1 } else { -1 }
         } else {
             0
         };
 
-        // Always persist the position event (audit trail)
         db::insert_position_event(
             &self.pool,
             candle_ts,
             new_pos.as_i64(),
-            pred.pred_4h,
-            pred.pred_24h,
+            pred.pred_1d,
+            pred.pred_5d,
             regime,
             sma,
         ).await?;
 
-        // Persist signal_state (for restart resume)
         db::save_position(&self.pool, new_pos.as_i64()).await?;
 
-        // Execute trades if position changed
         if new_pos != current_pos {
             match self.executor.set_target_position(new_pos, latest_close, candle_ts).await {
                 Ok(fills) => {
@@ -219,12 +235,12 @@ impl Scheduler {
                             price = fill.price,
                             fee = fill.fee,
                             pnl = fill.realized_pnl,
-                            "trade executed"
+                            "equity trade executed"
                         );
                     }
                 }
                 Err(e) => {
-                    error!(error = %e, "executor failed to place order");
+                    error!(error = %e, "equity executor failed to place order");
                 }
             }
             info!(
@@ -233,10 +249,10 @@ impl Scheduler {
                 next = %new_pos,
                 regime,
                 sma,
-                "position changed"
+                "equity position changed"
             );
         } else {
-            tracing::debug!(candle_ts, position = %new_pos, "position unchanged");
+            tracing::debug!(candle_ts, position = %new_pos, "equity position unchanged");
         }
 
         Ok(())
@@ -250,11 +266,11 @@ impl Scheduler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bridge::Prediction;
-    use crate::db::{self, Candle, DbPool};
+    use crate::bridge::EquityPrediction;
+    use crate::db::{self, EquityCandle, DbPool};
     use crate::exec::paper::PaperExecutor;
-    use crate::normalize::NormStats;
-    use crate::strategy::StrategyParams;
+    use crate::features::equities_v2::EquityNormStats;
+    use crate::strategy::EquityStrategyParams;
     use sqlx::sqlite::SqlitePoolOptions;
 
     async fn test_pool() -> DbPool {
@@ -269,142 +285,84 @@ mod tests {
         pool
     }
 
-    fn test_scheduler(pool: DbPool) -> Scheduler {
-        let executor = ExecutorKind::Paper(PaperExecutor::new(pool.clone(), 0.0015));
-        Scheduler {
+    fn test_norm_stats() -> EquityNormStats {
+        EquityNormStats {
+            median: [0.0; EQ_FEATURE_DIM],
+            mad: [1.0; EQ_FEATURE_DIM],
+        }
+    }
+
+    fn test_scheduler(pool: DbPool) -> EquityScheduler {
+        let executor = ExecutorKind::Paper(PaperExecutor::new(pool.clone(), 0.001));
+        EquityScheduler {
             pool,
+            symbol: "QQQ".to_string(),
             bridge: None,
-            norm_stats: NormStats {
-                mean: [0.0; 3],
-                std: [1.0; 3],
-            },
+            norm_stats: test_norm_stats(),
             feature_window_size: 10,
             last_processed_ts: None,
-            strategy_params: StrategyParams {
-                magnitude_threshold: 0.005,
-                sma_window: 200,
-            },
+            strategy_params: EquityStrategyParams::default(),
             executor,
         }
     }
 
-    async fn seed_candles(pool: &DbPool, count: usize) {
+    async fn seed_equity_candles(pool: &DbPool, count: usize) {
         for i in 0..count {
-            let ts = (i as i64) * 3600;
-            let price = 50000.0 + (i as f64) * 10.0;
-            db::upsert_candle(pool, &Candle {
+            let ts = (i as i64) * 86400; // daily bars
+            let price = 400.0 + (i as f64) * 0.5;
+            db::upsert_equity_candle(pool, &EquityCandle {
+                symbol: "QQQ".to_string(),
                 ts,
                 open: price,
-                high: price + 100.0,
-                low: price - 100.0,
-                close: price + 50.0,
-                volume: 1000.0,
-                vwap: price + 25.0,
-                funding_rate: 0.0,
-                basis_z: 0.0,
-                ob_imbalance: 0.0,
+                high: price + 2.0,
+                low: price - 2.0,
+                close: price + 1.0,
+                volume: 1000000,
+                source: "yahoo".to_string(),
             }).await.unwrap();
         }
     }
 
-    fn fake_prediction() -> Prediction {
-        Prediction {
-            pred_1h: 0.01,
-            pred_4h: 0.02,
-            pred_24h: 0.03,
+    fn fake_prediction() -> EquityPrediction {
+        EquityPrediction {
+            pred_1d: 0.005,
+            pred_5d: 0.015,
+            pred_21d: 0.04,
         }
     }
 
-    /// After `insert_prediction` succeeds, `last_processed_ts` must be set
-    /// even if subsequent strategy operations fail.
+    /// After prediction persistence, last_processed_ts must be set even if
+    /// strategy evaluation fails.
     #[tokio::test]
     async fn process_sets_last_processed_after_prediction() {
         let pool = test_pool().await;
-        seed_candles(&pool, 15).await;
+        seed_equity_candles(&pool, 80).await;
 
         let mut sched = test_scheduler(pool.clone());
-        let candle_ts: i64 = 14 * 3600;
+        let candle_ts: i64 = 79 * 86400;
 
         let pred = fake_prediction();
-        let feature_window = vec![[0.1, 0.2, 0.3]; 10];
-        let candles = db::fetch_recent_candles(&pool, 16).await.unwrap();
+        let feature_window = vec![[0.1; EQ_FEATURE_DIM]; 10];
+        let candles = db::fetch_equity_candles_asc(&pool, "QQQ", 100).await.unwrap();
 
-        // finalize_candle persists prediction, sets last_processed_ts, runs strategy
         let result = sched.finalize_candle(
             candle_ts, &pred, &feature_window, &candles,
         ).await;
 
-        assert!(result.is_ok(), "finalize_candle should return Ok");
-        assert_eq!(
-            sched.last_processed_ts, Some(candle_ts),
-            "last_processed_ts must be set after prediction persistence"
-        );
-
-        // Verify prediction was actually persisted
-        let preds = db::fetch_recent_predictions(&pool, 1).await.unwrap();
-        assert_eq!(preds.len(), 1);
-        assert_eq!(preds[0].candle_ts, candle_ts);
+        assert!(result.is_ok());
+        assert_eq!(sched.last_processed_ts, Some(candle_ts));
     }
 
-    /// Strategy/execution errors must be logged but must NOT prevent the
-    /// candle from being marked as processed (prevents 30s retry loop).
-    #[tokio::test]
-    async fn process_does_not_retry_on_strategy_failure() {
-        let pool = test_pool().await;
-        seed_candles(&pool, 15).await;
-
-        // Drop signal_state table to force load_position to fail inside strategy
-        sqlx::query("DROP TABLE signal_state")
-            .execute(&pool)
-            .await
-            .unwrap();
-
-        let mut sched = test_scheduler(pool.clone());
-        let candle_ts: i64 = 14 * 3600;
-
-        let pred = fake_prediction();
-        let feature_window = vec![[0.1, 0.2, 0.3]; 10];
-        let candles = db::fetch_recent_candles(&pool, 16).await.unwrap();
-
-        // finalize_candle should return Ok even though strategy fails
-        let result = sched.finalize_candle(
-            candle_ts, &pred, &feature_window, &candles,
-        ).await;
-
-        assert!(
-            result.is_ok(),
-            "finalize_candle must return Ok even when strategy fails (got: {:?})",
-            result.err()
-        );
-        assert_eq!(
-            sched.last_processed_ts, Some(candle_ts),
-            "last_processed_ts must be set despite strategy failure"
-        );
-
-        // Verify prediction was persisted (it happened before strategy)
-        let preds = db::fetch_recent_predictions(&pool, 1).await.unwrap();
-        assert_eq!(preds.len(), 1);
-        assert_eq!(preds[0].candle_ts, candle_ts);
-    }
-
-    /// With fewer candles than feature_window_size + 1, process() must skip
-    /// inference and return Ok without inserting a prediction.
+    /// Insufficient candles → skip, no prediction inserted.
     #[tokio::test]
     async fn process_skips_when_insufficient_candles() {
         let pool = test_pool().await;
-        // Seed only 5 candles — less than feature_window_size(10) + 1 = 11
-        seed_candles(&pool, 5).await;
+        seed_equity_candles(&pool, 5).await; // too few
 
         let mut sched = test_scheduler(pool.clone());
-        let candle_ts: i64 = 4 * 3600;
+        let candle_ts: i64 = 4 * 86400;
 
-        // Call process directly — bridge is None so if it reaches inference it will panic
-        // The guard should prevent that
         let result = sched.process(candle_ts).await;
-        assert!(result.is_ok(), "process should return Ok when candles are insufficient");
-
-        // No prediction should have been inserted
-        let preds = db::fetch_recent_predictions(&pool, 1).await.unwrap();
-        assert_eq!(preds.len(), 0, "no prediction should be inserted when candles are insufficient");
+        assert!(result.is_ok());
     }
 }

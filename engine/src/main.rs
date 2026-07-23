@@ -57,7 +57,8 @@ async fn main() {
     };
 
     // Load normalization statistics — fail fast if the file is missing.
-    let norm_stats = match normalize::NormStats::load(&cfg.norm_stats_path) {
+    // Wave C: loads the QQQ median/MAD norm stats (name-keyed JSON format).
+    let norm_stats = match features::equities_v2::EquityNormStats::load_named(&cfg.norm_stats_path) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("norm_stats error: {:#}", e);
@@ -80,30 +81,42 @@ async fn main() {
         }
     };
 
-    // Run REST backfill synchronously BEFORE spawning the scheduler.
-    // If the scheduler runs first, its first tick may see only 1-2 candles
-    // (seq_len=1), producing garbage features and stale predictions.
-    if let Err(e) = data::backfill(pool.clone(), &cfg.symbol, cfg.sma_window).await {
-        eprintln!("data backfill fatal error: {:#}", e);
+    // Run the equities REST backfill synchronously BEFORE spawning the
+    // ingestion supervisor. This seeds QQQ + constituents + macro history so
+    // downstream features have enough lookback. Idempotent: re-runs top up
+    // only missing rows. (Crypto data source is retired — Wave A equities.)
+    if let Err(e) = data::backfill_equities(&pool).await {
+        eprintln!("equities backfill fatal error: {:#}", e);
         process::exit(1);
     }
 
-    // Spawn the hourly scheduler (inference pipeline) as a background task.
+    // Spawn the daily equities scheduler (inference pipeline) as a background task.
+    // Wave C: replaces the crypto hourly scheduler with a daily QQQ pipeline.
     let scheduler_pool = pool.clone();
     let zmq_endpoint = cfg.zmq_endpoint.clone();
     let feature_window_size = cfg.feature_window_size;
-    let strategy_params = strategy::StrategyParams {
-        magnitude_threshold: cfg.magnitude_threshold,
+    let symbol = cfg.symbol.clone();
+    let eq_strategy_params = strategy::EquityStrategyParams {
+        entry_threshold: cfg.magnitude_threshold,
+        exit_threshold: -cfg.magnitude_threshold / 3.0,
         sma_window: cfg.sma_window,
     };
     tokio::spawn(async move {
-        match scheduler::Scheduler::new(scheduler_pool, &zmq_endpoint, norm_stats, feature_window_size, strategy_params, executor).await {
+        match scheduler::EquityScheduler::new(
+            scheduler_pool,
+            symbol,
+            &zmq_endpoint,
+            norm_stats,
+            feature_window_size,
+            eq_strategy_params,
+            executor,
+        ).await {
             Ok(mut sched) => {
                 if let Err(e) = sched.run().await {
-                    error!("scheduler fatal error: {e:#}");
+                    error!("equity scheduler fatal error: {e:#}");
                 }
             }
-            Err(e) => error!("scheduler init error: {e:#}"),
+            Err(e) => error!("equity scheduler init error: {e}"),
         }
     });
 
@@ -149,9 +162,12 @@ async fn main() {
         }
     }
 
-    // Run the WS loop + retention task. This blocks until a fatal error.
-    if let Err(e) = data::run_ws_and_retention(pool, &cfg.symbol).await {
-        eprintln!("data ws/retention fatal error: {:#}", e);
+    // Equities ingestion supervisor (daily cadence). This blocks until a
+    // fatal error. It keeps QQQ/constituents/macro series fresh by re-pulling
+    // only the most recent trading days each day. (Crypto WS loop is retired;
+    // daily bars need no streaming feed.)
+    if let Err(e) = data::run_equities_ingestion(pool).await {
+        eprintln!("equities ingestion fatal error: {:#}", e);
         process::exit(1);
     }
 }
