@@ -27,8 +27,8 @@ def test_defaults_when_env_unset(clean_env: None) -> None:
     cfg = InferenceConfig.from_env()
     assert cfg.zmq_endpoint == "tcp://127.0.0.1:5555"
     assert cfg.zmq_bind == "tcp://*:5555"
-    assert cfg.model_path == Path("/models/model.pt").resolve()
-    assert cfg.norm_stats_path == Path("/models/norm_stats.json").resolve()
+    assert cfg.model_path == Path("models/qqq_tcn_v1.pt").resolve()
+    assert cfg.norm_stats_path == Path("models/norm_stats_qqq_v1.json").resolve()
     assert isinstance(cfg.model_path, Path)
     assert isinstance(cfg.norm_stats_path, Path)
 

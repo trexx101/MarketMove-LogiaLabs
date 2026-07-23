@@ -18,9 +18,12 @@ from pathlib import Path
 
 _DEFAULTS: dict[str, str] = {
     "ZMQ_ENDPOINT": "tcp://127.0.0.1:5555",
-    "MODEL_PATH": "/models/model.pt",
-    "NORM_STATS_PATH": "/models/norm_stats.json",
     "ZMQ_BIND": "tcp://*:5555",
+    # Wave C: legacy crypto model paths (kept for backward compat — the old
+    # inference_engine.py still reads these). The equity_model.py service
+    # reads TCN_PATH / LGBM_*_PATH / MODELS_DIR directly from the env.
+    "MODEL_PATH": "models/qqq_tcn_v1.pt",
+    "NORM_STATS_PATH": "models/norm_stats_qqq_v1.json",
 }
 
 
