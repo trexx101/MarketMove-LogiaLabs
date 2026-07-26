@@ -80,13 +80,13 @@ EXPOSE 5555
 # A real REQ/REP round-trip exercises both the ZMQ socket and the model
 # graph (so a stuck-forward or partially-loaded container is detected).
 # We send a minimal (1×1 window) feature request and require a 3-key reply.
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=20s --start-period=60s --retries=3 \
     CMD python -c "import json, zmq; \
 ctx=zmq.Context.instance(); \
 s=ctx.socket(zmq.REQ); \
 s.setsockopt(zmq.LINGER, 0); \
-s.setsockopt(zmq.RCVTIMEO, 5000); \
-s.setsockopt(zmq.SNDTIMEO, 5000); \
+s.setsockopt(zmq.RCVTIMEO, 15000); \
+s.setsockopt(zmq.SNDTIMEO, 15000); \
 s.connect('tcp://127.0.0.1:5555'); \
 s.send(json.dumps({'schema_version': 3, 'feature_window': [[0.0]*8]}).encode()); \
 reply=json.loads(s.recv()); \

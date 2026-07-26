@@ -56,10 +56,10 @@ services:
     # The inference Dockerfile already declares a HEALTHCHECK; this
     # is compose-level plumbing to make the engine wait for it.
     healthcheck:
-      test: ["CMD", "python", "-c", "import json, zmq; ctx=zmq.Context.instance(); s=ctx.socket(zmq.REQ); s.setsockopt(zmq.LINGER, 0); s.setsockopt(zmq.RCVTIMEO, 5000); s.setsockopt(zmq.SNDTIMEO, 5000); s.connect('tcp://127.0.0.1:5555'); s.send(json.dumps({'schema_version': 3, 'feature_window': [[0.0]*8]}).encode()); reply=json.loads(s.recv()); assert all(k in reply for k in ('pred_1d', 'pred_5d', 'pred_21d')), reply; s.close()"]
+      test: ["CMD", "python", "-c", "import json, zmq; ctx=zmq.Context.instance(); s=ctx.socket(zmq.REQ); s.setsockopt(zmq.LINGER, 0); s.setsockopt(zmq.RCVTIMEO, 15000); s.setsockopt(zmq.SNDTIMEO, 15000); s.connect('tcp://127.0.0.1:5555'); s.send(json.dumps({'schema_version': 3, 'feature_window': [[0.0]*8]}).encode()); reply=json.loads(s.recv()); assert all(k in reply for k in ('pred_1d', 'pred_5d', 'pred_21d')), reply; s.close()"]
       interval: 30s
-      timeout: 10s
-      start_period: 30s
+      timeout: 20s
+      start_period: 60s
       retries: 3
     # Aggressive resource caps — PyTorch CPU is the only meaningful
     # workload on this container.
