@@ -1,11 +1,11 @@
 # Graph Report - MarketMoves  (2026-07-24)
 
 ## Corpus Check
-- 106 files · ~92,230 words
+- 106 files · ~91,446 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1466 nodes · 2386 edges · 116 communities (106 shown, 10 thin omitted)
+- 1461 nodes · 2379 edges · 115 communities (105 shown, 10 thin omitted)
 - Extraction: 96% EXTRACTED · 4% INFERRED · 0% AMBIGUOUS · INFERRED: 95 edges (avg confidence: 0.78)
 - Token cost: 0 input · 0 output
 
@@ -124,7 +124,6 @@
 - Prompt: Convert a Plan into Per-Feature Implementation Specs
 - Feature Pipeline (log_return, ATR, VWAP)
 - AGENTS.md
-- 8.8 Documentation in Rust: How, When and Why
 
 ## God Nodes (most connected - your core abstractions)
 1. `compute_equity_features()` - 27 edges
@@ -132,7 +131,7 @@
 3. `run_parity()` - 22 edges
 4. `compute_features()` - 20 edges
 5. `clear_engine_env()` - 19 edges
-6. `EquityCandle` - 19 edges
+6. `EquityCandle` - 18 edges
 7. `synthetic_qqq()` - 17 edges
 8. `MarketMarkovNet` - 17 edges
 9. `_random_model()` - 16 edges
@@ -161,7 +160,7 @@
 - **Parity Verification System (Gate + Harness + Marker)** — plans_market_markov_net_requirements_parity_gate, plans_market_markov_net_features_13_parity_harness, plans_market_markov_net_features_13_parity_marker, plans_market_markov_net_features_13_golden_fixture, tests_readme_feature_parity, tests_readme_prediction_parity, tests_readme_signal_parity, plans_market_markov_net_features_12_live_mode_guard [EXTRACTED 1.00]
 - **Data Ingestion to Prediction End-to-End Flow** — plans_market_markov_net_features_06_kraken_ws_ingest, plans_market_markov_net_features_06_rest_backfill, plans_market_markov_net_features_07_feature_pipeline, plans_market_markov_net_features_07_zscore_normalization, plans_market_markov_net_features_07_zmq_bridge, inference_readme_zmq_rep, inference_readme_prediction_payload [EXTRACTED 1.00]
 
-## Communities (116 total, 10 thin omitted)
+## Communities (115 total, 10 thin omitted)
 
 ### Community 0 - "Inference Service"
 Cohesion: 0.16
@@ -169,7 +168,7 @@ Nodes (18): device, _handle_request(), Tensor, MarketMarkovNet inference microse
 
 ### Community 1 - "Kraken Execution"
 Cohesion: 0.10
-Nodes (29): FillResult, Result, Vec, TradeSide, flat_to_long_opens_position(), long_to_flat_closes_with_pnl(), long_to_short_closes_and_opens(), PaperExecutor (+21 more)
+Nodes (30): ExecutorKind, FillResult, Result, Vec, TradeSide, flat_to_long_opens_position(), long_to_flat_closes_with_pnl(), long_to_short_closes_and_opens() (+22 more)
 
 ### Community 2 - "Parity Verification"
 Cohesion: 0.10
@@ -200,12 +199,12 @@ Cohesion: 0.09
 Nodes (34): fetchAccuracy(), fetchChart(), fetchPredictions(), fetchStatus(), request(), accuracyIntervalId, intervalId, tick() (+26 more)
 
 ### Community 9 - "Rust Best Practices"
-Cohesion: 0.22
-Nodes (6): Clippy Linting Discipline, Important Clippy Lints, Snapshot Testing with cargo insta, Automated Testing Practices, Doc Comments (/// and //!), Comments vs Documentation
+Cohesion: 0.15
+Nodes (11): Clippy Linting Discipline, Important Clippy Lints, Snapshot Testing with cargo insta, Automated Testing Practices, Dynamic Dispatch, Generics and Dispatch, Static Dispatch, PhantomData Usage (+3 more)
 
 ### Community 10 - "ZMQ Bridge"
-Cohesion: 0.12
-Nodes (26): Duration, EquityPrediction, Prediction, Result, Self, ZmqBridge, ExecutorKind, EquityNormStats (+18 more)
+Cohesion: 0.13
+Nodes (23): Duration, EquityPrediction, Prediction, Result, Self, ZmqBridge, EquityScheduler, fake_prediction() (+15 more)
 
 ### Community 11 - "Database Layer"
 Cohesion: 0.14
@@ -221,7 +220,7 @@ Nodes (13): Environment Variable Reference, MAGNITUDE_THRESHOLD Configuration, S
 
 ### Community 14 - "REST Data Ingestion"
 Cohesion: 0.10
-Nodes (42): EquityCandle, adx_14(), adx_in_range(), compute_equity_features(), compute_returns_correct_length(), drawdown_from_high(), drawdown_nonpositive(), eq_candle() (+34 more)
+Nodes (43): EquityCandle, adx_14(), adx_in_range(), compute_equity_features(), compute_returns_correct_length(), drawdown_from_high(), drawdown_nonpositive(), eq_candle() (+35 more)
 
 ### Community 15 - "API Keys & Security"
 Cohesion: 0.15
@@ -284,8 +283,8 @@ Cohesion: 0.22
 Nodes (8): Confirmed product decisions, Data model (SQLite), Environment variables, Feature table, Global constraints / rules, MarketMarkovNet — Requirements Index, Overview, Tech stack
 
 ### Community 43 - "Tech Stack"
-Cohesion: 0.07
-Nodes (39): Dataset, compute_basis_z(), compute_ob_imbalance(), fetch_and_merge_features(), fetch_binance_vision_funding(), fetch_binance_vision_klines(), _fetch_zip_url(), ms_to_date() (+31 more)
+Cohesion: 0.09
+Nodes (26): Dataset, build_feature_matrix(), calibrate_barrier_c(), compute_atr(), DataFrame, ndarray, Series, 10-dim feature matrix with robust scaling. Replaces 6-dim (no more llm stub). (+18 more)
 
 ### Community 44 - "QQQ Equities Engine — Transition Plan from BTC/Quantitative"
 Cohesion: 0.08
@@ -304,8 +303,8 @@ Cohesion: 0.14
 Nodes (13): config_defaults_sensible(), config_from_env_disabled_without_key(), fetch_regime_prob(), LlmRegimeConfig, parse_bull_prob(), read_write_cache(), Default, Result (+5 more)
 
 ### Community 48 - "Chapter 8 - Comments vs Documentation"
-Cohesion: 0.12
-Nodes (16): 8.1 Comments vs Documentation: Know the Difference, 8.2 When to use comments, 8.3 When comments get in the way, 8.4 Don't Write Living Documentation (living comments), 8.5 Replace Comments with Code, 8.6 `TODO` should become issues, 8.7 When to use doc comments, 8.9 Checklist for Documentation coverage (+8 more)
+Cohesion: 0.10
+Nodes (20): 8.1 Comments vs Documentation: Know the Difference, 8.2 When to use comments, 8.3 When comments get in the way, 8.4 Don't Write Living Documentation (living comments), 8.5 Replace Comments with Code, 8.6 `TODO` should become issues, 8.7 When to use doc comments, 8.8 Documentation in Rust: How, When and Why (+12 more)
 
 ### Community 49 - "9.2 When to use pointers:"
 Cohesion: 0.10
@@ -328,16 +327,16 @@ Cohesion: 0.11
 Nodes (17): Commit strategy, Dependency matrix, Execution strategy, Final verification wave, mmn-training-deployment-hardening - Work Plan, Must have, Must NOT have (guardrails, anti-slop, scope boundaries), Parallel execution waves (+9 more)
 
 ### Community 54 - "test_equity_model.py"
-Cohesion: 0.16
-Nodes (16): _free_port(), _handle_request_v3(), Round-trip contract tests for the V3 equities inference service.  Tests the JSON, Call _handle_request directly (bypasses ZMQ) to test the handler logic., _handle_request must return pred_1d, pred_5d, pred_21d in log-return space., atr_ratio=0 should produce near-zero predictions (no signal)., Higher atr_ratio should scale up predictions linearly., Handler must reject windows with wrong feature dimension. (+8 more)
+Cohesion: 0.17
+Nodes (14): _free_port(), _handle_request_v3(), Round-trip contract tests for the V3 equities inference service.  Tests the JSON, Call _handle_request directly (bypasses ZMQ) to test the handler logic., _handle_request must return pred_1d, pred_5d, pred_21d., Handler must reject windows with wrong feature dimension., Handler must reject empty feature_window., Start the service, send a V3 request over ZMQ, verify the response. (+6 more)
 
 ### Community 55 - "Draft: mmn-prediction-fix"
 Cohesion: 0.12
 Nodes (15): Approval gate, Bug 1: Scheduler 30-second retry loop, Bug 2: seq_len=1 / insufficient candle data, Bug 3: Data pipeline not receiving new confirmed candles, Bug 4: Dashboard shows one prediction row, Components (topology ledger), Decisions (with rationale), Draft: mmn-prediction-fix (+7 more)
 
 ### Community 56 - "equity_model.py"
-Cohesion: 0.18
-Nodes (12): _build_logger(), _JsonFormatter, _load_ensemble(), main(), Logger, LogRecord, QQQ daily equities inference service (Wave C).  ZMQ REP server that loads the TC, Block until path exists (useful for Docker startup ordering). (+4 more)
+Cohesion: 0.19
+Nodes (13): EquityEnsemble, _handle_request(), _load_ensemble(), main(), QQQ daily equities inference service (Wave C).  ZMQ REP server that loads the TC, TCN + LightGBM ensemble for 1d/5d/21d horizon predictions.      The TCN consumes, Run ensemble prediction on a normalized feature window.          Parameters, Decode one V3 REQ message, run inference, return serialized reply. (+5 more)
 
 ### Community 57 - "Chapter 4 - Errors Handling"
 Cohesion: 0.14
@@ -356,8 +355,8 @@ Cohesion: 0.19
 Nodes (11): backfill(), backfill_returns_clear_error_without_credentials(), kline_to_equity_candle(), kline_to_equity_candle_basic(), MoomooConfig, DbPool, Option, Result (+3 more)
 
 ### Community 61 - "fetch_features.py"
-Cohesion: 0.21
-Nodes (11): EquityEnsemble, _handle_request(), TCN + LightGBM ensemble for 1d/5d/21d horizon predictions.      The TCN consumes, Run ensemble prediction on a normalized feature window.          Parameters, Decode one V3 REQ message, run inference, return serialized reply., Verify blend weights and ATR denormalization via isolated computation.      The, Handler must reject empty feature_window., Handler must return error for unparseable JSON. (+3 more)
+Cohesion: 0.29
+Nodes (13): compute_basis_z(), compute_ob_imbalance(), fetch_and_merge_features(), fetch_binance_vision_funding(), fetch_binance_vision_klines(), _fetch_zip_url(), ms_to_date(), DataFrame (+5 more)
 
 ### Community 62 - "Chapter 3 - Performance Mindset"
 Cohesion: 0.15
@@ -388,8 +387,8 @@ Cohesion: 0.17
 Nodes (9): EquityInferenceConfig, Fail fast if any model artifact is missing., Configuration for the QQQ V3 inference microservice (TCN + LightGBM ensemble)., EquityInferenceConfig.from_env must resolve defaults correctly., EquityInferenceConfig.from_env must respect env var overrides., require_artifacts must raise FileNotFoundError for missing files., test_equity_inference_config_defaults(), test_equity_inference_config_env_override() (+1 more)
 
 ### Community 69 - "load_lgbm"
-Cohesion: 0.29
-Nodes (8): load_lgbm(), load_tcn(), Load a trained TCN from a state-dict checkpoint., Load a LightGBM model from a pickle file.      Returns the underlying ``Booster`, EquityEnsemble.predict must return pred_1d, pred_5d, pred_21d., Ensemble must handle windows longer than seq_len (TCN reads last timesteps)., test_ensemble_predict_returns_3_horizons(), test_ensemble_predict_with_various_window_sizes()
+Cohesion: 0.21
+Nodes (12): load_lgbm(), load_tcn(), Load a trained TCN from a state-dict checkpoint., Load a LightGBM model from a pickle file.      Returns the underlying ``Booster`, Ensemble weights must affect output (verify blending is not a no-op)., Handler must return error for unparseable JSON., EquityEnsemble.predict must return pred_1d, pred_5d, pred_21d., Ensemble must handle windows longer than seq_len (TCN reads last timesteps). (+4 more)
 
 ### Community 70 - "Borrowing Over Cloning"
 Cohesion: 0.18
@@ -489,7 +488,7 @@ Nodes (4): Files, frontend/, Serving, Status
 
 ### Community 94 - "_build_logger"
 Cohesion: 0.40
-Nodes (5): Dynamic Dispatch, Generics and Dispatch, Static Dispatch, PhantomData Usage, Type State Pattern
+Nodes (4): _build_logger(), _JsonFormatter, Logger, LogRecord
 
 ### Community 95 - "inference/"
 Cohesion: 0.40
@@ -559,10 +558,6 @@ Nodes (4): Arc Atomic Reference Counter, Mutex Thread-Safe Mutability, Pointer T
 Cohesion: 1.00
 Nodes (3): norm_stats.json (Z-score Stats), Feature Pipeline (log_return, ATR, VWAP), Z-Score Normalization (Rust-side)
 
-### Community 115 - "8.8 Documentation in Rust: How, When and Why"
-Cohesion: 0.50
-Nodes (4): 8.8 Documentation in Rust: How, When and Why, Difference between `///` and `//!`, `///` Item level documentation, `//!` Module/Crate level Documentation
-
 ## Knowledge Gaps
 - **415 isolated node(s):** `$schema`, `.opencode/plugins/graphify.js`, `views`, `intervalId`, `accuracyIntervalId` (+410 more)
   These have ≤1 connection - possible missing edges or undocumented components.
@@ -574,7 +569,7 @@ _Questions this graph is uniquely positioned to answer:_
 - **Why does `compute_features()` connect `Feature Computation` to `Parity Verification`?**
   _High betweenness centrality (0.033) - this node is a cross-community bridge._
 - **Why does `run_parity()` connect `Parity Verification` to `Trading Strategy`, `Feature Computation`?**
-  _High betweenness centrality (0.024) - this node is a cross-community bridge._
+  _High betweenness centrality (0.023) - this node is a cross-community bridge._
 - **Why does `EquityCandle` connect `REST Data Ingestion` to `fred.rs`, `Axum Telemetry API`, `ZMQ Bridge`, `Database Layer`, `moomoo.rs`, `yahoo.rs`?**
   _High betweenness centrality (0.021) - this node is a cross-community bridge._
 - **Are the 2 inferred relationships involving `compute_equity_features()` (e.g. with `.process()` and `rust_vs_python_feature_parity()`) actually correct?**

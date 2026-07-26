@@ -113,6 +113,5 @@
   "111": "Prompt: Convert a Plan into Per-Feature Implementation Specs",
   "112": "Feature Pipeline (log_return, ATR, VWAP)",
   "113": "AGENTS.md",
-  "114": "Training_model_Design.md",
-  "115": "8.8 Documentation in Rust: How, When and Why"
+  "114": "Training_model_Design.md"
 }
