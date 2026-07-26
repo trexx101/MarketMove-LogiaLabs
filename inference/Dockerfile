@@ -50,22 +50,26 @@ RUN pip install --no-cache-dir \
 
 RUN pip install --no-cache-dir \
         numpy==1.26.4 \
-        pyzmq==26.0.3
+        pyzmq==26.0.3 \
+        lightgbm>=4.0
 
 # ── Application source ───────────────────────────────────────────────────────
 # The build context is this directory, so the package files live at the root
 # of the context (./__init__.py, ./inference_engine.py, etc.). Models, target/,
 # frontend/, etc. are explicitly excluded via .dockerignore.
-COPY __init__.py    /app/inference/__init__.py
-COPY config.py      /app/inference/config.py
-COPY model.py       /app/inference/model.py
-COPY inference_engine.py /app/inference/inference_engine.py
+COPY __init__.py          /app/inference/__init__.py
+COPY config.py            /app/inference/config.py
+COPY model.py             /app/inference/model.py
+COPY equity_model.py      /app/inference/equity_model.py
+COPY inference_engine.py  /app/inference/inference_engine.py
 
 # ── Runtime defaults ─────────────────────────────────────────────────────────
 # The mount point matches deploy/config.md and the InferenceConfig defaults.
 # Operators can override at `docker run -e ...` or via compose.
-ENV MODEL_PATH=/models/model.pt \
-    NORM_STATS_PATH=/models/norm_stats.json \
+ENV TCN_PATH=/models/qqq_tcn_v1.pt \
+    LGBM_H1_PATH=/models/qqq_lgbm_h1_v1.pkl \
+    LGBM_H5_PATH=/models/qqq_lgbm_h5_v1.pkl \
+    LGBM_H21_PATH=/models/qqq_lgbm_h21_v1.pkl \
     ZMQ_BIND=tcp://0.0.0.0:5555
 
 # Compose deploys this on an internal network — never publish to the host.
@@ -84,12 +88,10 @@ s.setsockopt(zmq.LINGER, 0); \
 s.setsockopt(zmq.RCVTIMEO, 5000); \
 s.setsockopt(zmq.SNDTIMEO, 5000); \
 s.connect('tcp://127.0.0.1:5555'); \
-s.send(json.dumps({'feature_window': [[0.0, 0.0, 0.0]]}).encode()); \
-reply = json.loads(s.recv()); \
-assert all(k in reply for k in ('pred_1h', 'pred_4h', 'pred_24h')), reply; \
+s.send(json.dumps({'schema_version': 3, 'feature_window': [[0.0]*8]}).encode()); \
+reply=json.loads(s.recv()); \
+assert all(k in reply for k in ('pred_1d', 'pred_5d', 'pred_21d')), reply; \
 s.close()" || exit 1
 
-# ── Entrypoint ───────────────────────────────────────────────────────────────
-# `python -u` is redundant given PYTHONUNBUFFERED=1 but kept for clarity
-# when the env var is overridden by the operator.
-ENTRYPOINT ["python", "-u", "-m", "inference.inference_engine"]
+# ── Entrypoint ────────────────────────────────────────────────────────────────
+ENTRYPOINT ["python", "-u", "-m", "inference.equity_model"]

@@ -178,7 +178,7 @@ impl Config {
             return Err(anyhow!("NORM_STATS_PATH must not be empty"));
         }
 
-        let feature_window_size = parse_env::<usize>("FEATURE_WINDOW_SIZE", "21")
+        let feature_window_size = parse_env::<usize>("FEATURE_WINDOW_SIZE", "126")
             .context("FEATURE_WINDOW_SIZE must be a positive integer")?;
         if feature_window_size == 0 {
             return Err(anyhow!("FEATURE_WINDOW_SIZE must be > 0, got 0"));
@@ -326,7 +326,7 @@ mod tests {
         assert_eq!(cfg.database_url, "sqlite://data/candles.db");
         // dotenvy loads .env which overrides the default path.
         assert_eq!(cfg.norm_stats_path, "/models/norm_stats_qqq_v1.json");
-        assert_eq!(cfg.feature_window_size, 21);
+        assert_eq!(cfg.feature_window_size, 126);
         assert_eq!(cfg.parity_marker_path, "parity_verified.json");
         assert_eq!(cfg.parity_max_age_secs, 7 * 24 * 60 * 60);
     }

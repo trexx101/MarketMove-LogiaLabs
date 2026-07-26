@@ -6,6 +6,7 @@ mod db;
 mod exec;
 mod features;
 mod normalize;
+mod market_hours;
 // `parity` is referenced indirectly through `config::Config::from_env` (the
 // live-mode guard). The bin doesn't use any parity items directly.
 #[allow(dead_code)]

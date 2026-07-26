@@ -50,6 +50,7 @@ pub async fn backfill_macro(
 
     let client = reqwest::Client::builder()
         .user_agent("MarketMarkovNet/equities")
+        .timeout(std::time::Duration::from_secs(5))
         .build()
         .context("building reqwest client")?;
 

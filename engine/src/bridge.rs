@@ -209,14 +209,18 @@ impl ZmqBridge {
     // -----------------------------------------------------------------------
 
     /// Send a V3 (8-dim) equities feature window to the inference service.
+    /// `atr_ratio` = ATR(14) / close for the latest candle — used by the service
+    /// to denormalize predictions back to raw log-return space.
     pub async fn predict_v3(
         &mut self,
         feature_window: &[[f64; EQ_FEATURE_DIM]],
+        atr_ratio: f64,
         timeout: Duration,
     ) -> Result<EquityPrediction> {
         let payload = json!({
             "schema_version": 3,
             "feature_window": feature_window,
+            "atr_ratio": atr_ratio,
         })
         .to_string();
         debug!(bytes = payload.len(), "sending V3 inference request");
@@ -256,13 +260,14 @@ impl ZmqBridge {
     pub async fn predict_v3_with_retry(
         &mut self,
         feature_window: &[[f64; EQ_FEATURE_DIM]],
+        atr_ratio: f64,
         timeout: Duration,
         retries: u32,
     ) -> Result<EquityPrediction> {
         let total_attempts = retries + 1;
         let mut last_err = anyhow!("no attempts made");
         for attempt in 1..=total_attempts {
-            match self.predict_v3(feature_window, timeout).await {
+            match self.predict_v3(feature_window, atr_ratio, timeout).await {
                 Ok(pred) => return Ok(pred),
                 Err(e) => {
                     last_err = e;

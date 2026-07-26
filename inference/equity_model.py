@@ -166,7 +166,8 @@ class EquityEnsemble:
 
     The TCN consumes the full feature window (seq_len × 8).
     The LightGBM models consume only the last timestep (1 × 8).
-    Predictions are blended with configurable weights.
+    Predictions are blended using z-score normalization to match the
+    Colab walk-forward evaluation pipeline.
 
     Default weights: TCN 0.5, LightGBM 0.5 (equal blend).
     These should be tuned on walk-forward OOS IC.
@@ -187,16 +188,28 @@ class EquityEnsemble:
         self.lgbm_weight = lgbm_weight
         self._horizons = [1, 5, 21]
 
-    def predict(self, feature_window: list[list[float]]) -> dict[str, float]:
+    def predict(
+        self, feature_window: list[list[float]], atr_ratio: float = 0.005
+    ) -> dict[str, float]:
         """Run ensemble prediction on a normalized feature window.
 
         Parameters
         ----------
         feature_window : list of [f0..f7] floats, shape (seq_len, 8)
+        atr_ratio : ATR(14) / close for the latest candle.
+            Defaults to 0.005 (~0.5%, a reasonable QQQ long-run estimate).
+            The Rust scheduler computes this and passes it in the V3 request.
 
         Returns
         -------
-        dict with keys pred_1d, pred_5d, pred_21d
+        dict with keys pred_1d, pred_5d, pred_21d in raw log-return units.
+
+        Blending: raw weighted average of denormalized model outputs.
+        Both TCN and LightGBM produce label-space values (ATR-normalized),
+        so after denormalization they share the same units and a plain
+        weighted average is appropriate.  The Colab notebook uses z-score
+        blending with rolling statistics per horizon — that requires a
+        prediction history buffer which is not maintained here.
         """
         # --- TCN path ---
         x = torch.tensor(feature_window, dtype=torch.float32).unsqueeze(0)  # (1, seq_len, 8)
@@ -210,11 +223,15 @@ class EquityEnsemble:
         for h in self._horizons:
             lgbm_preds[h] = float(self.lgbm_models[h].predict(last_row)[0])
 
-        # --- Blend ---
+        # --- Weighted raw blend (both models now in label/ATR-normalized space) ---
         result = {}
         for h in self._horizons:
-            key = f"pred_{h}d"
-            result[key] = self.tcn_weight * tcn_preds[h] + self.lgbm_weight * lgbm_preds[h]
+            # Blend in label space, then denormalize to raw log-return:
+            #   label = w_t * tcn[h] + w_l * lgbm[h]
+            #   raw  = label * atr_ratio
+            label = self.tcn_weight * tcn_preds[h] + self.lgbm_weight * lgbm_preds[h]
+            raw_log_return = label * atr_ratio
+            result[f"pred_{h}d"] = float(raw_log_return)
 
         return result
 
@@ -238,6 +255,16 @@ def _handle_request(raw_bytes: bytes, ensemble: EquityEnsemble, req_id: int) -> 
         log.error("req_id=%d invalid_input", req_id)
         return json.dumps({"error": "feature_window must be a non-empty list of lists"}).encode()
 
+    # ATR ratio for denormalization (optional, defaults to 0.005).
+    atr_ratio = request.get("atr_ratio")
+    if atr_ratio is None:
+        atr_ratio = 0.005
+    try:
+        atr_ratio = float(atr_ratio)
+    except (TypeError, ValueError):
+        log.error("req_id=%d invalid atr_ratio=%r", req_id, atr_ratio)
+        return json.dumps({"error": "atr_ratio must be a number"}).encode()
+
     # Validate feature dimension
     n_features = len(feature_window[0])
     if n_features != 8:
@@ -246,7 +273,7 @@ def _handle_request(raw_bytes: bytes, ensemble: EquityEnsemble, req_id: int) -> 
         return json.dumps({"error": err}).encode()
 
     try:
-        preds = ensemble.predict(feature_window)
+        preds = ensemble.predict(feature_window, atr_ratio=atr_ratio)
     except Exception as exc:
         log.error("req_id=%d inference_error=%s", req_id, str(exc))
         return json.dumps({"error": f"inference error: {exc}"}).encode()
@@ -264,6 +291,7 @@ def _handle_request(raw_bytes: bytes, ensemble: EquityEnsemble, req_id: int) -> 
                 "req_id": req_id,
                 "seq_len": len(feature_window),
                 "n_features": n_features,
+                "atr_ratio": atr_ratio,
                 **preds,
             },
             separators=(",", ":"),

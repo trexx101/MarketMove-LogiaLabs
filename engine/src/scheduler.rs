@@ -52,9 +52,12 @@ impl EquityScheduler {
 
     /// Poll loop — checks for new daily candles every 5 minutes.
     pub async fn run(&mut self) -> Result<()> {
-        let mut interval = tokio::time::interval(Duration::from_secs(300));
         loop {
-            interval.tick().await;
+            let now = chrono::Utc::now().timestamp();
+            let next_open = crate::market_hours::next_market_open(now);
+            let sleep_secs = (next_open - now).max(0) as u64;
+            let sleep_secs = sleep_secs.min(300);
+            tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
             let latest = db::latest_equity_candle_ts(&self.pool, &self.symbol).await?;
             if let Some(ts) = latest {
                 if ts > self.last_processed_ts.unwrap_or(0) {
@@ -90,6 +93,11 @@ impl EquityScheduler {
         let vix_close: Option<Vec<f64>> = vix.map(|c| c.iter().map(|c| c.close).collect());
         let tlt_close: Option<Vec<f64>> = tlt.map(|c| c.iter().map(|c| c.close).collect());
 
+        // Compute ATR(14) / close for the last candle — needed by the inference
+        // service to denormalize predictions back to raw log-return space.
+        let atr_ratio = compute_atr_ratio(&candles);
+        let last_close = candles.last().map(|c| c.close).unwrap_or(1.0).max(1.0);
+
         let all_features = compute_equity_features(
             &candles,
             vix_close.as_deref(),
@@ -119,7 +127,7 @@ impl EquityScheduler {
             .expect("ZMQ bridge not configured (test mode — use process_with_prediction)");
 
         let pred = bridge
-            .predict_v3_with_retry(&feature_window, Duration::from_secs(10), 2)
+            .predict_v3_with_retry(&feature_window, atr_ratio, Duration::from_secs(10), 2)
             .await?;
 
         self.finalize_candle(candle_ts, &pred, &feature_window, &candles).await
@@ -260,8 +268,50 @@ impl EquityScheduler {
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// ATR helper
 // ---------------------------------------------------------------------------
+
+/// Compute ATR(14) / close for the most recent candle.
+/// Uses Wilder's EMA smoothing (alpha = 1/14), matching the Colab label
+/// computation exactly. Returns 0.005 (≈ 0.5%, a reasonable QQQ default)
+/// if insufficient data is available.
+fn compute_atr_ratio(candles: &[crate::db::EquityCandle]) -> f64 {
+    let n = candles.len();
+    if n < 15 {
+        return 0.005;
+    }
+
+    // Compute True Range for all bars
+    let mut tr = Vec::with_capacity(n);
+    tr.push(0.0); // tr[0] = 0
+    for i in 1..n {
+        let high = candles[i].high;
+        let low = candles[i].low;
+        let prev_close = candles[i - 1].close;
+        let h_l = high - low;
+        let h_c = (high - prev_close).abs();
+        let l_c = (low - prev_close).abs();
+        tr.push(h_l.max(h_c).max(l_c));
+    }
+
+    // Wilder's smoothing of TR over 14 periods
+    let period = 14.0_f64;
+    let mut atr = 0.0_f64;
+    // First value = simple average of first 14 TRs
+    let warmup: f64 = tr[1..=14].iter().sum::<f64>() / period;
+    atr = warmup;
+    // Then Wilder update
+    for i in 15..n {
+        atr = (atr * (period - 1.0) + tr[i]) / period;
+    }
+
+    let last_close = candles.last().map(|c| c.close).unwrap_or(1.0).max(1e-6);
+    if atr <= 0.0 || last_close <= 0.0 {
+        0.005
+    } else {
+        atr / last_close
+    }
+}
 
 #[cfg(test)]
 mod tests {

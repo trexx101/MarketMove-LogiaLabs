@@ -29,7 +29,17 @@ Model artifacts (`model.pt`, `norm_stats.json`) are mounted from
 ```bash
 cd inference
 uv sync
-uv run python -m inference.inference_engine
+uv run python -m inference.equity_model
+```
+
+Set env vars or use defaults:
+```bash
+# Defaults point at models/ in the project root
+TCN_PATH=models/qqq_tcn_v1.pt \
+LGBM_H1_PATH=models/qqq_lgbm_h1_v1.pkl \
+LGBM_H5_PATH=models/qqq_lgbm_h5_v1.pkl \
+LGBM_H21_PATH=models/qqq_lgbm_h21_v1.pkl \
+uv run python -m inference.equity_model
 ```
 
 ## Docker
@@ -38,7 +48,7 @@ The image is built from this directory and is **CPU-only** (no CUDA wheels):
 
 ```bash
 docker build -t marketmarkovnet/inference inference/
-
+```
 docker run --rm \
     -v /models:/models:ro \
     -e ZMQ_BIND=tcp://0.0.0.0:5555 \

@@ -140,6 +140,32 @@ main {
   text-align: right;
 }
 
+/* ── Scaled (derived) rows — smaller / muted / italic ───── */
+
+.row--scaled {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 5px 0;
+  font-size: 0.9em;
+  font-style: italic;
+  opacity: 0.65;
+  border-bottom: 1px dashed var(--border);
+}
+
+.row--scaled:last-child {
+  border-bottom: 0;
+}
+
+.row--scaled .k {
+  color: var(--muted);
+}
+
+.row--scaled .v {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-align: right;
+}
+
 /* ── Prediction history table ───────────────────────────── */
 
 .pred-history {

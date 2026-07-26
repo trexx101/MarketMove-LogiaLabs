@@ -10,7 +10,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::error;
 
-use crate::{config::Config, db, strategy};
+use crate::{config::Config, db, market_hours::MarketState, strategy};
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, String)>;
 
@@ -37,6 +37,7 @@ pub fn router(pool: db::DbPool, config: &Config) -> Router {
 
     Router::new()
         .route("/api/status", get(handle_status))
+        .route("/api/market_state", get(handle_market_state))
         .route("/api/predictions", get(handle_predictions))
         .route("/api/accuracy", get(handle_accuracy))
         .route("/api/chart", get(handle_chart))
@@ -52,10 +53,20 @@ pub fn router(pool: db::DbPool, config: &Config) -> Router {
         )
 }
 
-// ---------------------------------------------------------------------------
-// Response DTOs
-// ---------------------------------------------------------------------------
+async fn handle_market_state() -> Json<MarketState> {
+    Json(crate::market_hours::market_state(chrono::Utc::now().timestamp()))
+}
 
+
+// `pred_1h_approx` / `pred_5h_approx` are PURE DERIVED FIELDS — they are NOT
+// stored in the database. They are computed in `handle_status` (and
+// `prediction_to_dto`) from the existing daily predictions using the
+// mean-additive linear scaling:
+//   pred_1h_approx = pred_1d / 6.5
+//   pred_5h_approx = pred_1d * (5.0 / 6.5)
+// where 6.5h is the length of a regular US equity trading session. They are
+// best-effort approximations of intraday returns from a daily model — useful
+// for UI display only, not for strategy logic.
 #[derive(Serialize)]
 struct StatusResponse {
     mode: String,
@@ -66,9 +77,11 @@ struct StatusResponse {
     unrealized_pnl: Option<f64>,
     last_candle_ts: Option<String>,
     last_close: Option<f64>,
-    pred_1h: Option<f64>,
-    pred_4h: Option<f64>,
-    pred_24h: Option<f64>,
+    pred_1d: Option<f64>,
+    pred_5d: Option<f64>,
+    pred_21d: Option<f64>,
+    pred_1h_approx: Option<f64>,
+    pred_5h_approx: Option<f64>,
     staleness_secs: u64,
 }
 
@@ -95,6 +108,8 @@ struct PredictionDto {
     pred_1h: f64,
     pred_4h: f64,
     pred_24h: f64,
+    pred_1h_approx: f64,
+    pred_5h_approx: f64,
     created_at: String,
     actual_1h: Option<f64>,
     actual_4h: Option<f64>,
@@ -136,13 +151,13 @@ async fn handle_status(State(state): State<AppState>) -> ApiResult<StatusRespons
         .map_err(|e| internal_error("load_position", e))?;
     let position = strategy::Position::from_i64(position_raw);
 
-    let realized_pnl = db::sum_realized_pnl(pool)
+    let realized_pnl = db::sum_equity_realized_pnl(pool, &state.symbol)
         .await
-        .map_err(|e| internal_error("sum_realized_pnl", e))?;
+        .map_err(|e| internal_error("sum_equity_realized_pnl", e))?;
 
-    let candle = db::fetch_latest_candle(pool)
+    let candle = db::fetch_latest_equity_candle(pool, &state.symbol)
         .await
-        .map_err(|e| internal_error("fetch_latest_candle", e))?;
+        .map_err(|e| internal_error("fetch_latest_equity_candle", e))?;
 
     let (entry_price, unrealized_pnl) = match position {
         strategy::Position::Flat => (None, None),
@@ -163,15 +178,14 @@ async fn handle_status(State(state): State<AppState>) -> ApiResult<StatusRespons
         }
     };
 
-    let predictions = db::fetch_recent_predictions(pool, 1)
+    let latest_pred = db::fetch_latest_equity_prediction(pool, &state.symbol)
         .await
-        .map_err(|e| internal_error("fetch_recent_predictions", e))?;
-    let latest_pred = predictions.first();
+        .map_err(|e| internal_error("fetch_latest_equity_prediction", e))?;
 
-    // Compute staleness of the latest candle, if any.
-    let staleness_secs = match db::latest_ts(pool)
+    // Compute staleness of the latest equity candle, if any.
+    let staleness_secs = match db::latest_equity_candle_ts(pool, &state.symbol)
         .await
-        .map_err(|e| internal_error("latest_ts", e))?
+        .map_err(|e| internal_error("latest_equity_candle_ts", e))?
     {
         Some(ts) => {
             let now = chrono::Utc::now().timestamp();
@@ -182,27 +196,29 @@ async fn handle_status(State(state): State<AppState>) -> ApiResult<StatusRespons
 
     Ok(Json(StatusResponse {
         mode: state.trading_mode.to_string(),
-        symbol: state.symbol,
+        symbol: state.symbol.clone(),
         position: position.to_string(),
         entry_price,
         realized_pnl,
         unrealized_pnl,
         last_candle_ts: candle.as_ref().map(|c| ts_to_rfc3339(c.ts)),
         last_close: candle.as_ref().map(|c| c.close),
-        pred_1h: latest_pred.map(|p| p.pred_1h),
-        pred_4h: latest_pred.map(|p| p.pred_4h),
-        pred_24h: latest_pred.map(|p| p.pred_24h),
+        pred_1d: latest_pred.as_ref().map(|p| p.pred_1d),
+        pred_5d: latest_pred.as_ref().map(|p| p.pred_5d),
+        pred_21d: latest_pred.as_ref().map(|p| p.pred_21d),
+        pred_1h_approx: latest_pred.as_ref().map(|p| p.pred_1d / 6.5),
+        pred_5h_approx: latest_pred.as_ref().map(|p| p.pred_1d * (5.0 / 6.5)),
         staleness_secs,
     }))
 }
 
 async fn handle_predictions(State(state): State<AppState>) -> ApiResult<PredictionsResponse> {
-    let history = db::fetch_recent_predictions(&state.pool, 48)
+    let history = db::fetch_recent_equity_predictions(&state.pool, &state.symbol, 48)
         .await
-        .map_err(|e| internal_error("fetch_recent_predictions", e))?;
+        .map_err(|e| internal_error("fetch_recent_equity_predictions", e))?;
 
-    let latest = history.first().map(prediction_to_dto);
-    let history_dtos: Vec<PredictionDto> = history.iter().map(prediction_to_dto).collect();
+    let latest = history.first().map(|row| equity_prediction_to_dto(row));
+    let history_dtos: Vec<PredictionDto> = history.iter().map(equity_prediction_to_dto).collect();
 
     Ok(Json(PredictionsResponse {
         latest,
@@ -212,9 +228,9 @@ async fn handle_predictions(State(state): State<AppState>) -> ApiResult<Predicti
 
 async fn handle_chart(State(state): State<AppState>) -> ApiResult<ChartResponse> {
     let limit = (state.sma_window * 2).min(500);
-    let candles = db::fetch_recent_candles(&state.pool, limit)
+    let candles = db::fetch_recent_equity_candles(&state.pool, &state.symbol, limit as i64)
         .await
-        .map_err(|e| internal_error("fetch_recent_candles", e))?;
+        .map_err(|e| internal_error("fetch_recent_equity_candles", e))?;
 
     let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
     let mut sma_points = Vec::new();
@@ -229,7 +245,7 @@ async fn handle_chart(State(state): State<AppState>) -> ApiResult<ChartResponse>
         }
     }
 
-    let candle_dtos: Vec<CandleDto> = candles.iter().map(candle_to_dto).collect();
+    let candle_dtos: Vec<CandleDto> = candles.iter().map(equity_candle_to_dto).collect();
 
     Ok(Json(ChartResponse {
         candles: candle_dtos,
@@ -237,27 +253,13 @@ async fn handle_chart(State(state): State<AppState>) -> ApiResult<ChartResponse>
     }))
 }
 
-async fn handle_accuracy(State(state): State<AppState>) -> ApiResult<AccuracyResponse> {
-    let stats = db::fetch_accuracy(&state.pool)
-        .await
-        .map_err(|e| internal_error("fetch_accuracy", e))?;
-
-    if stats.resolved_count == 0 {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "no resolved predictions yet".to_string(),
-        ));
-    }
-
-    Ok(Json(AccuracyResponse {
-        directional_1h: stats.directional_1h,
-        directional_4h: stats.directional_4h,
-        directional_24h: stats.directional_24h,
-        mae_1h: stats.mae_1h,
-        mae_4h: stats.mae_4h,
-        mae_24h: stats.mae_24h,
-        resolved_count: stats.resolved_count,
-    }))
+async fn handle_accuracy(State(_state): State<AppState>) -> ApiResult<AccuracyResponse> {
+    // Wave B: equity accuracy requires actuals to be resolved from equity_candles
+    // into equity_predictions. Not yet wired — return 503 until then.
+    Err((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "equity accuracy not yet implemented".to_string(),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -271,11 +273,19 @@ fn ts_to_rfc3339(ts: i64) -> String {
 }
 
 fn prediction_to_dto(row: &db::PredictionRow) -> PredictionDto {
+    // The legacy `predictions` table stores intraday crypto horizons
+    // (pred_1h/4h/24h). The daily analog for the equities-style scaling
+    // (dividing by the 6.5h regular session) is `pred_24h` here, since the
+    // row has no `pred_1d` field. Same formula as StatusResponse, applied
+    // to whatever the row's "1 day" prediction is.
+    let daily = row.pred_24h;
     PredictionDto {
         candle_ts: ts_to_rfc3339(row.candle_ts),
         pred_1h: row.pred_1h,
         pred_4h: row.pred_4h,
         pred_24h: row.pred_24h,
+        pred_1h_approx: daily / 6.5,
+        pred_5h_approx: daily * (5.0 / 6.5),
         created_at: ts_to_rfc3339(row.created_at),
         actual_1h: row.actual_1h,
         actual_4h: row.actual_4h,
@@ -292,6 +302,37 @@ fn candle_to_dto(c: &db::Candle) -> CandleDto {
         close: c.close,
         volume: c.volume,
         vwap: c.vwap,
+    }
+}
+
+fn equity_prediction_to_dto(row: &db::EquityPredictionRow) -> PredictionDto {
+    // Daily model: pred_1d is the primary prediction.
+    // The history table shows 1H/4H/24H as scaled approximations derived from pred_1d,
+    // matching the same linear-scaling convention used in StatusResponse.
+    let daily = row.pred_1d;
+    PredictionDto {
+        candle_ts: ts_to_rfc3339(row.candle_ts),
+        pred_1h: daily / 6.5,           // scaled: 1h return ≈ pred_1d / 6.5
+        pred_4h: daily * (4.0 / 6.5),   // scaled: 4h return
+        pred_24h: daily,                 // pred_1d IS the 24h equivalent
+        pred_1h_approx: daily / 6.5,
+        pred_5h_approx: daily * (5.0 / 6.5),
+        created_at: ts_to_rfc3339(row.created_at),
+        actual_1h: None,
+        actual_4h: None,
+        actual_24h: None,
+    }
+}
+
+fn equity_candle_to_dto(c: &db::EquityCandle) -> CandleDto {
+    CandleDto {
+        ts: ts_to_rfc3339(c.ts),
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+        volume: c.volume as f64,
+        vwap: c.close, // EquityCandle has no vwap; use close as proxy
     }
 }
 
@@ -342,7 +383,7 @@ mod tests {
         assert!(status.entry_price.is_none());
         assert!(status.unrealized_pnl.is_none());
         assert!(status.last_candle_ts.is_none());
-        assert!(status.pred_1h.is_none());
+        assert!(status.pred_1d.is_none());
         // No candles in the empty-state DB, so staleness should be u64::MAX.
         assert_eq!(status.staleness_secs, u64::MAX);
     }
@@ -354,23 +395,108 @@ mod tests {
 
         let err = result.unwrap_err();
         assert_eq!(err.0, StatusCode::SERVICE_UNAVAILABLE);
-        assert!(err.1.contains("no resolved predictions"), "got: {}", err.1);
+        assert!(
+            err.1.contains("equity accuracy not yet implemented"),
+            "got: {}",
+            err.1
+        );
     }
 
     #[tokio::test]
     async fn predictions_returns_history() {
         let pool = test_pool().await;
-        db::insert_prediction(&pool, 1_000_000, 0.1, 0.2, 0.3, "[]")
-            .await
-            .unwrap();
+        // Seed the equity_predictions table (the table handle_predictions now reads).
+        sqlx::query(
+            r#"INSERT INTO equity_predictions
+                   (symbol, candle_ts, pred_1d, pred_5d, pred_21d, regime, features_json, created_at, source)
+               VALUES ('BTC/USD', 1_000_000, 0.0065, 0.0325, 0.15, 'bull', '[]', 1_000_000, 'test')"#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let Json(resp) = handle_predictions(test_state(pool)).await.unwrap();
         assert!(resp.latest.is_some());
         assert_eq!(resp.history.len(), 1);
+        // equity_prediction_to_dto scales pred_1d ≈ 0.0065:
+        // pred_1h = 0.0065/6.5 = 0.001, pred_4h = 0.0065*(4/6.5) = 0.004,
+        // pred_24h = 0.0065
         let latest = resp.latest.unwrap();
-        assert!((latest.pred_1h - 0.1).abs() < 1e-9);
-        assert!((latest.pred_4h - 0.2).abs() < 1e-9);
-        assert!((latest.pred_24h - 0.3).abs() < 1e-9);
+        assert!((latest.pred_1h - 0.001).abs() < 1e-9);
+        assert!((latest.pred_4h - 0.004).abs() < 1e-9);
+        assert!((latest.pred_24h - 0.0065).abs() < 1e-9);
+    }
+
+    #[test]
+    fn prediction_dto_computes_approx_fields() {
+        // Build a row with pred_24h = 0.026 (≈ 2.6%), the daily analog.
+        let row = db::PredictionRow {
+            id: 1,
+            candle_ts: 1_000_000,
+            pred_1h: 0.01,
+            pred_4h: 0.02,
+            pred_24h: 0.026,
+            features_json: "[]".to_string(),
+            created_at: 1_000_000,
+            actual_1h: None,
+            actual_4h: None,
+            actual_24h: None,
+        };
+        let dto = prediction_to_dto(&row);
+        let expected_1h = 0.026 / 6.5;
+        let expected_5h = 0.026 * (5.0 / 6.5);
+        assert!(
+            (dto.pred_1h_approx - expected_1h).abs() < 1e-12,
+            "pred_1h_approx: got {}, expected {}",
+            dto.pred_1h_approx,
+            expected_1h
+        );
+        // ≈ 0.004
+        assert!(dto.pred_1h_approx > 0.0039 && dto.pred_1h_approx < 0.0041);
+        assert!(
+            (dto.pred_5h_approx - expected_5h).abs() < 1e-12,
+            "pred_5h_approx: got {}, expected {}",
+            dto.pred_5h_approx,
+            expected_5h
+        );
+        // ≈ 0.02
+        assert!(dto.pred_5h_approx > 0.019 && dto.pred_5h_approx < 0.021);
+    }
+
+    #[test]
+    fn prediction_dto_handles_negative_pred() {
+        // Negative daily prediction: scale should preserve sign and magnitude.
+        let row = db::PredictionRow {
+            id: 1,
+            candle_ts: 1_000_000,
+            pred_1h: -0.005,
+            pred_4h: -0.008,
+            pred_24h: -0.013,
+            features_json: "[]".to_string(),
+            created_at: 1_000_000,
+            actual_1h: None,
+            actual_4h: None,
+            actual_24h: None,
+        };
+        let dto = prediction_to_dto(&row);
+        let expected_1h = -0.013 / 6.5;
+        let expected_5h = -0.013 * (5.0 / 6.5);
+        assert!(
+            (dto.pred_1h_approx - expected_1h).abs() < 1e-12,
+            "pred_1h_approx: got {}, expected {}",
+            dto.pred_1h_approx,
+            expected_1h
+        );
+        // ≈ -0.002
+        assert!(dto.pred_1h_approx < -0.0019 && dto.pred_1h_approx > -0.0021);
+        assert!(
+            (dto.pred_5h_approx - expected_5h).abs() < 1e-12,
+            "pred_5h_approx: got {}, expected {}",
+            dto.pred_5h_approx,
+            expected_5h
+        );
+        // ≈ -0.01
+        assert!(dto.pred_5h_approx < -0.009 && dto.pred_5h_approx > -0.011);
     }
 
     #[tokio::test]
@@ -379,19 +505,17 @@ mod tests {
         let closes = [100.0, 102.0, 101.0, 103.0, 104.0];
         for (i, close) in closes.iter().enumerate() {
             let ts = 1_000_000 + i as i64 * 3_600;
-            db::upsert_candle(
+            db::upsert_equity_candle(
                 &pool,
-                &db::Candle {
+                &db::EquityCandle {
+                    symbol: "BTC/USD".to_string(),
                     ts,
                     open: *close,
                     high: *close,
                     low: *close,
                     close: *close,
-                    volume: 1.0,
-                    vwap: *close,
-                    funding_rate: 0.0,
-                    basis_z: 0.0,
-                    ob_imbalance: 0.0,
+                    volume: 1,
+                    source: "test".to_string(),
                 },
             )
             .await
@@ -414,19 +538,19 @@ mod tests {
         db::insert_trade(&pool, 1_000_000, "buy", 1.0, 100.0, 0.0, 0.0)
             .await
             .unwrap();
-        db::upsert_candle(
+        // handle_status now reads from `equity_candles` (post-rewire). Seed that
+        // table so unrealized_pnl can be computed from the latest close.
+        db::upsert_equity_candle(
             &pool,
-            &db::Candle {
+            &db::EquityCandle {
+                symbol: "BTC/USD".to_string(),
                 ts: 1_000_000,
                 open: 110.0,
                 high: 110.0,
                 low: 110.0,
                 close: 110.0,
-                volume: 1.0,
-                vwap: 110.0,
-                funding_rate: 0.0,
-                basis_z: 0.0,
-                ob_imbalance: 0.0,
+                volume: 1,
+                source: "test".to_string(),
             },
         )
         .await

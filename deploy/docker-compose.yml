@@ -45,8 +45,10 @@ services:
     env_file:
       - ../.env
     environment:
-      MODEL_PATH: ${MODEL_PATH:-/models/model.pt}
-      NORM_STATS_PATH: ${NORM_STATS_PATH:-/models/norm_stats.json}
+      TCN_PATH: ${TCN_PATH:-/models/qqq_tcn_v1.pt}
+      LGBM_H1_PATH: ${LGBM_H1_PATH:-/models/qqq_lgbm_h1_v1.pkl}
+      LGBM_H5_PATH: ${LGBM_H5_PATH:-/models/qqq_lgbm_h5_v1.pkl}
+      LGBM_H21_PATH: ${LGBM_H21_PATH:-/models/qqq_lgbm_h21_v1.pkl}
       ZMQ_BIND: tcp://0.0.0.0:5555
       PYTHONUNBUFFERED: "1"
     networks:
@@ -54,7 +56,7 @@ services:
     # The inference Dockerfile already declares a HEALTHCHECK; this
     # is compose-level plumbing to make the engine wait for it.
     healthcheck:
-      test: ["CMD", "python", "-c", "import json, zmq; ctx=zmq.Context.instance(); s=ctx.socket(zmq.REQ); s.setsockopt(zmq.LINGER, 0); s.setsockopt(zmq.RCVTIMEO, 5000); s.setsockopt(zmq.SNDTIMEO, 5000); s.connect('tcp://127.0.0.1:5555'); s.send(json.dumps({'feature_window': [[0.0, 0.0, 0.0]]}).encode()); reply = json.loads(s.recv()); assert all(k in reply for k in ('pred_1h', 'pred_4h', 'pred_24h')), reply; s.close()"]
+      test: ["CMD", "python", "-c", "import json, zmq; ctx=zmq.Context.instance(); s=ctx.socket(zmq.REQ); s.setsockopt(zmq.LINGER, 0); s.setsockopt(zmq.RCVTIMEO, 5000); s.setsockopt(zmq.SNDTIMEO, 5000); s.connect('tcp://127.0.0.1:5555'); s.send(json.dumps({'schema_version': 3, 'feature_window': [[0.0]*8]}).encode()); reply=json.loads(s.recv()); assert all(k in reply for k in ('pred_1d', 'pred_5d', 'pred_21d')), reply; s.close()"]
       interval: 30s
       timeout: 10s
       start_period: 30s
@@ -94,10 +96,10 @@ services:
       PAPER_FEE: ${PAPER_FEE:-0.0015}
       SMA_WINDOW: ${SMA_WINDOW:-200}
       HTTP_PORT: "8080"
-      SYMBOL: ${SYMBOL:-BTC/USD}
+      SYMBOL: ${SYMBOL:-QQQ}
       DATABASE_URL: sqlite:///app/data/candles.db
-      NORM_STATS_PATH: /models/norm_stats.json
-      FEATURE_WINDOW_SIZE: ${FEATURE_WINDOW_SIZE:-72}
+      NORM_STATS_PATH: /models/norm_stats_qqq_v1.json
+      FEATURE_WINDOW_SIZE: ${FEATURE_WINDOW_SIZE:-126}
       PARITY_MARKER_PATH: /app/data/parity_verified.json
       PARITY_MAX_AGE_SECS: ${PARITY_MAX_AGE_SECS:-604800}
       RUST_LOG: ${RUST_LOG:-info}

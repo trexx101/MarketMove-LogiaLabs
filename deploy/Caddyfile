@@ -27,7 +27,7 @@
 # Shared backend configuration (snippet to avoid duplication).
 (backend) {
     encode zstd gzip
-    reverse_proxy engine:8080 {
+    reverse_proxy mmn-engine:8080 {
         header_up Host {host}
         header_up X-Real-IP {remote_host}
         transport http {

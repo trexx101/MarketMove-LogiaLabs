@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use sqlx::{sqlite::SqlitePoolOptions, Row, SqlitePool};
+use sqlx::{sqlite::SqlitePoolOptions, FromRow, Row, SqlitePool};
 use tracing::info;
 
 pub type DbPool = SqlitePool;
@@ -136,7 +136,7 @@ pub struct Candle {
 /// A single equity OHLCV candle as stored in the `equity_candles` table.
 /// Wave A: separate type from crypto `Candle` to keep the two pipelines
 /// isolated during the transition.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, FromRow)]
 pub struct EquityCandle {
     /// Ticker symbol: 'QQQ', 'AAPL', '^VIX', 'TLT', 'GLD', 'NVDA', ...
     pub symbol: String,
@@ -148,6 +148,21 @@ pub struct EquityCandle {
     pub close: f64,
     pub volume: i64,
     /// 'yahoo' | 'moomoo' | 'fred'
+    pub source: String,
+}
+
+/// A row from the `equity_predictions` table, used with sqlx::query_as.
+#[derive(Debug, Clone, FromRow)]
+pub struct EquityPredictionRow {
+    pub id: i64,
+    pub symbol: String,
+    pub candle_ts: i64,
+    pub pred_1d: f64,
+    pub pred_5d: f64,
+    pub pred_21d: f64,
+    pub regime: String,
+    pub features_json: String,
+    pub created_at: i64,
     pub source: String,
 }
 
@@ -882,6 +897,98 @@ pub async fn latest_equity_candle_ts(pool: &DbPool, symbol: &str) -> Result<Opti
     .await
     .context("latest_equity_candle_ts")?;
     Ok(row.map(|r| r.get::<i64, _>("ts")))
+}
+
+/// Fetch the most recent equity candle for a given symbol.
+pub async fn fetch_latest_equity_candle(
+    pool: &DbPool,
+    symbol: &str,
+) -> Result<Option<EquityCandle>> {
+    let row = sqlx::query_as::<_, EquityCandle>(
+        r#"SELECT symbol, ts, open, high, low, close, volume, source
+           FROM equity_candles WHERE symbol = ?1 ORDER BY ts DESC LIMIT 1"#,
+    )
+    .bind(symbol)
+    .fetch_optional(pool)
+    .await
+    .context("fetch_latest_equity_candle")?;
+    Ok(row.map(|r| r.into()))
+}
+
+/// Sum realized PnL for equity trades for a given symbol.
+pub async fn sum_equity_realized_pnl(pool: &DbPool, symbol: &str) -> Result<f64> {
+    let row = sqlx::query(
+        r#"SELECT COALESCE(SUM(realized_pnl), 0.0) as pnl
+           FROM equity_trades WHERE symbol = ?1"#,
+    )
+    .bind(symbol)
+    .fetch_one(pool)
+    .await
+    .context("sum_equity_realized_pnl")?;
+    Ok(row.get::<f64, _>("pnl"))
+}
+
+/// Fetch the most recent equity prediction for a given symbol.
+pub async fn fetch_latest_equity_prediction(
+    pool: &DbPool,
+    symbol: &str,
+) -> Result<Option<EquityPredictionRow>> {
+    let row = sqlx::query_as::<_, EquityPredictionRow>(
+        r#"SELECT id, symbol, candle_ts, pred_1d, pred_5d, pred_21d,
+                  regime, features_json, created_at, source
+           FROM equity_predictions
+           WHERE symbol = ?1
+           ORDER BY created_at DESC LIMIT 1"#,
+    )
+    .bind(symbol)
+    .fetch_optional(pool)
+    .await
+    .context("fetch_latest_equity_prediction")?;
+    Ok(row)
+}
+
+/// Fetch recent equity predictions for a symbol, newest-first.
+pub async fn fetch_recent_equity_predictions(
+    pool: &DbPool,
+    symbol: &str,
+    limit: usize,
+) -> Result<Vec<EquityPredictionRow>> {
+    let rows = sqlx::query_as::<_, EquityPredictionRow>(
+        r#"SELECT id, symbol, candle_ts, pred_1d, pred_5d, pred_21d,
+                  regime, features_json, created_at, source
+           FROM equity_predictions
+           WHERE symbol = ?1
+           ORDER BY created_at DESC
+           LIMIT ?2"#,
+    )
+    .bind(symbol)
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await
+    .context("fetch_recent_equity_predictions")?;
+    Ok(rows)
+}
+
+/// Fetch recent equity candles for a symbol, **oldest-first** (ascending ts),
+/// which is the order required for chart rendering.
+pub async fn fetch_recent_equity_candles(
+    pool: &DbPool,
+    symbol: &str,
+    limit: i64,
+) -> Result<Vec<EquityCandle>> {
+    let rows = sqlx::query_as::<_, EquityCandle>(
+        r#"SELECT symbol, ts, open, high, low, close, volume, source
+           FROM equity_candles
+           WHERE symbol = ?1
+           ORDER BY ts ASC
+           LIMIT ?2"#,
+    )
+    .bind(symbol)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .context("fetch_recent_equity_candles")?;
+    Ok(rows)
 }
 
 /// Update the ingest watermark for a (source, symbol) pair.
