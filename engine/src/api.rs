@@ -10,7 +10,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::error;
 
-use crate::{config::Config, db, market_hours::MarketState, strategy};
+use crate::{config::Config, db, features::equities_v2, market_hours::MarketState, strategy};
 
 type ApiResult<T> = Result<Json<T>, (StatusCode, String)>;
 
@@ -83,6 +83,7 @@ struct StatusResponse {
     pred_1h_approx: Option<f64>,
     pred_5h_approx: Option<f64>,
     staleness_secs: u64,
+    sma_200: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -194,6 +195,21 @@ async fn handle_status(State(state): State<AppState>) -> ApiResult<StatusRespons
         None => u64::MAX,
     };
 
+    // Compute SMA200 from the last 200 closes (null if insufficient data).
+    let sma_200 = {
+        let closes: Option<Vec<f64>> = if candle.is_some() {
+            db::fetch_equity_candles_desc(&state.pool, &state.symbol, 200)
+                .await
+                .map(|rows| rows.into_iter().map(|c| c.close).collect())
+                .ok()
+        } else {
+            None
+        };
+        closes
+            .and_then(|c| equities_v2::rolling_sma(&c, 200).into_iter().last())
+            .filter(|&v| v.is_finite())
+    };
+
     Ok(Json(StatusResponse {
         mode: state.trading_mode.to_string(),
         symbol: state.symbol.clone(),
@@ -209,6 +225,7 @@ async fn handle_status(State(state): State<AppState>) -> ApiResult<StatusRespons
         pred_1h_approx: latest_pred.as_ref().map(|p| p.pred_1d / 6.5),
         pred_5h_approx: latest_pred.as_ref().map(|p| p.pred_1d * (5.0 / 6.5)),
         staleness_secs,
+        sma_200,
     }))
 }
 
@@ -832,7 +849,7 @@ async fn handle_equity_features(
     }
 
     // Fetch VIX and TLT close-aligned series (best effort).
-    let vix_candles = db::fetch_equity_candles_asc(&state.pool, "$VIX", limit)
+    let vix_candles = db::fetch_equity_candles_asc(&state.pool, "^VIX", limit)
         .await
         .unwrap_or_default();
     let tlt_candles = db::fetch_equity_candles_asc(&state.pool, "TLT", limit)
