@@ -103,10 +103,6 @@ services:
       PARITY_MARKER_PATH: /app/data/parity_verified.json
       PARITY_MAX_AGE_SECS: ${PARITY_MAX_AGE_SECS:-604800}
       RUST_LOG: ${RUST_LOG:-info}
-      # Kraken keys — only present in live mode. Compose passes them
-      # through verbatim from .env; the engine ignores them in paper mode.
-      KRAKEN_API_KEY: ${KRAKEN_API_KEY:-}
-      KRAKEN_API_SECRET: ${KRAKEN_API_SECRET:-}
     networks:
       - mmn
     depends_on:

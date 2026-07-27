@@ -849,6 +849,40 @@ pub async fn fetch_equity_candles_asc(
         .collect())
 }
 
+/// Fetch equity candles for a symbol, **newest first** (descending ts).
+/// Used for computing trailing SMAs where we want the most recent values.
+pub async fn fetch_equity_candles_desc(
+    pool: &DbPool,
+    symbol: &str,
+    limit: i64,
+) -> Result<Vec<EquityCandle>> {
+    let rows = sqlx::query(
+        r#"SELECT symbol, ts, open, high, low, close, volume, source
+           FROM equity_candles
+           WHERE symbol = ?1
+           ORDER BY ts DESC
+           LIMIT ?2"#,
+    )
+    .bind(symbol)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .context("fetch_equity_candles_desc")?;
+    Ok(rows
+        .iter()
+        .map(|r| EquityCandle {
+            symbol: r.get::<String, _>("symbol"),
+            ts: r.get::<i64, _>("ts"),
+            open: r.get::<f64, _>("open"),
+            high: r.get::<f64, _>("high"),
+            low: r.get::<f64, _>("low"),
+            close: r.get::<f64, _>("close"),
+            volume: r.get::<i64, _>("volume"),
+            source: r.get::<String, _>("source"),
+        })
+        .collect())
+}
+
 /// Insert (or replace) a prediction row for the QQQ daily equities model.
 pub async fn insert_equity_prediction(
     pool: &DbPool,

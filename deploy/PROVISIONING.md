@@ -26,7 +26,6 @@ MarketMarkovNet.
 
 - [`deploy/README.md`](./README.md) — Docker Compose operations guide.
 - [`deploy/config.md`](./config.md) — environment variable reference.
-- [`deploy/KRAKEN_KEYS.md`](./KRAKEN_KEYS.md) — Kraken API key creation.
 
 ---
 
@@ -176,40 +175,34 @@ backups, security notes).
 Summary:
 
 1. Create the filesystem layout (see Step 5 below).
-2. Clone the repo into `/opt/marketmarkovnet/app/`.
-3. Place model files in `/opt/marketmarkovnet/models/`.
+2. Clone the repo into `/opt/marketmoves/app/`.
+3. Place model files in `/opt/marketmoves/models/`.
 4. Configure `.env` — see [`deploy/config.md`](./config.md).
 5. Build and launch with `docker compose -f deploy/docker-compose.yml up -d`.
 6. Verify with `curl -fsSL https://$HOST/api/status | jq`.
 
-For Kraken API key setup (live trading), see
-[`deploy/KRAKEN_KEYS.md`](./KRAKEN_KEYS.md).
+For live trading, see `deploy/config.md`.
 
 ---
 
 ## Step 5: Filesystem layout
 
 ```
-/opt/marketmarkovnet/
-├── app/                 # git clone of this repo (engine, inference, deploy/)
-├── models/              # model.pt, norm_stats.json (chmod 0600)
-├── data/                # SQLite databases (bind-mounted into engine)
+/opt/marketmoves/
+├── app/                # git-cloned MarketMoves repo
+├── models/             # qqq_tcn_v1.pt, qqq_lgbm_*.pkl, norm_stats_qqq_v1.json (chmod 0600)
+└── data/               # SQLite DB (created by engine at runtime)
 └── .env                 # secrets (chmod 0600, never committed)
 ```
 
 Create it:
 
 ```bash
-mkdir -p /opt/marketmarkovnet/{app,models,data}
-chown -R deploy:deploy /opt/marketmarkovnet
-```
-
-From here, switch to the `deploy` user:
-
-```bash
-su - deploy
-cd /opt/marketmarkovnet/app
+mkdir -p /opt/marketmoves/{app,models,data}
+sudo chown -R $USER:$USER /opt/marketmoves
+cd /opt/marketmoves/app
 git clone <repo-url> .
+# Place model files in /opt/marketmoves/models/ (chmod 0600)
 ```
 
 ---
@@ -238,9 +231,9 @@ The script does **not** handle these — they require operator action:
 | Task | Why manual |
 |------|-----------|
 | **DNS setup** | Point your domain's A record to the VPS IP. Required before Caddy can issue a Let's Encrypt cert. |
-| **`.env` secrets** | Kraken API keys, trading mode, and other secrets must be set by the operator. See [`deploy/config.md`](./config.md). |
-| **Model files** | `model.pt` and `norm_stats.json` are not in the repo. Place them in `/opt/marketmarkovnet/models/` and `chmod 0600`. |
-| **Git clone** | The repo must be cloned to `/opt/marketmarkovnet/app/` by the operator. |
+| **`.env` secrets** | Trading mode, trading symbol, and other secrets must be set by the operator. See [`deploy/config.md`](./config.md). |
+| **Model files** | `qqq_tcn_v1.pt`, `qqq_lgbm_*.pkl`, and `norm_stats_qqq_v1.json` are not in the repo. Place them in `/opt/marketmoves/models/` and `chmod 0600`. |
+| **Git clone** | The repo must be cloned to `/opt/marketmoves/app/` by the operator. |
 | **Initial system update** | `apt update && apt upgrade -y` should be run before `setup.sh`. |
 | **Backups** | Configure off-host backups for the `data` volume and `.env`. See [`deploy/README.md`](./README.md#backups). |
 

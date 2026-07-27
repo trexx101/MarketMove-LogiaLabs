@@ -25,8 +25,10 @@ const INTERVAL: &str = "1d";
 
 /// Fetch daily OHLCV for `symbol` and upsert into the DB.
 ///
-/// `min_candles` gates backfill: if the DB already has ≥ N rows for this
-/// symbol, this call is a no-op (same gate as the crypto data path).
+/// `min_candles` gates backfill: if the DB already has ≥ N rows AND the
+/// latest candle is within STALE_THRESHOLD_SECS, this is a no-op.
+/// If the data is stale (latest candle older than the threshold) the
+/// backfill runs regardless of row count.
 ///
 /// `range` is a Yahoo Finance period hint: "1y", "5y", "10y", "max".
 pub async fn backfill(
@@ -36,11 +38,23 @@ pub async fn backfill(
     range: &str,
 ) -> Result<usize> {
     let count = db::count_equity_candles(pool, symbol).await?;
-    if count >= min_candles {
-        info!(symbol, count, min_candles, "sufficient equity candles — skipping backfill");
+
+    // Freshness gate: re-fetch if latest candle is older than this.
+    // 3 calendar days catches: weekend gaps (Fri→Mon = 72h) and missed daily runs.
+    let stale_threshold_secs = 3 * 24 * 3600;
+    let now_ts = chrono::Utc::now().timestamp();
+    let latest_ts = db::latest_equity_candle_ts(pool, symbol).await?;
+    let is_stale = latest_ts.map_or(true, |ts| now_ts.saturating_sub(ts) > stale_threshold_secs);
+
+    if count >= min_candles && !is_stale {
+        debug!(symbol, count, min_candles, "sufficient equity candles — skipping backfill");
         return Ok(0);
     }
-    info!(symbol, range, "starting Yahoo Finance backfill");
+    if is_stale {
+        info!(symbol, count, latest_ts, now_ts, days_old = (now_ts - latest_ts.unwrap_or(0)) / 86400, "equity candles stale — forcing refresh");
+    } else {
+        info!(symbol, count, min_candles, "insufficient equity candles — starting Yahoo Finance backfill");
+    }
 
     let client = reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (MarketMarkovNet; equities-wave-a)")

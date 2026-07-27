@@ -91,6 +91,22 @@ async fn main() {
         process::exit(1);
     }
 
+    // Warn if the primary symbol's latest candle is significantly behind.
+    // A weekend gap is expected (no trading); anything beyond ~3 calendar days
+    // at startup indicates a prior data-fetch failure.
+    let now_ts = chrono::Utc::now().timestamp();
+    if let Ok(Some(latest)) = db::latest_equity_candle_ts(&pool, &cfg.symbol).await {
+        let age_h = (now_ts - latest) / 3600;
+        if age_h > 72 {
+            eprintln!(
+                "WARNING: {symbol} latest candle is {age_h}h old (ts={latest}). \
+                Data may be stale — check network access to Yahoo Finance.",
+                symbol = cfg.symbol,
+            );
+            warn!(symbol = %cfg.symbol, latest_ts = latest, age_h, "candle data is stale at startup");
+        }
+    }
+
     // Spawn the daily equities scheduler (inference pipeline) as a background task.
     // Wave C: replaces the crypto hourly scheduler with a daily QQQ pipeline.
     let scheduler_pool = pool.clone();
