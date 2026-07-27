@@ -60,19 +60,20 @@ log = _build_logger()
 
 # ── TCN architecture (mirrors training/train_tcn.py Wave C) ───────────────────
 
-class CausalConv1d(nn.Conv1d):
+class CausalConv1d(nn.Module):
     """Causal 1-D convolution (left-only padding, sequence length preserved).
 
-    Subclasses nn.Conv1d directly so state_dict keys match the trained
-    checkpoint (e.g. ``blocks.0.conv1.weight``, not ``blocks.0.conv1.conv.weight``).
+    Mirrors the notebook's CausalConv1d which wraps nn.Conv1d as self.conv,
+    producing state_dict keys like ``blocks.0.conv1.conv.weight``.
     """
 
     def __init__(self, in_ch: int, out_ch: int, kernel_size: int, dilation: int) -> None:
-        super().__init__(in_ch, out_ch, kernel_size, dilation=dilation, padding=0)
+        super().__init__()
+        self.conv = nn.Conv1d(in_ch, out_ch, kernel_size, dilation=dilation, padding=0)
         self._causal_padding = (kernel_size - 1) * dilation
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return super().forward(F.pad(x, (self._causal_padding, 0)))
+        return self.conv(F.pad(x, (self._causal_padding, 0)))
 
 
 class ResidualBlock(nn.Module):
@@ -94,7 +95,9 @@ class ResidualBlock(nn.Module):
         out = self.dropout(out)
         out = self.conv2(out)
         out = self.norm2(out)
-        return self.activation(out + residual)
+        # Training (notebook) residual: no activation after add.
+        # Matches: `x_pad = block(x); x = x_pad + x`
+        return out + residual
 
 
 class QqqTCN(nn.Module):
