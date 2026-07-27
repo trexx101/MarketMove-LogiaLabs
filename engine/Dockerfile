@@ -79,7 +79,8 @@ RUN mkdir -p /app/data && chown -R mmn:mmn /app
 COPY --from=build /usr/local/bin/engine /usr/local/bin/engine
 
 # Static frontend, served by the engine's `ServeDir` fallback.
-COPY --from=build /build/frontend/ /app/frontend/
+# Fix ownership so the mmn user can traverse/execute all parent dirs.
+COPY --from=build --chown=mmn:mmn /build/frontend/ /app/frontend/
 
 # Drop privileges.
 USER mmn
