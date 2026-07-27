@@ -3,7 +3,7 @@ pub mod moomoo;
 pub mod yahoo;
 
 use anyhow::{Context, Result};
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::db::DbPool;
 
@@ -21,6 +21,9 @@ pub const MACRO_SYMBOLS: &[&str] = &["$VIX", "$UST10Y", "$DXY"];
 /// Idempotent — each symbol respects its own min-candles gate in the clients,
 /// so re-running just tops up missing history. Errors from one symbol are
 /// logged and skipped (best-effort) so a single outage doesn't abort the rest.
+///
+/// FRED is the primary macro source; Yahoo Finance `^VIX` is used as fallback
+/// for $VIX when FRED returns 0 rows (e.g. unreachable from VPS).
 pub async fn backfill_equities(pool: &DbPool) -> Result<()> {
     // Yahoo equity OHLCV — 5y of daily history is plenty for features + retrains.
     let n_eq = yahoo::backfill_many(pool, EQUITY_SYMBOLS, 250, "5y").await?;
@@ -29,6 +32,18 @@ pub async fn backfill_equities(pool: &DbPool) -> Result<()> {
     // FRED macro series — ~5y lookback cap.
     let n_macro = fred::backfill_all_default_macros(pool, 5 * 365).await?;
     info!(rows = n_macro, "macro series backfill complete");
+
+    // FRED fallback: if $VIX is empty (FRED unreachable), pull from Yahoo ^VIX.
+    // The VIX feature degrades to 0.0 without this, so it's worth the extra call.
+    let vix_count = crate::db::count_equity_candles(pool, "$VIX").await?;
+    if vix_count <= 1 {
+        info!(count = vix_count, "FRED $VIX missing/empty — fetching ^VIX from Yahoo as fallback");
+        match yahoo::backfill(pool, "^VIX", 1, "2y").await {
+            Ok(n) if n > 0 => info!(rows = n, "Yahoo ^VIX fallback loaded — $VIX macro features active"),
+            Ok(_) => debug!("Yahoo ^VIX returned 0 new rows (already up to date)"),
+            Err(e) => tracing::warn!(error = %e, "Yahoo ^VIX fallback failed — VIX features will be 0.0"),
+        }
+    }
 
     Ok(())
 }

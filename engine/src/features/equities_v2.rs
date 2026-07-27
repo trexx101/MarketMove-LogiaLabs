@@ -250,7 +250,7 @@ impl EquityNormStats {
 
 /// Simple rolling SMA. Returns Vec<f64> with same length as input.
 /// Entries before the full window is available are NaN.
-fn rolling_sma(values: &[f64], window: usize) -> Vec<f64> {
+pub fn rolling_sma(values: &[f64], window: usize) -> Vec<f64> {
     let n = values.len();
     let mut out = vec![f64::NAN; n];
     if window == 0 || n < window {
@@ -668,19 +668,33 @@ mod tests {
         }
         let stats = EquityNormStats::load_named(trained_path.to_str().unwrap()).unwrap();
 
-        // Median sanity: trend_slope median is ~0.0146 per training metadata.
-        assert!((stats.median[0] - 0.014625118390912132).abs() < 1e-9);
-        // MAD sanity: trend_slope mad is ~0.0178.
-        assert!((stats.mad[0] - 0.017786661626267384).abs() < 1e-9);
-        // rsi_14 uses a near-zero MAD (1e-6) → normalization will pin output to 0.
-        assert!(stats.mad[2] < 1e-5);
+        // Property-based checks (not hardcoded to specific training-run values,
+        // which change when the model is retrained).
+        //
+        // Feature order: [trend_slope, trend_adx, rsi_14, vix_regime,
+        //                  tlt_corr_20d, rvol_20d, gap_pct, drawdown_from_50d_high]
+        //
+        // trend_slope (idx 0): small value around 0
+        assert!(stats.median[0].abs() < 0.1, "trend_slope median: {}", stats.median[0]);
+        assert!(stats.mad[0] > 1e-4, "trend_slope MAD too small: {}", stats.mad[0]);
 
-        // Round-trip through normalize() must not produce NaN.
+        // trend_adx (idx 1): real ADX, 0-100 scale, median should be 10-50
+        assert!(stats.median[1] > 5.0, "trend_adx median too low: {} (ATR proxy?)", stats.median[1]);
+        assert!(stats.median[1] < 80.0, "trend_adx median too high: {}", stats.median[1]);
+        assert!(stats.mad[1] >= 1.0, "trend_adx MAD too small: {}", stats.mad[1]);
+
+        // rsi_14 (idx 2): 0-100 scale, median should be 35-65, MAD >= 5
+        assert!(stats.median[2] > 20.0, "rsi_14 median too low: {} (clipped?)", stats.median[2]);
+        assert!(stats.median[2] < 80.0, "rsi_14 median too high: {}", stats.median[2]);
+        assert!(stats.mad[2] >= 5.0, "rsi_14 MAD too small: {} (near-zero = explosion bug)", stats.mad[2]);
+
+        // Round-trip through normalize() must not produce NaN or extreme values.
         let candles = synthetic_qqq(60);
         let rows = compute_equity_features(&candles, None, None);
         let out = stats.normalize(&rows[50]);
         for v in &out {
             assert!(v.is_finite(), "normalized value is NaN/Inf: {v}");
+            assert!(v.abs() < 1e6, "normalized value exploded: {v} (norm_stats bug?)");
         }
     }
 
