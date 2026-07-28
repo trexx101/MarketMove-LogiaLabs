@@ -1,6 +1,7 @@
 use anyhow::Result;
 use tracing::info;
 
+use crate::api::ws::{TelemetryEvent, TelemetrySender};
 use crate::db::{self, DbPool};
 use crate::exec::{FillResult, TradeSide};
 use crate::strategy::Position;
@@ -11,16 +12,18 @@ pub struct PaperExecutor {
     current_position: Position,
     entry_price: f64,
     qty: f64,
+    tx: Option<TelemetrySender>,
 }
 
 impl PaperExecutor {
-    pub fn new(pool: DbPool, fee_rate: f64) -> Self {
+    pub fn new(pool: DbPool, fee_rate: f64, tx: Option<TelemetrySender>) -> Self {
         Self {
             pool,
             fee_rate,
             current_position: Position::Flat,
             entry_price: 0.0,
             qty: 1.0,
+            tx,
         }
     }
 
@@ -61,14 +64,16 @@ impl PaperExecutor {
                 "closing position"
             );
             db::insert_trade(&self.pool, ts, side_str, self.qty, close, fee, pnl).await?;
-            fills.push(FillResult {
+            let fill = FillResult {
                 side: exit_side,
                 qty: self.qty,
                 price: close,
                 fee,
                 realized_pnl: pnl,
                 ts,
-            });
+            };
+            self.publish_fill(side_str, &fill);
+            fills.push(fill);
         }
 
         if target != Position::Flat {
@@ -91,18 +96,35 @@ impl PaperExecutor {
             );
             db::insert_trade(&self.pool, ts, side_str, self.qty, close, fee, 0.0).await?;
             self.entry_price = close;
-            fills.push(FillResult {
+            let fill = FillResult {
                 side: entry_side,
                 qty: self.qty,
                 price: close,
                 fee,
                 realized_pnl: 0.0,
                 ts,
-            });
+            };
+            self.publish_fill(side_str, &fill);
+            fills.push(fill);
         }
 
         self.current_position = target;
         Ok(fills)
+    }
+
+    /// Publish a `TradeFill` telemetry event if a broadcast sender is wired.
+    /// Send errors are silently ignored — no subscribers is a normal state.
+    fn publish_fill(&self, side_str: &str, fill: &FillResult) {
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(TelemetryEvent::TradeFill {
+                side: side_str.to_string(),
+                qty: fill.qty,
+                price: fill.price,
+                fee: fill.fee,
+                realized_pnl: fill.realized_pnl,
+                timestamp: fill.ts,
+            });
+        }
     }
 }
 
@@ -125,7 +147,7 @@ mod tests {
     #[tokio::test]
     async fn flat_to_long_opens_position() {
         let pool = test_pool().await;
-        let mut exec = PaperExecutor::new(pool, 0.0015);
+        let mut exec = PaperExecutor::new(pool, 0.0015, None);
 
         let fills = exec.set_target_position(Position::Long, 50000.0, 1000).await.unwrap();
 
@@ -140,7 +162,7 @@ mod tests {
     #[tokio::test]
     async fn long_to_flat_closes_with_pnl() {
         let pool = test_pool().await;
-        let mut exec = PaperExecutor::new(pool, 0.0015);
+        let mut exec = PaperExecutor::new(pool, 0.0015, None);
         exec.current_position = Position::Long;
         exec.entry_price = 50000.0;
 
@@ -156,7 +178,7 @@ mod tests {
     #[tokio::test]
     async fn long_to_short_closes_and_opens() {
         let pool = test_pool().await;
-        let mut exec = PaperExecutor::new(pool, 0.0015);
+        let mut exec = PaperExecutor::new(pool, 0.0015, None);
         exec.current_position = Position::Long;
         exec.entry_price = 50000.0;
 
@@ -177,7 +199,7 @@ mod tests {
     #[tokio::test]
     async fn same_position_no_trade() {
         let pool = test_pool().await;
-        let mut exec = PaperExecutor::new(pool, 0.0015);
+        let mut exec = PaperExecutor::new(pool, 0.0015, None);
         exec.current_position = Position::Long;
         exec.entry_price = 50000.0;
 

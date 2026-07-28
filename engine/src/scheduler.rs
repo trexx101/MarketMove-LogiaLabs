@@ -3,6 +3,8 @@ use std::time::Duration;
 use anyhow::Result;
 use tracing::{error, info, warn};
 
+use crate::api::ws::TelemetryEvent;
+use crate::api::ws::TelemetrySender;
 use crate::bridge::ZmqBridge;
 use crate::db::{self, DbPool};
 use crate::exec::ExecutorKind;
@@ -25,6 +27,7 @@ pub struct EquityScheduler {
     last_processed_ts: Option<i64>,
     strategy_params: EquityStrategyParams,
     executor: ExecutorKind,
+    tx: Option<TelemetrySender>,
 }
 
 impl EquityScheduler {
@@ -36,6 +39,7 @@ impl EquityScheduler {
         feature_window_size: usize,
         strategy_params: EquityStrategyParams,
         executor: ExecutorKind,
+        tx: Option<TelemetrySender>,
     ) -> Result<Self> {
         let bridge = ZmqBridge::connect(zmq_endpoint).await?;
         Ok(Self {
@@ -47,6 +51,7 @@ impl EquityScheduler {
             last_processed_ts: None,
             strategy_params,
             executor,
+            tx,
         })
     }
 
@@ -176,6 +181,16 @@ impl EquityScheduler {
             "equity prediction persisted"
         );
 
+        // Publish telemetry event for any connected control-room clients.
+        if let Some(tx) = &self.tx {
+            let _ = tx.send(TelemetryEvent::PredictionUpdate {
+                pred_1d: Some(pred.pred_1d),
+                pred_5d: Some(pred.pred_5d),
+                pred_21d: Some(pred.pred_21d),
+                timestamp: candle_ts,
+            });
+        }
+
         self.last_processed_ts = Some(candle_ts);
 
         // --- Strategy evaluation ---
@@ -236,6 +251,7 @@ impl EquityScheduler {
         if new_pos != current_pos {
             match self.executor.set_target_position(new_pos, latest_close, candle_ts).await {
                 Ok(fills) => {
+                    let total_pnl: f64 = fills.iter().map(|f| f.realized_pnl).sum();
                     for fill in &fills {
                         info!(
                             side = ?fill.side,
@@ -245,6 +261,22 @@ impl EquityScheduler {
                             pnl = fill.realized_pnl,
                             "equity trade executed"
                         );
+                    }
+
+                    // Publish PnL tick after trade execution.
+                    if let Some(tx) = &self.tx {
+                        let _ = tx.send(TelemetryEvent::PnlTick {
+                            realized_pnl: total_pnl,
+                            unrealized_pnl: 0.0,
+                            position: format!("{}", new_pos).to_lowercase(),
+                            entry_price: if new_pos != Position::Flat {
+                                Some(latest_close)
+                            } else {
+                                None
+                            },
+                            last_close: Some(latest_close),
+                            timestamp: candle_ts,
+                        });
                     }
                 }
                 Err(e) => {
@@ -343,7 +375,7 @@ mod tests {
     }
 
     fn test_scheduler(pool: DbPool) -> EquityScheduler {
-        let executor = ExecutorKind::Paper(PaperExecutor::new(pool.clone(), 0.001));
+        let executor = ExecutorKind::Paper(PaperExecutor::new(pool.clone(), 0.001, None));
         EquityScheduler {
             pool,
             symbol: "QQQ".to_string(),
@@ -353,6 +385,7 @@ mod tests {
             last_processed_ts: None,
             strategy_params: EquityStrategyParams::default(),
             executor,
+            tx: None,
         }
     }
 

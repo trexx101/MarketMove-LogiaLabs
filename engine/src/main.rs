@@ -67,6 +67,10 @@ async fn main() {
         }
     };
 
+    // Telemetry broadcast channel — published to by the scheduler and paper
+    // executor, consumed by WebSocket clients at /api/v1/ws.
+    let (tx, _rx) = tokio::sync::broadcast::channel(64);
+
     // Construct executor based on trading mode.
     // NOTE: Kraken is retired (Wave 5). The engine runs paper mode only; live
     // execution will be re-added against Binance when the new model graduates
@@ -74,11 +78,19 @@ async fn main() {
     let executor = match cfg.trading_mode {
         config::TradingMode::Paper => {
             info!(fee = cfg.paper_fee, "using paper executor");
-            exec::ExecutorKind::Paper(exec::paper::PaperExecutor::new(pool.clone(), cfg.paper_fee))
+            exec::ExecutorKind::Paper(exec::paper::PaperExecutor::new(
+                pool.clone(),
+                cfg.paper_fee,
+                Some(tx.clone()),
+            ))
         }
         config::TradingMode::Live => {
             warn!("TRADING_MODE=live requested but live execution is not yet wired to Binance; falling back to paper executor");
-            exec::ExecutorKind::Paper(exec::paper::PaperExecutor::new(pool.clone(), cfg.paper_fee))
+            exec::ExecutorKind::Paper(exec::paper::PaperExecutor::new(
+                pool.clone(),
+                cfg.paper_fee,
+                Some(tx.clone()),
+            ))
         }
     };
 
@@ -118,6 +130,7 @@ async fn main() {
         exit_threshold: -cfg.magnitude_threshold / 3.0,
         sma_window: cfg.sma_window,
     };
+    let scheduler_tx = tx.clone();
     tokio::spawn(async move {
         match scheduler::EquityScheduler::new(
             scheduler_pool,
@@ -127,6 +140,7 @@ async fn main() {
             feature_window_size,
             eq_strategy_params,
             executor,
+            Some(scheduler_tx),
         ).await {
             Ok(mut sched) => {
                 if let Err(e) = sched.run().await {
@@ -161,7 +175,7 @@ async fn main() {
     });
 
     // Build and spawn the Axum telemetry server.
-    let app = api::router(pool.clone(), &cfg);
+    let app = api::router(pool.clone(), &cfg, tx);
     let bind_addr = format!("0.0.0.0:{}", cfg.http_port);
     match tokio::net::TcpListener::bind(&bind_addr).await {
         Ok(listener) => {

@@ -112,6 +112,48 @@ CREATE TABLE IF NOT EXISTS equity_ingest_state (
     last_error   TEXT    NOT NULL DEFAULT '',
     PRIMARY KEY (source, symbol)
 );
+
+-- Control Room revamp: strategy configs, mode switches, advisor log, backtests.
+CREATE TABLE IF NOT EXISTS strategy_configs (
+    id            TEXT    PRIMARY KEY,
+    name          TEXT    NOT NULL UNIQUE,
+    strategy_type TEXT    NOT NULL,
+    script_body   TEXT,
+    params_json   TEXT    NOT NULL,
+    is_active     INTEGER NOT NULL DEFAULT 0,
+    created_at    INTEGER NOT NULL,
+    updated_at    INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mode_switches (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    previous_mode         TEXT    NOT NULL,
+    new_mode              TEXT    NOT NULL,
+    parity_marker_age_secs INTEGER NOT NULL,
+    authorized_by         TEXT    NOT NULL,
+    timestamp             INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS advisor_log (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    interaction_type   TEXT    NOT NULL,
+    prompt_context_json TEXT   NOT NULL,
+    model_used         TEXT    NOT NULL,
+    response_json      TEXT    NOT NULL,
+    suggested_action   TEXT,
+    timestamp          INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS backtest_results (
+    id                TEXT    PRIMARY KEY,
+    strategy_id       TEXT    NOT NULL,
+    start_ts          INTEGER NOT NULL,
+    end_ts            INTEGER NOT NULL,
+    metrics_json      TEXT    NOT NULL,
+    equity_curve_json TEXT    NOT NULL,
+    timestamp         INTEGER NOT NULL,
+    FOREIGN KEY(strategy_id) REFERENCES strategy_configs(id) ON DELETE CASCADE
+);
 "#;
 
 /// A single OHLCV + VWAP candle as stored in the database.
