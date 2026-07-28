@@ -1,6 +1,7 @@
 <script>
   import Dashboard from './views/Dashboard.svelte';
   import Ledger from './views/Ledger.svelte';
+  import StrategyLab from './views/StrategyLab.svelte';
   import { status } from './lib/stores.js';
 
   let currentView = 'dashboard';
@@ -55,10 +56,7 @@
     {#if currentView === 'dashboard'}
       <Dashboard />
     {:else if currentView === 'strategy'}
-      <div class="placeholder">
-        <h1>Strategy Lab</h1>
-        <p>Coming in Phase 2.</p>
-      </div>
+      <StrategyLab />
     {:else if currentView === 'ledger'}
       <Ledger />
     {:else if currentView === 'advisor'}

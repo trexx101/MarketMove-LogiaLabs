@@ -75,3 +75,43 @@ export async function fetchMarketState() {
   if (!res.ok) throw new Error(`market_state: ${res.status}`);
   return res.json();
 }
+
+/**
+ * Run a backtest with the given configuration.
+ * @param {object} params - { strategy_id?, kind: "threshold"|"rhai", params: {entry_threshold, exit_threshold, sma_window} | {script}, start_ts, end_ts }
+ * @returns {Promise<object>} BacktestResponse
+ */
+export async function fetchBacktest(params) {
+  const res = await fetch(`${API_BASE}/backtest`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) throw new Error(`backtest: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Fetch all saved strategies.
+ * @returns {Promise<object[]>} Array of strategy objects
+ */
+export async function fetchStrategies() {
+  const res = await fetch(`${API_BASE}/strategies`);
+  if (!res.ok) throw new Error(`strategies: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Save a strategy configuration.
+ * @param {object} config - { name, strategy_type, script_body?, params_json }
+ * @returns {Promise<object>} Saved strategy
+ */
+export async function saveStrategy(config) {
+  const res = await fetch(`${API_BASE}/strategies`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+  if (!res.ok) throw new Error(`strategies POST: ${res.status}`);
+  return res.json();
+}

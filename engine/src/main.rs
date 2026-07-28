@@ -13,6 +13,7 @@ mod market_hours;
 mod parity;
 mod scheduler;
 mod strategy;
+mod strategy_lab;
 
 use std::process;
 

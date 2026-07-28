@@ -30,3 +30,5 @@ zeromq = "0.6"
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 rust-embed = { version = "8", features = ["compression"] }
 mime_guess = "2"
+rhai = "1"
+uuid = { version = "1", features = ["v4"] }

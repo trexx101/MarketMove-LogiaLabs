@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
+use serde::Serialize;
 use sqlx::{sqlite::SqlitePoolOptions, FromRow, Row, SqlitePool};
 use tracing::info;
 
@@ -1100,6 +1101,107 @@ pub async fn update_ingest_state(
     .await
     .context("update_ingest_state")?;
     Ok(())
+}
+
+/// Fetch equity predictions in a timestamp range, ascending by candle_ts.
+/// Used by the backtest replay engine.
+pub async fn fetch_equity_predictions_range(
+    pool: &DbPool,
+    symbol: &str,
+    start_ts: i64,
+    end_ts: i64,
+) -> Result<Vec<EquityPredictionRow>> {
+    let rows = sqlx::query_as::<_, EquityPredictionRow>(
+        r#"SELECT id, symbol, candle_ts, pred_1d, pred_5d, pred_21d,
+                  regime, features_json, created_at, source
+           FROM equity_predictions
+           WHERE symbol = ?1 AND candle_ts >= ?2 AND candle_ts <= ?3
+           ORDER BY candle_ts ASC"#,
+    )
+    .bind(symbol)
+    .bind(start_ts)
+    .bind(end_ts)
+    .fetch_all(pool)
+    .await
+    .context("fetch_equity_predictions_range")?;
+    Ok(rows)
+}
+
+/// Fetch equity candles in a timestamp range, ascending by ts.
+/// Used by the backtest replay engine.
+pub async fn fetch_equity_candles_range_asc(
+    pool: &DbPool,
+    symbol: &str,
+    start_ts: i64,
+    end_ts: i64,
+) -> Result<Vec<EquityCandle>> {
+    let rows = sqlx::query_as::<_, EquityCandle>(
+        r#"SELECT symbol, ts, open, high, low, close, volume, source
+           FROM equity_candles
+           WHERE symbol = ?1 AND ts >= ?2 AND ts <= ?3
+           ORDER BY ts ASC"#,
+    )
+    .bind(symbol)
+    .bind(start_ts)
+    .bind(end_ts)
+    .fetch_all(pool)
+    .await
+    .context("fetch_equity_candles_range_asc")?;
+    Ok(rows)
+}
+
+/// A row from the `strategy_configs` table.
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct StrategyConfigRow {
+    pub id: String,
+    pub name: String,
+    pub strategy_type: String,
+    pub script_body: Option<String>,
+    pub params_json: String,
+    pub is_active: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Insert a new strategy configuration.
+pub async fn insert_strategy_config(
+    pool: &DbPool,
+    id: &str,
+    name: &str,
+    strategy_type: &str,
+    script_body: Option<&str>,
+    params_json: &str,
+) -> Result<()> {
+    let now = Utc::now().timestamp();
+    sqlx::query(
+        r#"INSERT INTO strategy_configs
+               (id, name, strategy_type, script_body, params_json, is_active, created_at, updated_at)
+           VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)"#,
+    )
+    .bind(id)
+    .bind(name)
+    .bind(strategy_type)
+    .bind(script_body)
+    .bind(params_json)
+    .bind(now)
+    .execute(pool)
+    .await
+    .context("insert_strategy_config")?;
+    Ok(())
+}
+
+/// Fetch all strategy configurations, newest first.
+pub async fn fetch_strategy_configs(pool: &DbPool) -> Result<Vec<StrategyConfigRow>> {
+    let rows = sqlx::query_as::<_, StrategyConfigRow>(
+        r#"SELECT id, name, strategy_type, script_body, params_json,
+                  is_active, created_at, updated_at
+           FROM strategy_configs
+           ORDER BY created_at DESC"#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("fetch_strategy_configs")?;
+    Ok(rows)
 }
 
 #[cfg(test)]

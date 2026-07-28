@@ -126,7 +126,7 @@ pub fn next_position(current: Position, input: &SignalInput, params: &StrategyPa
 // ---------------------------------------------------------------------------
 
 /// Strategy parameters for the QQQ daily equities strategy.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct EquityStrategyParams {
     /// Entry threshold: pred_1d must exceed this (absolute) to go long.
     pub entry_threshold: f64,
