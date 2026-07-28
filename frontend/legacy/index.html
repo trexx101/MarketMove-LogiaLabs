@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MarketMarkovNet — Control Room</title>
+    <link rel="stylesheet" href="vendor/uPlot.min.css" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <h1>MarketMarkovNet — Control Room</h1>
+      <span id="mode-badge" class="mode-badge mode-badge--unknown">—</span>
+    </header>
+
+    <main>
+      <section class="panel" id="chart-panel">
+        <h2>OHLCV · 200-SMA</h2>
+        <div id="chart-container">
+          <div class="chart-placeholder">pending — no data yet</div>
+        </div>
+      </section>
+
+      <section class="panel" id="status-panel">
+        <h2>Status</h2>
+        <div id="status-body">
+          <div class="row"><span class="k">mode</span><span class="v" id="st-mode">—</span></div>
+          <div class="row"><span class="k">symbol</span><span class="v" id="st-symbol">—</span></div>
+          <div class="row"><span class="k">last candle</span><span class="v" id="st-last">—</span></div>
+          <div class="row"><span class="k">last close</span><span class="v" id="st-close">—</span></div>
+          <div class="row"><span class="k">position</span><span class="v" id="st-position">—</span></div>
+          <div class="row"><span class="k">entry price</span><span class="v" id="st-entry">—</span></div>
+          <div class="row"><span class="k">realized PnL</span><span class="v" id="st-realized">—</span></div>
+          <div class="row"><span class="k">unrealized PnL</span><span class="v" id="st-unrealized">—</span></div>
+          <div class="row"><span class="k">candle staleness</span><span class="v" id="st-staleness">—</span></div>
+        </div>
+      </section>
+
+      <section class="panel panel--predictions" id="predictions-panel">
+        <h2>Predictions</h2>
+        <div id="predictions-body">
+          <div class="row"><span class="k">pred 1D</span><span class="v" id="p-1d">—</span></div>
+          <div class="row"><span class="k">pred 5D</span><span class="v" id="p-5d">—</span></div>
+          <div class="row"><span class="k">pred 21D</span><span class="v" id="p-21d">—</span></div>
+          <div class="row row--scaled" title="Scaled from pred 1D as pred_1d / 6.5 (mean-additive over the 6.5h US equity regular session). Approximation only — not from the underlying model."><span class="k">pred 1H (scaled)</span><span class="v" id="p-1h-approx">—</span></div>
+          <div class="row row--scaled" title="Scaled from pred 1D as pred_1d * (5.0 / 6.5). Approximation only — not from the underlying model."><span class="k">pred 5H (scaled)</span><span class="v" id="p-5h-approx">—</span></div>
+        </div>
+        <div id="predictions-history"></div>
+      </section>
+
+      <section class="panel" id="accuracy-panel">
+        <h2>Accuracy</h2>
+        <div id="accuracy-body">
+          <div class="row"><span class="k">directional</span><span class="v" id="acc-directional">—</span></div>
+          <div class="row"><span class="k">MAE</span><span class="v" id="acc-mae">—</span></div>
+          <div class="row"><span class="k">resolved</span><span class="v" id="acc-resolved">—</span></div>
+        </div>
+      </section>
+    </main>
+
+    <script src="vendor/uPlot.iife.min.js"></script>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
