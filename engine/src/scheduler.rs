@@ -1,23 +1,34 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 use crate::api::ws::TelemetryEvent;
 use crate::api::ws::TelemetrySender;
 use crate::bridge::ZmqBridge;
+use crate::config::TradingMode;
 use crate::db::{self, DbPool};
 use crate::exec::ExecutorKind;
 use crate::features::equities_v2::{compute_equity_features, EquityNormStats, EQ_FEATURE_DIM};
 use crate::strategy::{self, EquityStrategyParams, EquitySignalInput, Position};
 
-/// Daily equities scheduler (Wave C).
+/// Daily equities scheduler (Wave C, Phase 3.4 runtime mode swap).
 ///
 /// Polls for new QQQ daily candles, computes 8-dim features, normalizes with
 /// median/MAD stats, calls the V3 inference service (1d/5d/21d), persists
 /// predictions, and evaluates the long/flat strategy.
 ///
 /// Poll cadence is 5 minutes (daily bars — no need for 30s crypto polling).
+///
+/// ## Phase 3.4: runtime mode toggle
+///
+/// The scheduler holds `Arc<RwLock<TradingMode>>` and
+/// `Arc<RwLock<ExecutorKind>>` so the `/api/mode` endpoint can flip both
+/// while the scheduler is mid-cycle. The scheduler re-borrows the executor
+/// briefly at the start of each cycle and releases it before sleeping, so a
+/// concurrent flip from the API can land between cycles without contention.
 pub struct EquityScheduler {
     pool: DbPool,
     symbol: String,
@@ -26,7 +37,12 @@ pub struct EquityScheduler {
     feature_window_size: usize,
     last_processed_ts: Option<i64>,
     strategy_params: EquityStrategyParams,
-    executor: ExecutorKind,
+    /// Trading mode. Read at the start of each cycle; flipped by `POST /api/mode`.
+    trading_mode: Arc<RwLock<TradingMode>>,
+    /// Executor used to place orders. Read at the start of each cycle; the
+    /// runtime toggle can swap it (Paper <-> Moomoo) by acquiring the write
+    /// lock between cycles.
+    executor: Arc<RwLock<ExecutorKind>>,
     tx: Option<TelemetrySender>,
 }
 
@@ -38,7 +54,8 @@ impl EquityScheduler {
         norm_stats: EquityNormStats,
         feature_window_size: usize,
         strategy_params: EquityStrategyParams,
-        executor: ExecutorKind,
+        trading_mode: Arc<RwLock<TradingMode>>,
+        executor: Arc<RwLock<ExecutorKind>>,
         tx: Option<TelemetrySender>,
     ) -> Result<Self> {
         let bridge = ZmqBridge::connect(zmq_endpoint).await?;
@@ -50,6 +67,7 @@ impl EquityScheduler {
             feature_window_size,
             last_processed_ts: None,
             strategy_params,
+            trading_mode,
             executor,
             tx,
         })
@@ -249,44 +267,95 @@ impl EquityScheduler {
         db::save_position(&self.pool, new_pos.as_i64()).await?;
 
         if new_pos != current_pos {
-            match self.executor.set_target_position(new_pos, latest_close, candle_ts).await {
-                Ok(fills) => {
-                    let total_pnl: f64 = fills.iter().map(|f| f.realized_pnl).sum();
-                    for fill in &fills {
-                        info!(
-                            side = ?fill.side,
-                            qty = fill.qty,
-                            price = fill.price,
-                            fee = fill.fee,
-                            pnl = fill.realized_pnl,
-                            "equity trade executed"
-                        );
-                    }
+            // Phase 3.4: read the current trading mode + executor at the start
+            // of the trade. The runtime mode-toggle can swap either between
+            // cycles, but the lock is released before we sleep again, so the
+            // toggle never blocks a trade in flight.
+            let mode = *self.trading_mode.read().await;
+            match mode {
+                TradingMode::Paper => {
+                    // Paper mode uses the current executor (which is the
+                    // PaperExecutor unless an earlier flip swapped it in).
+                    let mut exec_guard = self.executor.write().await;
+                    match exec_guard.set_target_position(new_pos, latest_close, candle_ts).await {
+                        Ok(fills) => {
+                            let total_pnl: f64 = fills.iter().map(|f| f.realized_pnl).sum();
+                            for fill in &fills {
+                                info!(
+                                    side = ?fill.side,
+                                    qty = fill.qty,
+                                    price = fill.price,
+                                    fee = fill.fee,
+                                    pnl = fill.realized_pnl,
+                                    "equity trade executed"
+                                );
+                            }
 
-                    // Publish PnL tick after trade execution.
-                    if let Some(tx) = &self.tx {
-                        let _ = tx.send(TelemetryEvent::PnlTick {
-                            realized_pnl: total_pnl,
-                            unrealized_pnl: 0.0,
-                            position: format!("{}", new_pos).to_lowercase(),
-                            entry_price: if new_pos != Position::Flat {
-                                Some(latest_close)
-                            } else {
-                                None
-                            },
-                            last_close: Some(latest_close),
-                            timestamp: candle_ts,
-                        });
+                            // Publish PnL tick after trade execution.
+                            if let Some(tx) = &self.tx {
+                                let _ = tx.send(TelemetryEvent::PnlTick {
+                                    realized_pnl: total_pnl,
+                                    unrealized_pnl: 0.0,
+                                    position: format!("{}", new_pos).to_lowercase(),
+                                    entry_price: if new_pos != Position::Flat {
+                                        Some(latest_close)
+                                    } else {
+                                        None
+                                    },
+                                    last_close: Some(latest_close),
+                                    timestamp: candle_ts,
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            error!(error = %e, "equity executor failed to place order");
+                        }
                     }
                 }
-                Err(e) => {
-                    error!(error = %e, "equity executor failed to place order");
+                TradingMode::Live => {
+                    // Live mode is gated by the runtime toggle. The API
+                    // endpoint (POST /api/mode) flips the mode + executor
+                    // atomically; here we just dispatch.
+                    let mut exec_guard = self.executor.write().await;
+                    match exec_guard.set_target_position(new_pos, latest_close, candle_ts).await {
+                        Ok(fills) => {
+                            let total_pnl: f64 = fills.iter().map(|f| f.realized_pnl).sum();
+                            for fill in &fills {
+                                info!(
+                                    side = ?fill.side,
+                                    qty = fill.qty,
+                                    price = fill.price,
+                                    fee = fill.fee,
+                                    pnl = fill.realized_pnl,
+                                    "equity LIVE trade executed"
+                                );
+                            }
+                            if let Some(tx) = &self.tx {
+                                let _ = tx.send(TelemetryEvent::PnlTick {
+                                    realized_pnl: total_pnl,
+                                    unrealized_pnl: 0.0,
+                                    position: format!("{}", new_pos).to_lowercase(),
+                                    entry_price: if new_pos != Position::Flat {
+                                        Some(latest_close)
+                                    } else {
+                                        None
+                                    },
+                                    last_close: Some(latest_close),
+                                    timestamp: candle_ts,
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            error!(error = %e, "equity LIVE executor failed to place order");
+                        }
+                    }
                 }
             }
             info!(
                 candle_ts,
                 prev = %current_pos,
                 next = %new_pos,
+                mode = %mode,
                 regime,
                 sma,
                 "equity position changed"
@@ -384,7 +453,8 @@ mod tests {
             feature_window_size: 10,
             last_processed_ts: None,
             strategy_params: EquityStrategyParams::default(),
-            executor,
+            trading_mode: Arc::new(RwLock::new(TradingMode::Paper)),
+            executor: Arc::new(RwLock::new(executor)),
             tx: None,
         }
     }

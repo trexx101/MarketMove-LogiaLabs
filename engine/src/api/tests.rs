@@ -22,10 +22,18 @@ fn test_state(pool: db::DbPool) -> State<AppState> {
     let (tx, _rx) = tokio::sync::broadcast::channel(64);
     State(AppState {
         pool,
-        trading_mode: crate::config::TradingMode::Paper,
+        trading_mode: std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::config::TradingMode::Paper,
+        )),
         symbol: "BTC/USD".to_string(),
         sma_window: TEST_SMA_WINDOW,
         tx,
+        parity_marker_path: std::env::temp_dir()
+            .join("parity_marker_test_default.json")
+            .to_string_lossy()
+            .into_owned(),
+        parity_max_age_secs: 7 * 24 * 60 * 60,
+        totp_secret: String::new(),
     })
 }
 
@@ -208,8 +216,12 @@ async fn router_serves_static_files_and_api() {
             magnitude_threshold: 0.005,
             paper_fee: 0.0015,
             sma_window: 3,
+            enable_shorting: false,
+            short_entry_threshold: -0.004,
+            short_exit_threshold: 0.001,
             http_port: 0,
             symbol: "BTC/USD".to_string(),
+            short_symbol: "PSQ".to_string(),
             database_url: ":memory:".to_string(),
             norm_stats_path: "models/norm_stats.json".to_string(),
             feature_window_size: 72,
@@ -220,6 +232,9 @@ async fn router_serves_static_files_and_api() {
             parity_max_age_secs: 7 * 24 * 60 * 60,
             moomoo_creds_path: "~/.moomoo/credentials.json".to_string(),
             fred_api_key: "".to_string(),
+            live_executor: "paper".to_string(),
+            moomoo_trd_env: "SIMULATE".to_string(),
+            totp_secret: String::new(),
         };
 
         let app = {

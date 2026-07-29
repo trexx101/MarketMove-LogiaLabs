@@ -14,6 +14,7 @@ mod parity;
 mod scheduler;
 mod strategy;
 mod strategy_lab;
+mod totp;
 
 use std::process;
 
@@ -72,28 +73,57 @@ async fn main() {
     // executor, consumed by WebSocket clients at /api/v1/ws.
     let (tx, _rx) = tokio::sync::broadcast::channel(64);
 
-    // Construct executor based on trading mode.
-    // NOTE: Kraken is retired (Wave 5). The engine runs paper mode only; live
-    // execution will be re-added against Binance when the new model graduates
-    // the walk-forward OOS IC gate.
-    let executor = match cfg.trading_mode {
-        config::TradingMode::Paper => {
-            info!(fee = cfg.paper_fee, "using paper executor");
-            exec::ExecutorKind::Paper(exec::paper::PaperExecutor::new(
-                pool.clone(),
-                cfg.paper_fee,
-                Some(tx.clone()),
-            ))
-        }
-        config::TradingMode::Live => {
-            warn!("TRADING_MODE=live requested but live execution is not yet wired to Binance; falling back to paper executor");
-            exec::ExecutorKind::Paper(exec::paper::PaperExecutor::new(
-                pool.clone(),
-                cfg.paper_fee,
-                Some(tx.clone()),
-            ))
+    // Phase 3.4: TOTP secret for the runtime mode toggle. If TOTP_SECRET is
+    // unset, generate a fresh one and log the otpauth URL so the operator
+    // can scan it with their authenticator app. Persist via the TOTP_SECRET
+    // env var (or a restricted-permission file) before the next restart.
+    let (totp_secret, _totp_was_generated) = match totp::load_or_generate_secret() {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("TOTP setup error: {:#}", e);
+            process::exit(1);
         }
     };
+    if _totp_was_generated {
+        match totp::otpauth_url(&totp_secret, totp::ISSUER, totp::ACCOUNT_LABEL) {
+            Ok(url) => {
+                warn!(
+                    "TOTP_SECRET was empty — generated a fresh secret.\n\
+                     Scan this otpauth URL with your authenticator app, then\n\
+                     persist TOTP_SECRET={} in your env before next restart:\n  {}",
+                    totp_secret, url
+                );
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to construct otpauth URL for fresh TOTP secret");
+            }
+        }
+    } else {
+        info!("TOTP_SECRET loaded from env");
+    }
+
+    // Construct executor based on trading mode.
+    // NOTE: Kraken is retired (Wave 5). The engine runs paper mode only by default.
+    // Live mode is now wired to Moomoo OpenD (Phase 3.3) for QQQ daily equities.
+    // Selected via LIVE_EXECUTOR=moomoo (default: paper fallback for safety).
+    //
+    // Phase 3.4: the executor is wrapped in `Arc<RwLock<...>>` so the runtime
+    // mode-toggle endpoint can swap Paper <-> Moomoo while the scheduler is
+    // running. The scheduler reads the current value at each cycle.
+    let executor = std::sync::Arc::new(tokio::sync::RwLock::new(
+        build_executor_for_mode(
+            cfg.trading_mode,
+            &cfg,
+            pool.clone(),
+            tx.clone(),
+        )
+        .await,
+    ));
+
+    // Shared trading mode (Phase 3.4). The runtime mode toggle flips this
+    // value; the scheduler reads it at each cycle to decide which executor
+    // entry to use. Initial value mirrors Config::trading_mode.
+    let trading_mode = std::sync::Arc::new(tokio::sync::RwLock::new(cfg.trading_mode));
 
     // Run the equities REST backfill synchronously BEFORE spawning the
     // ingestion supervisor. This seeds QQQ + constituents + macro history so
@@ -130,8 +160,13 @@ async fn main() {
         entry_threshold: cfg.magnitude_threshold,
         exit_threshold: -cfg.magnitude_threshold / 3.0,
         sma_window: cfg.sma_window,
+        enable_shorting: cfg.enable_shorting,
+        short_entry_threshold: cfg.short_entry_threshold,
+        short_exit_threshold: cfg.short_exit_threshold,
     };
     let scheduler_tx = tx.clone();
+    let scheduler_trading_mode = trading_mode.clone();
+    let scheduler_executor = executor.clone();
     tokio::spawn(async move {
         match scheduler::EquityScheduler::new(
             scheduler_pool,
@@ -140,7 +175,8 @@ async fn main() {
             norm_stats,
             feature_window_size,
             eq_strategy_params,
-            executor,
+            scheduler_trading_mode,
+            scheduler_executor,
             Some(scheduler_tx),
         ).await {
             Ok(mut sched) => {
@@ -175,8 +211,12 @@ async fn main() {
         }
     });
 
-    // Build and spawn the Axum telemetry server.
-    let app = api::router(pool.clone(), &cfg, tx);
+    // Build and spawn the Axum telemetry server. We pass an updated Config
+    // with the resolved TOTP secret (which may have been generated above)
+    // so the API endpoint can verify submitted codes.
+    let mut cfg_for_api = cfg.clone();
+    cfg_for_api.totp_secret = totp_secret.clone();
+    let app = api::router(pool.clone(), &cfg_for_api, tx);
     let bind_addr = format!("0.0.0.0:{}", cfg.http_port);
     match tokio::net::TcpListener::bind(&bind_addr).await {
         Ok(listener) => {
@@ -201,5 +241,79 @@ async fn main() {
     if let Err(e) = data::run_equities_ingestion(pool).await {
         eprintln!("equities ingestion fatal error: {:#}", e);
         process::exit(1);
+    }
+}
+
+/// Build the appropriate executor for a given startup trading mode.
+///
+/// Phase 3.4: this is only called at startup with the initial mode. The
+/// runtime swap (Paper -> Moomoo) happens via `POST /api/mode` while the
+/// engine is running, with the scheduler picking up the new executor at
+/// its next cycle.
+async fn build_executor_for_mode(
+    mode: config::TradingMode,
+    cfg: &config::Config,
+    pool: db::DbPool,
+    tx: tokio::sync::broadcast::Sender<api::ws::TelemetryEvent>,
+) -> exec::ExecutorKind {
+    match mode {
+        config::TradingMode::Paper => {
+            info!(fee = cfg.paper_fee, "using paper executor");
+            exec::ExecutorKind::Paper(exec::paper::PaperExecutor::new_for_symbol(
+                pool,
+                cfg.paper_fee,
+                &cfg.symbol,
+                &cfg.short_symbol,
+                Some(tx),
+            ))
+        }
+        config::TradingMode::Live => {
+            let live_kind = std::env::var("LIVE_EXECUTOR").unwrap_or_else(|_| "paper".to_string());
+            match live_kind.to_lowercase().as_str() {
+                "moomoo" => {
+                    let trd_env = exec::moomoo::TrdEnv::from_env();
+                    info!(
+                        trd_env = ?trd_env,
+                        symbol = %cfg.symbol,
+                        short_symbol = %cfg.short_symbol,
+                        "using Moomoo OpenD executor (Phase 3.3)"
+                    );
+                    if trd_env.is_real() {
+                        warn!(
+                            "MOOMOO_TRD_ENV=REAL — orders will execute against the REAL account. \
+                             Ensure OpenD is unlocked and parity is fresh (<7 days)."
+                        );
+                    }
+                    let mut moo = exec::moomoo::MoomooExecutor::new(
+                        cfg.symbol.clone(),
+                        cfg.short_symbol.clone(),
+                        trd_env,
+                    );
+                    if let Ok(firm) = std::env::var("MOOMOO_SECURITY_FIRM") {
+                        moo.security_firm = Some(firm);
+                    }
+                    if let Ok(acc) = std::env::var("MOOMOO_ACC_ID") {
+                        if let Ok(n) = acc.parse::<i64>() {
+                            moo.acc_id = Some(n);
+                        }
+                    }
+                    exec::ExecutorKind::Moomoo(moo)
+                }
+                _ => {
+                    warn!(
+                        "TRADING_MODE=live but LIVE_EXECUTOR is not 'moomoo' (got '{}'); \
+                         falling back to paper executor for safety.",
+                        live_kind
+                    );
+                    exec::ExecutorKind::Paper(exec::paper::PaperExecutor::new_for_symbol(
+                        pool,
+                        cfg.paper_fee,
+                        &cfg.symbol,
+                        &cfg.short_symbol,
+                        Some(tx),
+                    ))
+                }
+            }
+        }
     }
 }

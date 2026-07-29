@@ -50,6 +50,7 @@ pub enum TelemetryEvent {
     /// A single executed trade fill (entry or exit leg).
     TradeFill {
         side: String,
+        symbol: String,
         qty: f64,
         price: f64,
         fee: f64,
@@ -162,6 +163,7 @@ mod tests {
     fn trade_fill_serialization() {
         let event = TelemetryEvent::TradeFill {
             side: "buy".to_string(),
+            symbol: "QQQ".to_string(),
             qty: 1.0,
             price: 500.0,
             fee: 0.75,

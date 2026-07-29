@@ -511,6 +511,41 @@ pub async fn insert_trade(
     Ok(())
 }
 
+/// Insert an equity trade into `equity_trades` with explicit symbol attribution.
+///
+/// The equities pipeline (Wave C) reports PnL per-symbol (see
+/// `sum_equity_realized_pnl` and `status::handle_status`), so every fill must
+/// record which instrument was traded. For a short position this is the inverse
+/// ETF symbol (e.g. PSQ), not the primary symbol (QQQ).
+pub async fn insert_equity_trade(
+    pool: &DbPool,
+    symbol: &str,
+    candle_ts: i64,
+    side: &str,
+    qty: f64,
+    price: f64,
+    fee: f64,
+    realized_pnl: f64,
+) -> Result<()> {
+    let created_at = Utc::now().timestamp();
+    sqlx::query(
+        "INSERT INTO equity_trades (symbol, candle_ts, side, qty, price, fee, realized_pnl, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(symbol)
+    .bind(candle_ts)
+    .bind(side)
+    .bind(qty)
+    .bind(price)
+    .bind(fee)
+    .bind(realized_pnl)
+    .bind(created_at)
+    .execute(pool)
+    .await
+    .context("insert_equity_trade")?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Read helpers for the telemetry API
 // ---------------------------------------------------------------------------
@@ -612,6 +647,42 @@ pub async fn sum_realized_pnl(pool: &DbPool) -> Result<f64> {
         .await
         .context("sum_realized_pnl")?;
     Ok(row.get(0))
+}
+
+/// Fetch the `limit` most recent equity trades for a given symbol, newest-first.
+/// The equities executor persists fills here (with symbol attribution, including
+/// the inverse-ETF short symbol), so consumers must read by symbol.
+pub async fn fetch_recent_equity_trades(
+    pool: &DbPool,
+    symbol: &str,
+    limit: usize,
+) -> Result<Vec<TradeRow>> {
+    let rows = sqlx::query(
+        "SELECT id, candle_ts, side, qty, price, fee, realized_pnl, created_at
+         FROM equity_trades
+         WHERE symbol = ?1
+         ORDER BY id DESC
+         LIMIT ?2",
+    )
+    .bind(symbol)
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await
+    .context("fetch_recent_equity_trades")?;
+
+    Ok(rows
+        .iter()
+        .map(|row| TradeRow {
+            id: row.get(0),
+            candle_ts: row.get(1),
+            side: row.get(2),
+            qty: row.get(3),
+            price: row.get(4),
+            fee: row.get(5),
+            realized_pnl: row.get(6),
+            created_at: row.get(7),
+        })
+        .collect())
 }
 
 /// Return the most recent candle, or `None` if the table is empty.
@@ -1416,4 +1487,82 @@ mod tests {
         assert_eq!(last_ts, 1_700_086_400);
         assert_eq!(err, "timeout");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Mode-switch audit (Phase 3.4)
+// ---------------------------------------------------------------------------
+
+/// One row of the `mode_switches` audit table.
+#[derive(Debug, Clone)]
+pub struct ModeSwitchRow {
+    pub id: i64,
+    pub previous_mode: String,
+    pub new_mode: String,
+    pub parity_marker_age_secs: i64,
+    pub authorized_by: String,
+    pub timestamp: i64,
+}
+
+/// Append a row to `mode_switches` so operators can audit who flipped the
+/// paper/live toggle and when. `previous_mode` and `new_mode` are stored as
+/// the lowercase strings ("paper" / "live") for easy filtering.
+pub async fn insert_mode_switch(
+    pool: &DbPool,
+    previous_mode: &str,
+    new_mode: &str,
+    parity_marker_age_secs: i64,
+    authorized_by: &str,
+    timestamp: i64,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO mode_switches
+            (previous_mode, new_mode, parity_marker_age_secs, authorized_by, timestamp)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )
+    .bind(previous_mode)
+    .bind(new_mode)
+    .bind(parity_marker_age_secs)
+    .bind(authorized_by)
+    .bind(timestamp)
+    .execute(pool)
+    .await
+    .context("insert_mode_switch")?;
+    Ok(())
+}
+
+/// Return the most recent `limit` mode switches, newest-first.
+pub async fn fetch_recent_mode_switches(pool: &DbPool, limit: usize) -> Result<Vec<ModeSwitchRow>> {
+    let rows = sqlx::query(
+        "SELECT id, previous_mode, new_mode, parity_marker_age_secs, authorized_by, timestamp
+         FROM mode_switches
+         ORDER BY id DESC
+         LIMIT ?1",
+    )
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await
+    .context("fetch_recent_mode_switches")?;
+
+    Ok(rows
+        .iter()
+        .map(|r| ModeSwitchRow {
+            id: r.get(0),
+            previous_mode: r.get(1),
+            new_mode: r.get(2),
+            parity_marker_age_secs: r.get(3),
+            authorized_by: r.get(4),
+            timestamp: r.get(5),
+        })
+        .collect())
+}
+
+/// Return the age (in seconds) of the parity marker, or `None` if the marker
+/// is missing or cannot be read. Used by the mode-toggle endpoint to enforce
+/// the freshness guard at request time (not just at startup).
+pub fn parity_marker_age_secs(marker_path: &str) -> Option<i64> {
+    let path = std::path::Path::new(marker_path);
+    let marker = crate::parity::read_marker(path).ok().flatten()?;
+    let now = chrono::Utc::now().timestamp();
+    Some((now - marker.verified_at).max(0))
 }

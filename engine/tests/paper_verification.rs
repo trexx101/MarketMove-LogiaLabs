@@ -39,7 +39,7 @@ async fn paper_mode_makes_no_kraken_calls() {
         .await
         .expect("tripwire listener");
 
-    let mut exec = ExecutorKind::Paper(PaperExecutor::new(pool.clone(), 0.0015));
+    let mut exec = ExecutorKind::Paper(PaperExecutor::new(pool.clone(), 0.0015, None));
 
     // Drive flat → long → flat
     exec.set_target_position(Position::Long, 50_000.0, 1000)
@@ -58,7 +58,7 @@ async fn paper_mode_makes_no_kraken_calls() {
     );
 
     // Also verify the DB has the expected number of trades.
-    let trades = db::fetch_recent_trades(&pool, 100)
+    let trades = db::fetch_recent_equity_trades(&pool, "QQQ", 100)
         .await
         .expect("fetch trades");
     assert_eq!(trades.len(), 2, "expected 2 trades (entry + exit)");
@@ -86,7 +86,7 @@ async fn paper_mode_makes_no_kraken_calls() {
 #[tokio::test]
 async fn paper_executor_cumulative_pnl_four_trade_sequence() {
     let pool = test_pool().await;
-    let mut exec = PaperExecutor::new(pool.clone(), 0.0015);
+    let mut exec = PaperExecutor::new(pool.clone(), 0.0015, None);
 
     // t=0: Flat → Long at 50000
     exec.set_target_position(Position::Long, 50_000.0, 1000)
@@ -109,9 +109,15 @@ async fn paper_executor_cumulative_pnl_four_trade_sequence() {
         .expect("short→flat");
 
     // Read all trades from DB and verify cumulative values.
-    let trades = db::fetch_recent_trades(&pool, 100)
+    // The sequence trades QQQ (long legs) and PSQ (short leg), so read both.
+    let mut trades = db::fetch_recent_equity_trades(&pool, "QQQ", 100)
         .await
-        .expect("fetch trades");
+        .expect("fetch QQQ trades");
+    trades.extend(
+        db::fetch_recent_equity_trades(&pool, "PSQ", 100)
+            .await
+            .expect("fetch PSQ trades"),
+    );
 
     assert_eq!(trades.len(), 4, "expected 4 trades for 4-action sequence");
 
@@ -147,7 +153,7 @@ async fn executor_kind_paper_variant_holds_no_http_client() {
     // PaperExecutor holds no reqwest::Client; this is a structural invariant.
     // Constructing ExecutorKind::Paper and driving it through a trade sequence
     // proves at compile time that no HTTP client is required.
-    let mut exec = ExecutorKind::Paper(PaperExecutor::new(pool, 0.0015));
+    let mut exec = ExecutorKind::Paper(PaperExecutor::new(pool, 0.0015, None));
 
     // Drive flat → long → flat without touching any network field.
     exec.set_target_position(Position::Long, 50_000.0, 1000)

@@ -1,3 +1,4 @@
+pub mod moomoo;
 pub mod paper;
 
 use anyhow::Result;
@@ -12,6 +13,8 @@ pub enum TradeSide {
 #[derive(Debug, Clone)]
 pub struct FillResult {
     pub side: TradeSide,
+    /// Instrument traded (primary symbol for long, inverse-ETF symbol for short).
+    pub symbol: String,
     pub qty: f64,
     pub price: f64,
     pub fee: f64,
@@ -22,6 +25,10 @@ pub struct FillResult {
 
 pub enum ExecutorKind {
     Paper(paper::PaperExecutor),
+    /// Moomoo OpenD executor (Phase 3.3). Shells out to place_order.py.
+    /// Default `trd_env=SIMULATE`; flip to REAL via MOOMOO_TRD_ENV=REAL after
+    /// the OpenD GUI has been unlocked.
+    Moomoo(moomoo::MoomooExecutor),
 }
 
 impl ExecutorKind {
@@ -33,6 +40,7 @@ impl ExecutorKind {
     ) -> Result<Vec<FillResult>> {
         match self {
             Self::Paper(e) => e.set_target_position(target, close, ts).await,
+            Self::Moomoo(e) => e.set_target_position(target, close, ts).await,
         }
     }
 }

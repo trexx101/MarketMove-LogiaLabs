@@ -30,6 +30,7 @@ rust-embed = { workspace = true }
 mime_guess = { workspace = true }
 rhai = { workspace = true }
 uuid = { workspace = true }
+totp-rs = { workspace = true }
 async-trait = "0.1"
 
 [[bin]]

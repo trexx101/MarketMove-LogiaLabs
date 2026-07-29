@@ -115,3 +115,33 @@ export async function saveStrategy(config) {
   if (!res.ok) throw new Error(`strategies POST: ${res.status}`);
   return res.json();
 }
+
+/**
+ * Fetch the current trading mode + parity marker status (Phase 3.4).
+ * @returns {Promise<{mode: string, parity_marker_age_secs: number|null, parity_valid: boolean, last_switch_ts: number|null}>}
+ */
+export async function fetchMode() {
+  const res = await fetch(`${API_BASE}/mode`);
+  if (!res.ok) throw new Error(`mode: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Request a paper/live mode flip. Requires a valid 6-digit TOTP code.
+ * @param {"paper"|"live"} mode - target mode
+ * @param {string} authToken - 6-digit TOTP from the user's authenticator app
+ * @returns {Promise<{success: boolean, message: string, mode: string}>}
+ * @throws {Error} on 4xx/5xx (includes the engine's error message in the body)
+ */
+export async function setMode(mode, authToken) {
+  const res = await fetch(`${API_BASE}/mode`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode, auth_token: authToken }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`mode ${mode} rejected (${res.status}): ${text}`);
+  }
+  return res.json();
+}

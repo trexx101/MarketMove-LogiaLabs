@@ -11,3 +11,4 @@ pub mod parity;
 pub mod scheduler;
 pub mod strategy;
 pub mod strategy_lab;
+pub mod totp;

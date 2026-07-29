@@ -5,7 +5,6 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use serde::Serialize;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tracing::error;
@@ -15,21 +14,33 @@ use crate::{config::Config, db};
 pub(crate) type ApiResult<T> = Result<Json<T>, (StatusCode, String)>;
 
 #[derive(Clone)]
-pub(crate) struct AppState {
+pub struct AppState {
     pub pool: db::DbPool,
-    pub trading_mode: crate::config::TradingMode,
+    /// Current trading mode. Wrapped in `Arc<RwLock>` so the runtime toggle
+    /// endpoint can flip it while the scheduler is reading it.
+    pub trading_mode: std::sync::Arc<tokio::sync::RwLock<crate::config::TradingMode>>,
     pub symbol: String,
     pub sma_window: usize,
     pub tx: ws::TelemetrySender,
+    /// Path to the parity marker JSON (re-checked at request time by /api/mode).
+    pub parity_marker_path: String,
+    /// Maximum age in seconds before the parity marker is considered stale.
+    pub parity_max_age_secs: i64,
+    /// Base32 TOTP secret used by /api/mode to authorize live-mode flips.
+    pub totp_secret: String,
 }
 
 pub fn router(pool: db::DbPool, config: &Config, tx: ws::TelemetrySender) -> Router {
+    let trading_mode = std::sync::Arc::new(tokio::sync::RwLock::new(config.trading_mode));
     let state = AppState {
         pool,
-        trading_mode: config.trading_mode,
+        trading_mode,
         symbol: config.symbol.clone(),
         sma_window: config.sma_window,
         tx,
+        parity_marker_path: config.parity_marker_path.clone(),
+        parity_max_age_secs: config.parity_max_age_secs,
+        totp_secret: config.totp_secret.clone(),
     };
 
     let cors = CorsLayer::new()
@@ -50,6 +61,8 @@ pub fn router(pool: db::DbPool, config: &Config, tx: ws::TelemetrySender) -> Rou
         .route("/api/backtest", post(backtest::handle_backtest))
         .route("/api/strategies", get(crate::strategy_lab::api::handle_list_strategies))
         .route("/api/strategies", post(crate::strategy_lab::api::handle_save_strategy))
+        .route("/api/mode", get(mode::handle_get_mode))
+        .route("/api/mode", post(mode::handle_set_mode))
         .route("/api/v1/ws", get(ws::ws_handler))
         .layer(cors)
         .with_state(state)
@@ -79,6 +92,7 @@ mod predictions;
 mod chart;
 mod equity;
 mod backtest;
+pub mod mode;
 pub(crate) mod ws;
 
 #[cfg(test)]

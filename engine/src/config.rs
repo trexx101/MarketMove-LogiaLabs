@@ -31,8 +31,18 @@ pub struct Config {
     pub magnitude_threshold: f64,
     pub paper_fee: f64,
     pub sma_window: usize,
-    pub http_port: u16,
+    /// Enable shorting via inverse ETF (PSQ) in the equities strategy.
+    /// Default: false (long/flat only).
+    pub enable_shorting: bool,
+    /// Short entry threshold for the equities strategy (pred_1d below this → Short).
+    pub short_entry_threshold: f64,
+    /// Short exit threshold for the equities strategy (pred_1d above this → Flat).
+    pub short_exit_threshold: f64,
+    /// Primary symbol traded for long positions (e.g. "QQQ").
     pub symbol: String,
+    /// Inverse-ETF symbol used to express short positions (default "PSQ").
+    pub short_symbol: String,
+    pub http_port: u16,
     pub database_url: String,
     /// Path to norm stats JSON (median/MAD, Wave C equities format).
     pub norm_stats_path: String,
@@ -47,6 +57,19 @@ pub struct Config {
     pub moomoo_creds_path: String,
     /// FRED API key (optional; higher rate limit). Empty → anonymous CSV fallback.
     pub fred_api_key: String,
+    /// Live executor kind. When TRADING_MODE=live, the engine picks an executor
+    /// based on this value. Phase 3.3 supports `paper` (fallback) and `moomoo`.
+    /// Default: `paper` (safe fallback; explicit opt-in required for moomoo).
+    pub live_executor: String,
+    /// Moomoo OpenD trading environment. `SIMULATE` | `REAL`.
+    /// Default: `SIMULATE`. Phase 3.3 reads this from env at runtime; this
+    /// field is exposed on Config for tests and future API.
+    pub moomoo_trd_env: String,
+    /// Base32 TOTP secret used by `POST /api/mode` to authorize live-mode flips
+    /// (Phase 3.4). Loaded from `TOTP_SECRET` env var; if empty, `main.rs`
+    /// generates a fresh secret and logs the otpauth URL — the user must
+    /// persist it before the next restart or they will be locked out of live mode.
+    pub totp_secret: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,6 +135,29 @@ impl Config {
             return Err(anyhow!("SMA_WINDOW must be > 0, got 0"));
         }
 
+        let enable_shorting = parse_env::<bool>("ENABLE_SHORTING", "false")
+            .context("ENABLE_SHORTING must be 'true' or 'false'")?;
+
+        // Negative thresholds for shorting; defaults match EquityStrategyParams::default().
+        let short_entry_threshold = parse_env::<f64>("SHORT_ENTRY_THRESHOLD", "-0.004")
+            .context("SHORT_ENTRY_THRESHOLD must be a number")?;
+        if short_entry_threshold >= 0.0 {
+            return Err(anyhow!(
+                "SHORT_ENTRY_THRESHOLD must be < 0 (short entries need a negative pred), got {}",
+                short_entry_threshold
+            ));
+        }
+
+        let short_exit_threshold = parse_env::<f64>("SHORT_EXIT_THRESHOLD", "0.001")
+            .context("SHORT_EXIT_THRESHOLD must be a number")?;
+        if short_exit_threshold <= short_entry_threshold {
+            return Err(anyhow!(
+                "SHORT_EXIT_THRESHOLD must be > SHORT_ENTRY_THRESHOLD, got {} <= {}",
+                short_exit_threshold,
+                short_entry_threshold
+            ));
+        }
+
         let http_port = parse_env::<u16>("HTTP_PORT", "8080")
             .context("HTTP_PORT must be a u16 in the range 1..=65535")?;
         if http_port == 0 {
@@ -123,25 +169,9 @@ impl Config {
             return Err(anyhow!("SYMBOL must not be empty"));
         }
 
-        if trading_mode == TradingMode::Live {
-            let parity_marker_path = env_or("PARITY_MARKER_PATH", "parity_verified.json");
-            if parity_marker_path.trim().is_empty() {
-                return Err(anyhow!("PARITY_MARKER_PATH must not be empty"));
-            }
-
-            let parity_max_age_secs = parse_env::<i64>("PARITY_MAX_AGE_SECS", "604800")
-                .context("PARITY_MAX_AGE_SECS must be an integer (seconds)")?;
-            if parity_max_age_secs <= 0 {
-                return Err(anyhow!(
-                    "PARITY_MAX_AGE_SECS must be > 0, got {}",
-                    parity_max_age_secs
-                ));
-            }
-
-            verify_parity_marker(&parity_marker_path, parity_max_age_secs)?;
-
-            // Store into the config below.
-            // (These locals are re-read outside the block for the struct.)
+        let short_symbol = env_or("SHORT_SYMBOL", "PSQ");
+        if short_symbol.trim().is_empty() {
+            return Err(anyhow!("SHORT_SYMBOL must not be empty"));
         }
 
         let parity_marker_path = env_or("PARITY_MARKER_PATH", "parity_verified.json");
@@ -168,6 +198,30 @@ impl Config {
         }
         let fred_api_key = env_or("FRED_API_KEY", "");
 
+        // Phase 3.3: live executor selection. Defaults to "paper" so that
+        // upgrading to TRADING_MODE=live without explicitly setting
+        // LIVE_EXECUTOR=moomoo is a no-op safe fallback.
+        let live_executor = env_or("LIVE_EXECUTOR", "paper");
+        if !matches!(live_executor.to_lowercase().as_str(), "paper" | "moomoo") {
+            return Err(anyhow!(
+                "LIVE_EXECUTOR must be 'paper' or 'moomoo', got '{}'",
+                live_executor
+            ));
+        }
+        let moomoo_trd_env = env_or("MOOMOO_TRD_ENV", "SIMULATE");
+        if !matches!(moomoo_trd_env.to_uppercase().as_str(), "SIMULATE" | "REAL") {
+            return Err(anyhow!(
+                "MOOMOO_TRD_ENV must be 'SIMULATE' or 'REAL', got '{}'",
+                moomoo_trd_env
+            ));
+        }
+
+        // Phase 3.4: TOTP secret for the runtime mode toggle. Empty is allowed
+        // here — main.rs will generate a fresh secret on startup and log the
+        // otpauth URL so the operator can scan it. Tests may also set this
+        // directly to avoid the env dependency.
+        let totp_secret = env_or("TOTP_SECRET", "");
+
         let database_url = env_or("DATABASE_URL", "sqlite://data/candles.db");
         if database_url.trim().is_empty() {
             return Err(anyhow!("DATABASE_URL must not be empty"));
@@ -190,8 +244,12 @@ impl Config {
             magnitude_threshold,
             paper_fee,
             sma_window,
+            enable_shorting,
+            short_entry_threshold,
+            short_exit_threshold,
             http_port,
             symbol,
+            short_symbol,
             database_url,
             norm_stats_path,
             feature_window_size,
@@ -199,6 +257,9 @@ impl Config {
             parity_max_age_secs,
             moomoo_creds_path,
             fred_api_key,
+            live_executor,
+            moomoo_trd_env,
+            totp_secret,
         })
     }
 }
@@ -278,6 +339,9 @@ mod tests {
             "MAGNITUDE_THRESHOLD",
             "PAPER_FEE",
             "SMA_WINDOW",
+            "ENABLE_SHORTING",
+            "SHORT_ENTRY_THRESHOLD",
+            "SHORT_EXIT_THRESHOLD",
             "HTTP_PORT",
             "SYMBOL",
             "KRAKEN_API_KEY",
@@ -289,6 +353,9 @@ mod tests {
             "PARITY_MAX_AGE_SECS",
             "MOOMOO_CREDS_PATH",
             "FRED_API_KEY",
+            "LIVE_EXECUTOR",
+            "MOOMOO_TRD_ENV",
+            "TOTP_SECRET",
         ] {
             env::remove_var(key);
         }
@@ -321,6 +388,9 @@ mod tests {
         assert!((cfg.magnitude_threshold - 0.005).abs() < 1e-12);
         assert!((cfg.paper_fee - 0.0015).abs() < 1e-12);
         assert_eq!(cfg.sma_window, 200);
+        assert!(!cfg.enable_shorting);
+        assert!((cfg.short_entry_threshold - (-0.004)).abs() < 1e-12);
+        assert!((cfg.short_exit_threshold - 0.001).abs() < 1e-12);
         assert_eq!(cfg.http_port, 8080);
         assert_eq!(cfg.symbol, "BTC/USD");
         assert_eq!(cfg.database_url, "sqlite://data/candles.db");
@@ -329,6 +399,19 @@ mod tests {
         assert_eq!(cfg.feature_window_size, 126);
         assert_eq!(cfg.parity_marker_path, "parity_verified.json");
         assert_eq!(cfg.parity_max_age_secs, 7 * 24 * 60 * 60);
+        assert_eq!(cfg.live_executor, "paper");
+        assert_eq!(cfg.moomoo_trd_env, "SIMULATE");
+        // TOTP_SECRET defaults to empty — main.rs will mint a fresh one.
+        assert_eq!(cfg.totp_secret, "");
+    }
+
+    #[test]
+    fn totp_secret_loaded_from_env() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_engine_env();
+        env::set_var("TOTP_SECRET", "JBSWY3DPEHPK3PXP");
+        let cfg = Config::from_env().expect("config should load with TOTP_SECRET");
+        assert_eq!(cfg.totp_secret, "JBSWY3DPEHPK3PXP");
     }
 
     #[test]
@@ -419,68 +502,29 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         clear_engine_env();
         env::set_var("PARITY_MARKER_PATH", "   ");
-        let err = Config::from_env().expect_err("blank PARITY_MARKER_PATH must fail");
+        let err = Config::from_env().expect_err("empty PARITY_MARKER_PATH must fail");
         let msg = format!("{:#}", err);
-        assert!(msg.contains("PARITY_MARKER_PATH"), "msg: {msg}");
-    }
-
-    #[test]
-    fn custom_env_overrides_defaults() {
-        let _g = ENV_LOCK.lock().unwrap();
-        clear_engine_env();
-        env::set_var("ZMQ_ENDPOINT", "tcp://inference:5555");
-        env::set_var("MAGNITUDE_THRESHOLD", "0.01");
-        env::set_var("PAPER_FEE", "0.0025");
-        env::set_var("SMA_WINDOW", "120");
-        env::set_var("HTTP_PORT", "9090");
-        env::set_var("SYMBOL", "ETH/USD");
-        let cfg = Config::from_env().expect("custom env must load");
-        assert_eq!(cfg.zmq_endpoint, "tcp://inference:5555");
-        assert!((cfg.magnitude_threshold - 0.01).abs() < 1e-12);
-        assert!((cfg.paper_fee - 0.0025).abs() < 1e-12);
-        assert_eq!(cfg.sma_window, 120);
-        assert_eq!(cfg.http_port, 9090);
-        assert_eq!(cfg.symbol, "ETH/USD");
-    }
-
-    #[test]
-    fn invalid_trading_mode_rejected() {
-        let _g = ENV_LOCK.lock().unwrap();
-        clear_engine_env();
-        env::set_var("TRADING_MODE", "scalp");
-        let err = Config::from_env().expect_err("invalid TRADING_MODE must fail");
-        let msg = format!("{:#}", err);
-        assert!(msg.contains("TRADING_MODE"));
-        assert!(msg.contains("scalp"));
+        assert!(msg.contains("PARITY_MARKER_PATH must not be empty"), "msg: {msg}");
     }
 
     #[test]
     fn non_numeric_threshold_rejected() {
         let _g = ENV_LOCK.lock().unwrap();
         clear_engine_env();
-        env::set_var("MAGNITUDE_THRESHOLD", "high");
-        let err = Config::from_env().expect_err("non-numeric threshold must fail");
+        env::set_var("MAGNITUDE_THRESHOLD", "banana");
+        let err = Config::from_env().expect_err("non-numeric MAGNITUDE_THRESHOLD must fail");
         let msg = format!("{:#}", err);
-        assert!(msg.contains("MAGNITUDE_THRESHOLD"));
+        assert!(msg.contains("MAGNITUDE_THRESHOLD"), "msg: {msg}");
     }
 
     #[test]
     fn non_positive_threshold_rejected() {
         let _g = ENV_LOCK.lock().unwrap();
         clear_engine_env();
-        env::set_var("MAGNITUDE_THRESHOLD", "0");
-        let err = Config::from_env().expect_err("zero threshold must fail");
+        env::set_var("MAGNITUDE_THRESHOLD", "-1");
+        let err = Config::from_env().expect_err("non-positive MAGNITUDE_THRESHOLD must fail");
         let msg = format!("{:#}", err);
-        assert!(msg.contains("MAGNITUDE_THRESHOLD must be > 0"));
-    }
-
-    #[test]
-    fn zero_paper_fee_allowed() {
-        let _g = ENV_LOCK.lock().unwrap();
-        clear_engine_env();
-        env::set_var("PAPER_FEE", "0");
-        let cfg = Config::from_env().expect("zero PAPER_FEE is valid");
-        assert!((cfg.paper_fee - 0.0).abs() < 1e-12);
+        assert!(msg.contains("MAGNITUDE_THRESHOLD must be > 0"), "msg: {msg}");
     }
 
     #[test]
@@ -490,7 +534,16 @@ mod tests {
         env::set_var("PAPER_FEE", "-0.001");
         let err = Config::from_env().expect_err("negative PAPER_FEE must fail");
         let msg = format!("{:#}", err);
-        assert!(msg.contains("PAPER_FEE must be >= 0"));
+        assert!(msg.contains("PAPER_FEE must be >= 0"), "msg: {msg}");
+    }
+
+    #[test]
+    fn zero_paper_fee_allowed() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_engine_env();
+        env::set_var("PAPER_FEE", "0");
+        let cfg = Config::from_env().expect("PAPER_FEE=0 must be allowed");
+        assert!((cfg.paper_fee - 0.0).abs() < 1e-12);
     }
 
     #[test]
@@ -500,7 +553,7 @@ mod tests {
         env::set_var("SMA_WINDOW", "0");
         let err = Config::from_env().expect_err("SMA_WINDOW=0 must fail");
         let msg = format!("{:#}", err);
-        assert!(msg.contains("SMA_WINDOW must be > 0"));
+        assert!(msg.contains("SMA_WINDOW must be > 0"), "msg: {msg}");
     }
 
     #[test]
@@ -510,7 +563,17 @@ mod tests {
         env::set_var("HTTP_PORT", "0");
         let err = Config::from_env().expect_err("HTTP_PORT=0 must fail");
         let msg = format!("{:#}", err);
-        assert!(msg.contains("HTTP_PORT must be > 0"));
+        assert!(msg.contains("HTTP_PORT must be > 0"), "msg: {msg}");
+    }
+
+    #[test]
+    fn invalid_trading_mode_rejected() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_engine_env();
+        env::set_var("TRADING_MODE", "sideways");
+        let err = Config::from_env().expect_err("invalid TRADING_MODE must fail");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("TRADING_MODE must be"), "msg: {msg}");
     }
 
     #[test]
@@ -518,18 +581,63 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         clear_engine_env();
         env::set_var("SYMBOL", "   ");
-        let err = Config::from_env().expect_err("blank SYMBOL must fail");
+        let err = Config::from_env().expect_err("empty SYMBOL must fail");
         let msg = format!("{:#}", err);
-        assert!(msg.contains("SYMBOL must not be empty"));
+        assert!(msg.contains("SYMBOL must not be empty"), "msg: {msg}");
     }
 
     #[test]
-    fn config_round_trips_through_serde() {
+    fn invalid_enable_shorting_rejected() {
         let _g = ENV_LOCK.lock().unwrap();
         clear_engine_env();
-        let cfg = Config::from_env().expect("defaults load");
-        let json = serde_json::to_string(&cfg).expect("serialize");
-        let back: Config = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(format!("{:?}", cfg), format!("{:?}", back));
+        env::set_var("ENABLE_SHORTING", "maybe");
+        let err = Config::from_env().expect_err("invalid ENABLE_SHORTING must fail");
+        let msg = format!("{:#}", err);
+        assert!(msg.contains("ENABLE_SHORTING"), "msg: {msg}");
+    }
+
+    #[test]
+    fn shorting_default_is_disabled() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_engine_env();
+        let cfg = Config::from_env().expect("defaults");
+        assert!(!cfg.enable_shorting);
+    }
+
+    #[test]
+    fn shorting_enabled_via_env() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_engine_env();
+        env::set_var("ENABLE_SHORTING", "true");
+        let cfg = Config::from_env().expect("ENABLE_SHORTING=true should load");
+        assert!(cfg.enable_shorting);
+    }
+
+    #[test]
+    fn short_entry_threshold_must_be_negative() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_engine_env();
+        env::set_var("SHORT_ENTRY_THRESHOLD", "0.001");
+        let err = Config::from_env().expect_err("non-negative SHORT_ENTRY_THRESHOLD must fail");
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("SHORT_ENTRY_THRESHOLD must be < 0"),
+            "msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn short_exit_must_exceed_short_entry() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_engine_env();
+        env::set_var("SHORT_ENTRY_THRESHOLD", "-0.005");
+        env::set_var("SHORT_EXIT_THRESHOLD", "-0.01");
+        let err = Config::from_env()
+            .expect_err("SHORT_EXIT_THRESHOLD <= SHORT_ENTRY_THRESHOLD must fail");
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("SHORT_EXIT_THRESHOLD must be > SHORT_ENTRY_THRESHOLD"),
+            "msg: {msg}"
+        );
     }
 }

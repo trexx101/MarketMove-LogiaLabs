@@ -92,8 +92,12 @@ pub(crate) async fn handle_status(State(state): State<AppState>) -> ApiResult<St
             .filter(|&v| v.is_finite())
     };
 
+    // Phase 3.4: trading mode lives behind an Arc<RwLock<_>> for the runtime
+    // toggle. Read briefly to render the current value.
+    let mode = *state.trading_mode.read().await;
+
     Ok(Json(StatusResponse {
-        mode: state.trading_mode.to_string(),
+        mode: mode.to_string(),
         symbol: state.symbol.clone(),
         position: position.to_string(),
         entry_price,
