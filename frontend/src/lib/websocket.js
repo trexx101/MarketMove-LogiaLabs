@@ -57,6 +57,13 @@ function handleMessage(raw) {
           timestamp: msg.timestamp,
         },
       }));
+      // Also update status store so StatusPanel shows live predictions
+      status.update((s) => ({
+        ...(s || {}),
+        pred_1d: msg.pred_1d,
+        pred_5d: msg.pred_5d,
+        pred_21d: msg.pred_21d,
+      }));
       break;
 
     case 'FeatureUpdate':

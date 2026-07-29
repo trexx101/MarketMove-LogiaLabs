@@ -12,6 +12,9 @@
   $: unrealizedPnl = s?.unrealized_pnl;
   $: staleness = s?.staleness_secs ?? 0;
   $: lastClose = s?.last_close;
+  $: pred1d = s?.pred_1d;
+  $: pred5d = s?.pred_5d;
+  $: pred21d = s?.pred_21d;
 
   // Phase 3.4: mode toggle modal
   let showModeModal = false;
@@ -63,7 +66,7 @@
     return Number(v).toFixed(dec);
   }
 
-  function pnlColor(v) {
+  function pnlColor(v, dec = 2) {
     if (v == null || isNaN(v)) return 'neutral';
     if (v > 0) return 'pos';
     if (v < 0) return 'neg';
@@ -118,6 +121,21 @@
   <div class="row">
     <span class="label">Last</span>
     <span class="value">{fmt(lastClose)}</span>
+  </div>
+
+  <div class="row pred-row">
+    <span class="label">Pred 1d</span>
+    <span class="value {pnlColor(pred1d)}">{fmt(pred1d, 4)}</span>
+  </div>
+
+  <div class="row pred-row">
+    <span class="label">Pred 5d</span>
+    <span class="value {pnlColor(pred5d, 4)}">{fmt(pred5d, 4)}</span>
+  </div>
+
+  <div class="row pred-row">
+    <span class="label">Pred 21d</span>
+    <span class="value {pnlColor(pred21d, 4)}">{fmt(pred21d, 4)}</span>
   </div>
 
   <div class="row">

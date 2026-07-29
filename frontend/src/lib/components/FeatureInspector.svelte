@@ -3,9 +3,16 @@
   import { fetchEquityFeatures } from '../api.js';
   import { features } from '../stores.js';
 
-  const FEATURE_NAMES = [
-    'ret_1d', 'ret_5d', 'ret_21d', 'rsi_14',
-    'trend_adx', 'vol_atr', 'corr_vix', 'corr_tlt',
+  // Must match EQ_FEATURE_NAMES in engine/src/features/equities_v2.rs
+  const FEATURE_DEFS = [
+    { key: 'trend_slope',            label: 'trend_slope',  center: 0,   scale: 0.05 },
+    { key: 'trend_adx',              label: 'trend_adx',    center: 25,  scale: 50   },
+    { key: 'rsi_14',                 label: 'rsi_14',       center: 50,  scale: 50   },
+    { key: 'vix_regime',             label: 'vix_regime',   center: 1,   scale: 2    },
+    { key: 'tlt_corr_20d',           label: 'tlt_corr',     center: 0,   scale: 1    },
+    { key: 'rvol_20d',               label: 'rvol_20d',     center: 1,   scale: 1    },
+    { key: 'gap_pct',                label: 'gap_pct',      center: 0,   scale: 0.03 },
+    { key: 'drawdown_from_50d_high', label: 'dd_50d',       center: 0,   scale: 0.1  },
   ];
 
   let localFeatures = null;
@@ -27,15 +34,30 @@
     localFeatures = $features;
   }
 
+  // Normalize WS payload {features: [...], normalized: [...]} into the same
+  // named-field shape as the REST /api/equity/features response.
+  $: resolvedFeatures = (() => {
+    if (!localFeatures) return null;
+    // REST shape: { trend_slope, trend_adx, ... }
+    if (localFeatures.trend_slope !== undefined) return localFeatures;
+    // WS shape: { features: [f0, f1, ...], normalized: [n0, n1, ...] }
+    if (Array.isArray(localFeatures.features)) {
+      const obj = {};
+      FEATURE_DEFS.forEach((d, i) => {
+        obj[d.key] = localFeatures.features[i] ?? 0;
+      });
+      return obj;
+    }
+    return localFeatures;
+  })();
+
   $: displayValues = (() => {
-    if (!localFeatures) return FEATURE_NAMES.map((name) => ({ name, value: 0, raw: null }));
-    const norm = localFeatures.normalized || [];
-    const raw = localFeatures.features || [];
-    return FEATURE_NAMES.map((name, i) => ({
-      name,
-      value: norm[i] != null ? norm[i] : 0,
-      raw: raw[i] != null ? raw[i] : null,
-    }));
+    if (!resolvedFeatures) return FEATURE_DEFS.map((d) => ({ ...d, norm: 0, raw: null }));
+    return FEATURE_DEFS.map((d) => {
+      const raw = resolvedFeatures[d.key];
+      const norm = raw != null ? (raw - d.center) / d.scale : 0;
+      return { ...d, norm, raw };
+    });
   })();
 
   function barColor(v) {
@@ -59,12 +81,12 @@
   <div class="bars">
     {#each displayValues as fv}
       <div class="bar-row">
-        <span class="bar-label">{fv.name}</span>
+        <span class="bar-label">{fv.label}</span>
         <div class="bar-track">
           <div class="bar-zero"></div>
           <div
             class="bar-fill"
-            style="background:{barColor(fv.value)}; {fv.value >= 0 ? 'left: 50%;' : 'right: 50%;'} width: {Math.min(50, Math.abs(fv.value) * 50)}%;"
+            style="background:{barColor(fv.norm)}; {fv.norm >= 0 ? 'left: 50%;' : 'right: 50%;'} width: {Math.min(50, Math.abs(fv.norm) * 50)}%;"
           ></div>
         </div>
         <span class="bar-raw">{fmtRaw(fv.raw)}</span>

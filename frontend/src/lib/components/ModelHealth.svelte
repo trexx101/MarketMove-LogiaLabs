@@ -16,7 +16,20 @@
 
   $: staleness = $status?.staleness_secs ?? 0;
   $: stale = staleness > 120;
-  $: icDrift = accuracyData?.ic_drift;
+  $: dirAcc1d = accuracyData?.directional_1h;
+  $: dirAcc5d = accuracyData?.directional_4h;
+  $: dirAcc21d = accuracyData?.directional_24h;
+  $: mae1d = accuracyData?.mae_1h;
+  $: resolvedCount = accuracyData?.resolved_count;
+
+  function fmtPct(v) {
+    if (v == null || isNaN(v)) return 'N/A';
+    return v.toFixed(1) + '%';
+  }
+  function fmtNum(v) {
+    if (v == null || isNaN(v)) return 'N/A';
+    return v.toFixed(4);
+  }
 </script>
 
 <div class="model-health">
@@ -34,15 +47,47 @@
     <span class="status {stale ? 'warn' : 'ok'}">{staleness}s</span>
   </div>
 
+  <div class="divider"></div>
+
   <div class="health-row">
-    <span class="label">IC Drift</span>
-    {#if icDrift != null}
-      <span class="status {Math.abs(icDrift) > 0.1 ? 'warn' : 'ok'}">
-        {icDrift.toFixed(4)}
-      </span>
+    <span class="label">Dir. Acc. 1d</span>
+    {#if dirAcc1d != null}
+      <span class="status {dirAcc1d >= 50 ? 'ok' : 'warn'}">{fmtPct(dirAcc1d)}</span>
     {:else}
       <span class="status na">N/A</span>
     {/if}
+  </div>
+
+  <div class="health-row">
+    <span class="label">Dir. Acc. 5d</span>
+    {#if dirAcc5d != null}
+      <span class="status {dirAcc5d >= 50 ? 'ok' : 'warn'}">{fmtPct(dirAcc5d)}</span>
+    {:else}
+      <span class="status na">N/A</span>
+    {/if}
+  </div>
+
+  <div class="health-row">
+    <span class="label">Dir. Acc. 21d</span>
+    {#if dirAcc21d != null}
+      <span class="status {dirAcc21d >= 50 ? 'ok' : 'warn'}">{fmtPct(dirAcc21d)}</span>
+    {:else}
+      <span class="status na">N/A</span>
+    {/if}
+  </div>
+
+  <div class="health-row">
+    <span class="label">MAE 1d</span>
+    {#if mae1d != null}
+      <span class="status">{fmtNum(mae1d)}</span>
+    {:else}
+      <span class="status na">N/A</span>
+    {/if}
+  </div>
+
+  <div class="health-row">
+    <span class="label">Resolved</span>
+    <span class="status">{resolvedCount ?? 0}</span>
   </div>
 
   {#if error && !accuracyData}
@@ -77,6 +122,12 @@
   }
 
   .label { color: #8b949e; }
+
+  .divider {
+    height: 1px;
+    background: #30363d;
+    margin: 0.25rem 0;
+  }
 
   .status {
     font-family: monospace;

@@ -203,6 +203,85 @@ pub(crate) async fn handle_equity_features(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// GET /api/equity/trades — trading ledger
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+pub(crate) struct EquityTradePoint {
+    id: i64,
+    ts: String,
+    side: String,
+    qty: f64,
+    price: f64,
+    fee: f64,
+    realized_pnl: f64,
+    cumulative_pnl: f64,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct EquityTradesResponse {
+    symbol: String,
+    count: usize,
+    total_realized_pnl: f64,
+    trades: Vec<EquityTradePoint>,
+}
+
+/// `GET /api/equity/trades?symbol=QQQ&limit=500`
+///
+/// Returns the trading ledger for a symbol: every fill in chronological order
+/// with a running cumulative PnL column, plus the grand total.
+pub(crate) async fn handle_equity_trades(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> ApiResult<EquityTradesResponse> {
+    let symbol = params
+        .get("symbol")
+        .cloned()
+        .unwrap_or_else(|| "QQQ".to_string());
+    let limit: i64 = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(500)
+        .clamp(1, 10_000);
+
+    // fetch_recent_equity_trades returns newest-first; reverse for chronological.
+    let mut rows = db::fetch_recent_equity_trades(&state.pool, &symbol, limit as usize)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
+    rows.reverse();
+
+    let mut cumulative = 0.0_f64;
+    let trades: Vec<EquityTradePoint> = rows
+        .iter()
+        .map(|r| {
+            cumulative += r.realized_pnl;
+            EquityTradePoint {
+                id: r.id,
+                ts: super::ts_to_rfc3339(r.candle_ts),
+                side: r.side.clone(),
+                qty: r.qty,
+                price: r.price,
+                fee: r.fee,
+                realized_pnl: r.realized_pnl,
+                cumulative_pnl: cumulative,
+            }
+        })
+        .collect();
+
+    let total_realized_pnl = db::sum_equity_realized_pnl(&state.pool, &symbol)
+        .await
+        .unwrap_or(0.0);
+
+    let count = trades.len();
+    Ok(Json(EquityTradesResponse {
+        symbol,
+        count,
+        total_realized_pnl,
+        trades,
+    }))
+}
+
 /// Align a secondary series (e.g. VIX, TLT) to the main symbol's timestamps.
 /// Returns `None` if the secondary series is empty.
 /// Uses nearest-prior timestamp matching (forward-fill).

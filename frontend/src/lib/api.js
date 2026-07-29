@@ -32,13 +32,11 @@ export async function fetchChart() {
 
 /**
  * Fetch model accuracy / IC drift metrics.
- * May return 503 if not yet implemented.
  * @returns {Promise<object|null>} AccuracyResponse or null if unavailable
  */
 export async function fetchAccuracy() {
   const res = await fetch(`${API_BASE}/accuracy`);
-  if (res.status === 503) return null;
-  if (!res.ok) throw new Error(`accuracy: ${res.status}`);
+  if (!res.ok) return null;
   return res.json();
 }
 
@@ -63,6 +61,18 @@ export async function fetchEquityData(symbol = 'QQQ', limit = 500) {
 export async function fetchEquityFeatures(symbol = 'QQQ', limit = 500) {
   const res = await fetch(`${API_BASE}/equity/features?symbol=${symbol}&limit=${limit}`);
   if (!res.ok) throw new Error(`equity/features: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Fetch the trading ledger (equity trades with cumulative PnL) for a symbol.
+ * @param {string} symbol - e.g. "QQQ"
+ * @param {number} limit - max rows
+ * @returns {Promise<object>} EquityTradesResponse
+ */
+export async function fetchEquityTrades(symbol = 'QQQ', limit = 500) {
+  const res = await fetch(`${API_BASE}/equity/trades?symbol=${symbol}&limit=${limit}`);
+  if (!res.ok) throw new Error(`equity/trades: ${res.status}`);
   return res.json();
 }
 

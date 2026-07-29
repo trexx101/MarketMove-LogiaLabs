@@ -1,4 +1,4 @@
-use axum::{extract::State, http::StatusCode, response::Json};
+use axum::{extract::State, response::Json};
 use serde::Serialize;
 
 use crate::db;
@@ -52,11 +52,20 @@ pub(crate) async fn handle_predictions(
     }))
 }
 
-pub(crate) async fn handle_accuracy(State(_state): State<AppState>) -> ApiResult<AccuracyResponse> {
-    Err((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "equity accuracy not yet implemented".to_string(),
-    ))
+pub(crate) async fn handle_accuracy(State(state): State<AppState>) -> ApiResult<AccuracyResponse> {
+    let stats = db::fetch_equity_accuracy(&state.pool, &state.symbol)
+        .await
+        .map_err(|e| internal_error("fetch_equity_accuracy", e))?;
+
+    Ok(Json(AccuracyResponse {
+        directional_1h: stats.directional_1h,
+        directional_4h: stats.directional_4h,
+        directional_24h: stats.directional_24h,
+        mae_1h: stats.mae_1h,
+        mae_4h: stats.mae_4h,
+        mae_24h: stats.mae_24h,
+        resolved_count: stats.resolved_count,
+    }))
 }
 
 pub(crate) fn prediction_to_dto(row: &db::PredictionRow) -> PredictionDto {

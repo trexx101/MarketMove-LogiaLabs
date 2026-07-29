@@ -58,6 +58,7 @@ pub fn router(pool: db::DbPool, config: &Config, tx: ws::TelemetrySender) -> Rou
         .route("/api/equity/backfill", get(equity::handle_equity_backfill))
         .route("/api/equity/macro", get(equity::handle_equity_macro))
         .route("/api/equity/features", get(equity::handle_equity_features))
+        .route("/api/equity/trades", get(equity::handle_equity_trades))
         .route("/api/backtest", post(backtest::handle_backtest))
         .route("/api/strategies", get(crate::strategy_lab::api::handle_list_strategies))
         .route("/api/strategies", post(crate::strategy_lab::api::handle_save_strategy))

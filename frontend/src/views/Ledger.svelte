@@ -1,13 +1,15 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { fetchEquityData } from '../lib/api.js';
+  import { fetchEquityTrades } from '../lib/api.js';
+  import { trades as tradesStore } from '../lib/stores.js';
 
   let canvas;
   let container;
-  let rows = [];
+  let trades = [];
   let symbol = 'QQQ';
   let loading = true;
   let error = null;
+  let totalPnl = 0;
   let resizeObserver;
 
   onMount(async () => {
@@ -20,12 +22,21 @@
     if (resizeObserver) resizeObserver.disconnect();
   });
 
+  // Live-update when a new trade fill arrives via WS
+  $: if ($tradesStore && $tradesStore.length > 0) {
+    // Only reload if we already have data (don't override initial load)
+    if (!loading && trades.length > 0) {
+      loadData();
+    }
+  }
+
   async function loadData() {
     loading = true;
     error = null;
     try {
-      const data = await fetchEquityData(symbol, 500);
-      rows = data.data || [];
+      const data = await fetchEquityTrades(symbol, 500);
+      trades = data.trades || [];
+      totalPnl = data.total_realized_pnl || 0;
     } catch (e) {
       error = e.message;
     }
@@ -43,24 +54,34 @@
     }
   }
 
+  function fmtTime(ts) {
+    if (!ts) return '—';
+    try {
+      const d = new Date(ts);
+      return d.toLocaleString();
+    } catch {
+      return String(ts);
+    }
+  }
+
   function fmt(v, dec = 2) {
     if (v == null || isNaN(v)) return '—';
     return Number(v).toFixed(dec);
   }
 
-  function fmtVol(v) {
-    if (v == null || isNaN(v)) return '—';
-    if (v >= 1e6) return (v / 1e6).toFixed(1) + 'M';
-    if (v >= 1e3) return (v / 1e3).toFixed(0) + 'K';
-    return String(v);
+  function pnlColor(v) {
+    if (v == null || isNaN(v)) return '';
+    if (v > 0) return 'pos';
+    if (v < 0) return 'neg';
+    return '';
   }
 
   function drawCurve() {
-    if (!canvas || !rows.length) return;
+    if (!canvas || !trades.length) return;
     const ctx = canvas.getContext('2d');
     const dpr = window.devicePixelRatio || 1;
     const w = container.clientWidth;
-    const h = container.clientHeight || 150;
+    const h = container.clientHeight || 200;
     canvas.width = w * dpr;
     canvas.height = h * dpr;
     canvas.style.width = w + 'px';
@@ -68,24 +89,21 @@
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, w, h);
 
-    const padL = 50, padR = 10, padT = 10, padB = 20;
+    const padL = 60, padR = 10, padT = 10, padB = 25;
     const cw = w - padL - padR;
     const ch = h - padT - padB;
 
-    // Cumulative equity from close prices (normalized to start at 0%)
-    const closes = rows.map((r) => r.close).filter((c) => c != null);
-    if (closes.length < 2) return;
+    // Cumulative PnL from trades
+    const points = trades.map((t) => t.cumulative_pnl);
+    if (points.length < 1) return;
 
-    const start = closes[0];
-    const equity = closes.map((c) => ((c - start) / start) * 100);
+    let minP = Math.min(...points, 0);
+    let maxP = Math.max(...points, 0);
+    const range = maxP - minP || 1;
 
-    let minE = Math.min(...equity, 0);
-    let maxE = Math.max(...equity, 0);
-    const range = maxE - minE || 1;
-
-    const n = equity.length;
-    const xStep = cw / (n - 1);
-    const yScale = (v) => padT + ch - ((v - minE) / range) * ch;
+    const n = points.length;
+    const xStep = n > 1 ? cw / (n - 1) : 0;
+    const yScale = (v) => padT + ch - ((v - minP) / range) * ch;
 
     // Grid
     ctx.font = '10px monospace';
@@ -97,8 +115,8 @@
       ctx.moveTo(padL, y);
       ctx.lineTo(w - padR, y);
       ctx.stroke();
-      const val = maxE - (range / 4) * i;
-      ctx.fillText(val.toFixed(1) + '%', 2, y + 3);
+      const val = maxP - (range / 4) * i;
+      ctx.fillText(val.toFixed(2), 2, y + 3);
     }
 
     // Zero line
@@ -111,25 +129,38 @@
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // Equity line
-    const lastE = equity[n - 1];
-    ctx.strokeStyle = lastE >= 0 ? '#3fb950' : '#f85149';
+    // Cumulative PnL line
+    const lastP = points[n - 1];
+    ctx.strokeStyle = lastP >= 0 ? '#3fb950' : '#f85149';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     for (let i = 0; i < n; i++) {
-      const x = padL + i * xStep;
-      const y = yScale(equity[i]);
+      const x = n > 1 ? padL + i * xStep : padL + cw / 2;
+      const y = yScale(points[i]);
       if (i === 0) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);
     }
     ctx.stroke();
 
     // Fill
-    ctx.lineTo(padL + (n - 1) * xStep, zeroY);
-    ctx.lineTo(padL, zeroY);
+    if (n > 1) {
+      ctx.lineTo(padL + (n - 1) * xStep, zeroY);
+      ctx.lineTo(padL, zeroY);
+    }
     ctx.closePath();
-    ctx.fillStyle = lastE >= 0 ? '#3fb95022' : '#f8514922';
+    ctx.fillStyle = lastP >= 0 ? '#3fb95022' : '#f8514922';
     ctx.fill();
+
+    // Trade markers
+    for (let i = 0; i < n; i++) {
+      const x = n > 1 ? padL + i * xStep : padL + cw / 2;
+      const y = yScale(points[i]);
+      const isBuy = trades[i].side.toLowerCase() === 'buy';
+      ctx.fillStyle = isBuy ? '#3fb950' : '#f85149';
+      ctx.beginPath();
+      ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
 </script>
 
@@ -146,10 +177,36 @@
     <div class="error">Error: {error}</div>
   {/if}
 
+  <div class="summary-row">
+    <div class="stat">
+      <span class="stat-label">Total Trades</span>
+      <span class="stat-value">{trades.length}</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Total Realized PnL</span>
+      <span class="stat-value {pnlColor(totalPnl)}">{fmt(totalPnl)}</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Win Rate</span>
+      <span class="stat-value">
+        {trades.length > 0
+          ? ((trades.filter((t) => t.realized_pnl > 0).length / trades.filter((t) => t.realized_pnl !== 0).length || 0) * 100).toFixed(1) + '%'
+          : '—'}
+      </span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Total Fees</span>
+      <span class="stat-value">{fmt(trades.reduce((s, t) => s + (t.fee || 0), 0))}</span>
+    </div>
+  </div>
+
   <div class="equity-curve-container" bind:this={container}>
     <canvas bind:this={canvas}></canvas>
     {#if loading}
       <div class="loading">Loading…</div>
+    {/if}
+    {#if !loading && trades.length === 0}
+      <div class="loading">No trades yet</div>
     {/if}
   </div>
 
@@ -157,28 +214,32 @@
     <table>
       <thead>
         <tr>
-          <th>Date</th>
-          <th>Open</th>
-          <th>High</th>
-          <th>Low</th>
-          <th>Close</th>
-          <th>Volume</th>
+          <th>#</th>
+          <th>Time</th>
+          <th>Side</th>
+          <th>Qty</th>
+          <th>Price</th>
+          <th>Fee</th>
+          <th>Realized PnL</th>
+          <th>Cumulative PnL</th>
         </tr>
       </thead>
       <tbody>
         {#if loading}
-          <tr><td colspan="6" class="center">Loading…</td></tr>
-        {:else if rows.length === 0}
-          <tr><td colspan="6" class="center">No data</td></tr>
+          <tr><td colspan="8" class="center">Loading…</td></tr>
+        {:else if trades.length === 0}
+          <tr><td colspan="8" class="center">No trades yet</td></tr>
         {:else}
-          {#each rows as r}
+          {#each trades as t, i}
             <tr>
-              <td class="mono">{fmtDate(r.ts)}</td>
-              <td class="mono">{fmt(r.open)}</td>
-              <td class="mono">{fmt(r.high)}</td>
-              <td class="mono">{fmt(r.low)}</td>
-              <td class="mono">{fmt(r.close)}</td>
-              <td class="mono">{fmtVol(r.volume)}</td>
+              <td class="mono">{i + 1}</td>
+              <td class="mono">{fmtTime(t.ts)}</td>
+              <td class="side-{(t.side || '').toLowerCase()}">{t.side || '—'}</td>
+              <td class="mono">{t.qty ?? '—'}</td>
+              <td class="mono">{fmt(t.price)}</td>
+              <td class="mono">{fmt(t.fee)}</td>
+              <td class="mono {pnlColor(t.realized_pnl)}">{fmt(t.realized_pnl)}</td>
+              <td class="mono {pnlColor(t.cumulative_pnl)}">{fmt(t.cumulative_pnl)}</td>
             </tr>
           {/each}
         {/if}
@@ -230,10 +291,37 @@
   }
   button:hover { background: #2ea043; }
 
+  .summary-row {
+    display: flex;
+    gap: 1.5rem;
+    margin-bottom: 1rem;
+    flex-wrap: wrap;
+  }
+
+  .stat {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+  }
+
+  .stat-label {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #8b949e;
+  }
+
+  .stat-value {
+    font-size: 1.1rem;
+    font-family: monospace;
+    font-variant-numeric: tabular-nums;
+    color: #c9d1d9;
+  }
+
   .equity-curve-container {
     position: relative;
     width: 100%;
-    height: 150px;
+    height: 200px;
     background: #0d1117;
     border: 1px solid #30363d;
     border-radius: 8px;
@@ -284,4 +372,8 @@
   .mono { font-family: monospace; font-variant-numeric: tabular-nums; }
   .center { text-align: center; color: #8b949e; }
   .error { color: #f85149; margin-bottom: 1rem; }
+  .pos { color: #3fb950; }
+  .neg { color: #f85149; }
+  .side-buy { color: #3fb950; font-weight: 600; }
+  .side-sell { color: #f85149; font-weight: 600; }
 </style>

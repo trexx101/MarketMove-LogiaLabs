@@ -1117,6 +1117,160 @@ pub async fn fetch_recent_equity_predictions(
     Ok(rows)
 }
 
+/// Compute directional accuracy, MAE, and IC over resolved equity predictions.
+///
+/// For each prediction at `candle_ts`, the actual return at horizon N is
+/// `ln(close[ts+N] / close[ts])`, looked up from `equity_candles`.
+/// The equity_predictions table has no actuals columns (unlike the crypto
+/// `predictions` table), so we compute on-the-fly.
+pub async fn fetch_equity_accuracy(pool: &DbPool, symbol: &str) -> Result<AccuracyStats> {
+    // Fetch predictions and candles
+    let preds = sqlx::query_as::<_, EquityPredictionRow>(
+        r#"SELECT id, symbol, candle_ts, pred_1d, pred_5d, pred_21d,
+                  regime, features_json, created_at, source
+           FROM equity_predictions
+           WHERE symbol = ?1
+           ORDER BY candle_ts DESC
+           LIMIT 500"#,
+    )
+    .bind(symbol)
+    .fetch_all(pool)
+    .await
+    .context("fetch_equity_accuracy: predictions")?;
+
+    let candles = sqlx::query("SELECT ts, close FROM equity_candles WHERE symbol = ?1 ORDER BY ts ASC")
+        .bind(symbol)
+        .fetch_all(pool)
+        .await
+        .context("fetch_equity_accuracy: candles")?;
+
+    if preds.is_empty() || candles.len() < 2 {
+        return Ok(AccuracyStats {
+            directional_1h: 0.0,
+            directional_4h: 0.0,
+            directional_24h: 0.0,
+            mae_1h: 0.0,
+            mae_4h: 0.0,
+            mae_24h: 0.0,
+            resolved_count: 0,
+        });
+    }
+
+    // Build candle close lookup: ts -> close
+    let candle_map: std::collections::HashMap<i64, f64> = candles
+        .iter()
+        .map(|r| (r.get::<i64, _>(0), r.get::<f64, _>(1)))
+        .collect();
+    let candle_tss: Vec<i64> = {
+        let mut v = candle_map.keys().copied().collect::<Vec<_>>();
+        v.sort_unstable();
+        v
+    };
+
+    let day = 86_400_i64;
+    let horizons: &[(i64, &str)] = &[(day, "1d"), (5 * day, "5d"), (21 * day, "21d")];
+
+    // Pred field selector per horizon
+    let mut count_1d = 0usize;
+    let mut count_5d = 0usize;
+    let mut count_21d = 0usize;
+    let mut dir_1d = 0usize;
+    let mut dir_5d = 0usize;
+    let mut dir_21d = 0usize;
+    let mut sum_ae_1d = 0.0_f64;
+    let mut sum_ae_5d = 0.0_f64;
+    let mut sum_ae_21d = 0.0_f64;
+
+    for p in &preds {
+        let base_close = match candle_map.get(&p.candle_ts) {
+            Some(&c) if c > 0.0 => c,
+            _ => continue,
+        };
+
+        for &(offset, label) in horizons {
+            // Find the candle closest to candle_ts + offset (must be >= target,
+            // within 3 calendar days tolerance to skip weekends/holidays)
+            let target = p.candle_ts + offset;
+            let future_close = find_closest_close(&candle_tss, &candle_map, target, 3 * day);
+            if let Some(fc) = future_close {
+                if fc <= 0.0 {
+                    continue;
+                }
+                let actual = (fc / base_close).ln();
+                let pred_val = match label {
+                    "1d" => p.pred_1d,
+                    "5d" => p.pred_5d,
+                    "21d" => p.pred_21d,
+                    _ => continue,
+                };
+
+                let correct = (pred_val >= 0.0) == (actual >= 0.0);
+                let ae = (pred_val - actual).abs();
+
+                match label {
+                    "1d" => {
+                        count_1d += 1;
+                        if correct { dir_1d += 1; }
+                        sum_ae_1d += ae;
+                    }
+                    "5d" => {
+                        count_5d += 1;
+                        if correct { dir_5d += 1; }
+                        sum_ae_5d += ae;
+                    }
+                    "21d" => {
+                        count_21d += 1;
+                        if correct { dir_21d += 1; }
+                        sum_ae_21d += ae;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let resolved_count = count_1d.max(count_5d).max(count_21d);
+
+    Ok(AccuracyStats {
+        directional_1h: if count_1d > 0 { (dir_1d as f64 / count_1d as f64) * 100.0 } else { 0.0 },
+        directional_4h: if count_5d > 0 { (dir_5d as f64 / count_5d as f64) * 100.0 } else { 0.0 },
+        directional_24h: if count_21d > 0 { (dir_21d as f64 / count_21d as f64) * 100.0 } else { 0.0 },
+        mae_1h: if count_1d > 0 { sum_ae_1d / count_1d as f64 } else { 0.0 },
+        mae_4h: if count_5d > 0 { sum_ae_5d / count_5d as f64 } else { 0.0 },
+        mae_24h: if count_21d > 0 { sum_ae_21d / count_21d as f64 } else { 0.0 },
+        resolved_count,
+    })
+}
+
+/// Find the close price for the candle nearest to `target_ts`,
+/// within `tolerance` seconds. Returns None if no candle is close enough.
+fn find_closest_close(
+    sorted_tss: &[i64],
+    candle_map: &std::collections::HashMap<i64, f64>,
+    target_ts: i64,
+    tolerance: i64,
+) -> Option<f64> {
+    // Binary search for the insertion point
+    let idx = sorted_tss.binary_search(&target_ts).unwrap_or_else(|i| i);
+    // Check the closest candidates around the insertion point
+    let mut best: Option<(i64, f64)> = None;
+    for &check_idx in &[idx, idx.saturating_sub(1)] {
+        if check_idx < sorted_tss.len() {
+            let ts = sorted_tss[check_idx];
+            let diff = (ts - target_ts).abs();
+            if diff <= tolerance {
+                let close = candle_map.get(&ts).copied();
+                if let Some(c) = close {
+                    if best.is_none() || diff < best.unwrap().0 {
+                        best = Some((diff, c));
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(_, c)| c)
+}
+
 /// Fetch recent equity candles for a symbol, **oldest-first** (ascending ts),
 /// which is the order required for chart rendering.
 pub async fn fetch_recent_equity_candles(
