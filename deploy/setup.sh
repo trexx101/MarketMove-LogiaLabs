@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# MarketMarkovNet — VPS Hardening Script
+# MarketMoves — VPS Hardening Script
 # Target: Ubuntu 24.04 LTS (Noble Numbat)
 # Scope:  UFW firewall, Docker Compose plugin, deploy user, SSH hardening
+#
+# NOTE: All deploy/ scripts in this repo use the `docker compose` (v2)
+# command, never `docker-compose` (v1). v1 is incompatible with Docker
+# server 25+ and will fail with `KeyError: ContainerConfig`.
 
 log() {
     printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"

@@ -1,20 +1,24 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# MarketMarkovNet — Caddy reverse proxy
+# MarketMoves — Caddy reverse proxy
 #
 # Terminates TLS on :443 via Let's Encrypt (when a public hostname is
 # configured) and reverse-proxies everything to the engine (Axum) on
-# the internal `mmn` network.
+# the internal `deploy_mmn` network.
 #
 # Operators set `HOST` in the workspace-root .env file:
-#   - HOST=btc.example.com  → Caddy auto-issues a Let's Encrypt cert,
-#                             terminates TLS on :443, redirects :80 → :443.
-#   - HOST not set          → Self-signed cert, serves on :80 and :443,
-#                             works with localhost, VPS IP, port forwarding.
+#   - HOST=trades.example.com  → Caddy auto-issues a Let's Encrypt cert,
+#                                terminates TLS on :443, serves both :80
+#                                and :443 directly.
+#   - HOST unset               → Self-signed internal cert, serves on :80
+#                                and :443 for localhost / VPS IP dev use.
+#                                Caddy auto-detects this and falls back to
+#                                `tls internal`.
 #
 # The engine serves:
-#   - GET /              → static SPA (uPlot control room)
-#   - GET /api/*         → JSON telemetry
-#   - everything else    → SPA fallback (client-side router)
+#   - GET /                    → static SPA (Svelte control room)
+#   - GET /api/*               → JSON telemetry
+#   - GET /api/v1/ws           → WebSocket telemetry
+#   - everything else          → SPA fallback (client-side router)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Global options: log to stdout for `docker logs`, disable the admin
@@ -44,6 +48,8 @@
 # Serves all hosts on ports 80 and 443. Uses internal CA for self-signed
 # certs with on-demand TLS — Caddy generates a cert for any SNI presented
 # during the TLS handshake (localhost, VPS IP, port-forwarded address, etc.).
+# When `HOST` is set, Caddy auto-issues a Let's Encrypt cert via the DNS
+# challenge for the configured hostname.
 :80, :443 {
     tls internal
     import backend

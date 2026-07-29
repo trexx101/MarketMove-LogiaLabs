@@ -1,14 +1,14 @@
 # Provisioning
 
 Step-by-step guide to harden a fresh Ubuntu 24.04 LTS VPS and prepare it for
-MarketMarkovNet.
+MarketMoves.
 
 **Prerequisites:**
 
 - A fresh Ubuntu 24.04 LTS VPS with root SSH access.
 - Your SSH public key installed on the VPS (typically via your hosting
   provider's console or `ssh-copy-id root@<host>`).
-- The MarketMarkovNet repository cloned locally (to transfer `setup.sh`).
+- The MarketMoves repository cloned locally (to transfer `setup.sh`).
 
 **What this document covers:**
 
@@ -76,7 +76,7 @@ The script performs four operations, each with idempotency guards:
 | Section | What it does |
 |---------|-------------|
 | **UFW Firewall** | Enables UFW with default-deny incoming. Allows 22/tcp, 80/tcp, 443/tcp. Explicitly denies 5555/tcp (ZMQ). |
-| **Docker Compose Plugin** | Installs `docker-compose-plugin` via apt. Adds Docker's official repo if the package is not in the default repos. |
+| **Docker Compose Plugin** | Installs `docker-compose-plugin` via apt. Adds Docker's official repo if the package is not in the default repos. **Use `docker compose` (v2), not `docker-compose` (v1).** v1 is incompatible with Docker server 25+. |
 | **Deploy User** | Creates `deploy` user with home directory, adds to `docker` group, copies root's SSH keys, grants passwordless sudo. |
 | **SSH Hardening** | Sets `PermitRootLogin no` and `PasswordAuthentication no` in sshd_config. Restarts sshd only if config changed. |
 
@@ -120,7 +120,9 @@ Only ports 22, 80, and 443 are allowed. Port 5555 is explicitly denied.
 docker compose version
 ```
 
-Expected: `Docker Compose version v2.x.x` (v2 or later).
+Expected: `Docker Compose version v2.x.x` (v2 or later). If you see
+"unknown command: docker compose", the plugin is not installed — see
+the troubleshooting section.
 
 ### 3.3 Docker runtime
 
@@ -180,8 +182,9 @@ Summary:
 4. Configure `.env` — see [`deploy/config.md`](./config.md).
 5. Build and launch with `docker compose -f deploy/docker-compose.yml up -d`.
 6. Verify with `curl -fsSL https://$HOST/api/status | jq`.
+7. (Optional) Verify the mode toggle: `curl -fsSL https://$HOST/api/mode | jq`.
 
-For live trading, see `deploy/config.md`.
+For live trading, see `deploy/README.md#going-live`.
 
 ---
 
@@ -191,7 +194,7 @@ For live trading, see `deploy/config.md`.
 /opt/marketmoves/
 ├── app/                # git-cloned MarketMoves repo
 ├── models/             # qqq_tcn_v1.pt, qqq_lgbm_*.pkl, norm_stats_qqq_v1.json (chmod 0600)
-└── data/               # SQLite DB (created by engine at runtime)
+├── data/               # SQLite DB + parity marker (created by engine at runtime)
 └── .env                 # secrets (chmod 0600, never committed)
 ```
 
@@ -231,11 +234,12 @@ The script does **not** handle these — they require operator action:
 | Task | Why manual |
 |------|-----------|
 | **DNS setup** | Point your domain's A record to the VPS IP. Required before Caddy can issue a Let's Encrypt cert. |
-| **`.env` secrets** | Trading mode, trading symbol, and other secrets must be set by the operator. See [`deploy/config.md`](./config.md). |
+| **`.env` secrets** | `TRADING_MODE`, `SYMBOL`, `HOST`, and other deployment knobs must be set by the operator. See [`deploy/config.md`](./config.md). |
 | **Model files** | `qqq_tcn_v1.pt`, `qqq_lgbm_*.pkl`, and `norm_stats_qqq_v1.json` are not in the repo. Place them in `/opt/marketmoves/models/` and `chmod 0600`. |
 | **Git clone** | The repo must be cloned to `/opt/marketmoves/app/` by the operator. |
 | **Initial system update** | `apt update && apt upgrade -y` should be run before `setup.sh`. |
 | **Backups** | Configure off-host backups for the `data` volume and `.env`. See [`deploy/README.md`](./README.md#backups). |
+| **TOTP secret** | Optional. Only required if you ever flip to live. The engine mints a fresh secret on first startup and logs an `otpauth://` URL to scan with your authenticator app. Persist it in `.env` after scanning. |
 
 ---
 
@@ -280,10 +284,17 @@ official repository automatically. Verify:
 cat /etc/apt/sources.list.d/docker.list
 ```
 
+### `docker-compose` (v1) errors out with `KeyError: ContainerConfig`
+
+Compose v1 (`docker-compose`) is incompatible with Docker server 25+. Use
+the v2 plugin (`docker compose`) instead. The deploy/ scripts in this repo
+all use the v2 form. If you see v1 being executed, your shell's PATH is
+finding the v1 binary before the v2 plugin.
+
 ### UFW blocking Docker ports
 
 UFW and Docker interact through iptables. Docker manipulates iptables directly,
-which can bypass UFW rules for container-published ports. The MarketMarkovNet
+which can bypass UFW rules for container-published ports. The MarketMoves
 compose file only publishes ports 80 and 443 (via Caddy), which are already
 allowed by UFW. Internal ports (5555, 8080) are not published to the host.
 

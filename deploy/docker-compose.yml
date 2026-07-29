@@ -155,7 +155,9 @@ services:
 networks:
   mmn:
     driver: bridge
-    internal: false  # engine + inference need outbound HTTPS to Kraken
+    # engine + inference need outbound HTTPS to Yahoo Finance + FRED + Moomoo.
+    # internal: false = external network access is allowed (the default but
+    # documented here for clarity).
 
 # ── Volumes ────────────────────────────────────────────────────────────────
 volumes:

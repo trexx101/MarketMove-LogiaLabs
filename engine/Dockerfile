@@ -1,14 +1,14 @@
 # syntax=docker/dockerfile:1.7
 #
-# MarketMarkovNet engine — Rust/Axum binary, CPU-only runtime.
+# MarketMoves engine — Rust/Axum binary, Svelte SPA, CPU-only runtime.
 #
 # Build context MUST be the workspace root (the directory that contains both
-# `engine/` and `frontend/`). The `frontend/` directory is served by Axum at
-# runtime, so it has to be present in the runtime image at the same relative
-# path the binary expects (relative to the binary's CWD, which we set to /app).
+# `engine/` and `frontend/`). The engine's `ServeDir::new("frontend")` serves
+# the static Svelte build at runtime, so the build stage must produce a
+# compiled `frontend/dist/` (index.html + assets/) — NOT the Svelte source.
 #
 # Build:
-#   docker build -f engine/Dockerfile -t marketmarkovnet/engine .
+#   docker build -f engine/Dockerfile -t marketmarkovnet/engine:latest .
 #
 # Run (paper mode, no live keys):
 #   docker run --rm \
@@ -16,9 +16,24 @@
 #     -v /models:/models:ro \
 #     -p 8080:8080 \
 #     --env-file .env \
-#     marketmarkovnet/engine
+#     marketmarkovnet/engine:latest
 
-# ── Build stage ──────────────────────────────────────────────────────────────
+# ── Frontend build stage ─────────────────────────────────────────────────────
+# Build the Svelte SPA with Vite. Output goes to /build/frontend/dist/.
+# We use a separate stage so the Node toolchain is not in the runtime image.
+FROM node:20-bookworm-slim AS frontend-build
+
+WORKDIR /build/frontend
+
+# Cache npm install: copy manifests first.
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+
+# Bundle the Svelte app. The Vite build outputs index.html + assets/.
+COPY frontend/ ./
+RUN npm run build
+
+# ── Engine build stage ───────────────────────────────────────────────────────
 # Pinned to a stable Debian bookworm toolchain to keep glibc / openssl
 # versions consistent with the runtime image.
 FROM rust:1-bookworm AS build
@@ -39,9 +54,9 @@ RUN mkdir -p engine/src \
     && cargo build --release --manifest-path engine/Cargo.toml \
     && rm -rf engine/src
 
-# Real source: copy the engine crate and the static frontend.
+# Real source: copy just the engine crate (the static frontend is provided
+# by the frontend-build stage above).
 COPY engine/ engine/
-COPY frontend/ frontend/
 
 # Build the actual binary.
 # Touch main.rs to force cargo to detect the source change from the placeholder.
@@ -54,20 +69,18 @@ RUN touch engine/src/main.rs \
 FROM debian:bookworm-slim AS runtime
 
 # Runtime deps:
-#   - ca-certificates: TLS to wss://ws.kraken.com + outbound HTTPS
+#   - ca-certificates: outbound HTTPS to Yahoo/FRED/Moomoo + Caddy's CA chain
 #   - curl: healthcheck
 #   - tini: PID-1 that reaps zombies and forwards signals (Docker stop = SIGTERM)
-#   - libsqlite3: sqlx's bundled-sqlite is off, so we link against system libsqlite3
-#                 (sqlx::sqlite is statically linked by default; libsqlite3 is here
-#                  as a defensive fallback in case any future dep needs it).
+#   - libsqlite3: defensive fallback (sqlx's bundled-sqlite is the default)
+#   - libssl3: openssl backend for reqwest's native-tls (used for FRED/Yahoo;
+#              rustls-tls hangs the Akamai edge in this runtime image).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
         tini \
         libsqlite3-0 \
-        # libssl3: openssl backend for reqwest's native-tls (used for FRED/Yahoo;
-        #          rustls-tls hangs the Akamai edge in this runtime image).
         libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -78,12 +91,15 @@ RUN groupadd --system --gid 1000 mmn \
 WORKDIR /app
 RUN mkdir -p /app/data && chown -R mmn:mmn /app
 
-# Binary from the build stage.
+# Binary from the engine build stage.
 COPY --from=build /usr/local/bin/engine /usr/local/bin/engine
 
-# Static frontend, served by the engine's `ServeDir` fallback.
-# Fix ownership so the mmn user can traverse/execute all parent dirs.
-COPY --from=build --chown=mmn:mmn /build/frontend/ /app/frontend/
+# Compiled Svelte bundle from the frontend build stage. The engine's
+# `ServeDir::new("frontend")` looks for index.html at `frontend/index.html`
+# and assets at `frontend/assets/*` — that's exactly what `dist/` produces.
+# We copy only the build artifacts (dist/) instead of the Svelte source tree
+# so the runtime image serves the actual app, not the Vite dev shell.
+COPY --from=frontend-build --chown=mmn:mmn /build/frontend/dist/ /app/frontend/
 
 # Drop privileges.
 USER mmn
@@ -94,16 +110,20 @@ EXPOSE 8080
 # Env defaults — the operator / compose file overrides most of these.
 ENV HTTP_PORT=8080 \
     DATABASE_URL=sqlite:///app/data/candles.db \
-    NORM_STATS_PATH=/models/norm_stats.json \
+    NORM_STATS_PATH=/models/norm_stats_qqq_v1.json \
     PARITY_MARKER_PATH=/app/data/parity_verified.json \
     RUST_LOG=info \
     SMA_WINDOW=200 \
-    FEATURE_WINDOW_SIZE=72 \
+    FEATURE_WINDOW_SIZE=126 \
     MAGNITUDE_THRESHOLD=0.005 \
     PAPER_FEE=0.0015 \
     ZMQ_ENDPOINT=tcp://inference:5555 \
-    SYMBOL=BTC/USD \
+    SYMBOL=QQQ \
+    SHORT_SYMBOL=PSQ \
     TRADING_MODE=paper \
+    LIVE_EXECUTOR=paper \
+    MOOMOO_TRD_ENV=SIMULATE \
+    ENABLE_SHORTING=false \
     PYTHONUNBUFFERED=1
 
 # Persistent SQLite + parity marker live under /app/data.
