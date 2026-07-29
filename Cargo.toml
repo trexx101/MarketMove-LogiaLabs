@@ -14,7 +14,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# native-tls lets reqwest use the OS CA bundle (Debian's /etc/ssl/certs in
+# the runtime image). Without it, rustls-tls ships Mozilla's webpki-roots
+# only, and FRED's Akamai edge has been observed to hang the TLS handshake
+# at 30s on cold connections. native-tls is a tiny additive feature.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "native-tls"] }
 anyhow = "1"
 thiserror = "1"
 tracing = "0.1"

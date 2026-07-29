@@ -48,9 +48,16 @@ pub async fn backfill_macro(
         None => bail!("FRED: unknown macro symbol '{symbol}'"),
     };
 
+    // FRED's Akamai edge has been observed to hang indefinitely from this
+    // VPS (no IPv6 route, Akamai's Anycast responses stall the SYN). The
+    // backfill machinery logs the timeout and falls back to Yahoo ^VIX for
+    // $VIX; the other two series (DGS10, DTWEXBGS) are macro-only and
+    // degrade to 0.0 in features. Keep the timeout short so the failure is
+    // cheap.
     let client = reqwest::Client::builder()
         .user_agent("MarketMarkovNet/equities")
         .timeout(std::time::Duration::from_secs(5))
+        .connect_timeout(std::time::Duration::from_secs(3))
         .build()
         .context("building reqwest client")?;
 

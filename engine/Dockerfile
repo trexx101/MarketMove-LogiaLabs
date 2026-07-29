@@ -66,6 +66,9 @@ RUN apt-get update \
         curl \
         tini \
         libsqlite3-0 \
+        # libssl3: openssl backend for reqwest's native-tls (used for FRED/Yahoo;
+        #          rustls-tls hangs the Akamai edge in this runtime image).
+        libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user.
@@ -117,5 +120,5 @@ ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/engine"]
 # actually serving HTTP.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
     CMD curl --silent --fail --max-time 4 http://127.0.0.1:8080/api/status \
-        | grep -q '"trading_mode"' \
+        | grep -q '"mode":"paper"\|"mode":"live"' \
         || exit 1
