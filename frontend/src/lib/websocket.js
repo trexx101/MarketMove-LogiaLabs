@@ -4,6 +4,7 @@ import {
   predictions,
   features,
   trades,
+  chartData,
 } from './stores.js';
 
 let ws = null;
@@ -101,6 +102,11 @@ function handleMessage(raw) {
         last_candle_ts: msg.last_candle_ts,
         staleness_secs: msg.seconds_since_last,
       }));
+      break;
+
+    case 'StrategyConfigChange':
+      // Strategy params changed — trigger chart refresh
+      chartData.set(null);
       break;
 
     default:

@@ -1,45 +1,95 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { fetchChart } from '../api.js';
-  import { chartData } from '../stores.js';
+  import { fetchChart, fetchEquityTrades } from '../api.js';
+  import { chartData, status, predictions } from '../stores.js';
 
   let canvas;
   let container;
   let candles = [];
   let sma = [];
+  let trades = [];
   let preds = null;
   let lastClose = null;
   let error = null;
   let resizeObserver;
+  let refreshTimer;
 
-  onMount(async () => {
+  async function refreshChart() {
     try {
       const data = await fetchChart();
       candles = data.candles || [];
       sma = data.sma || [];
       chartData.set(data);
+      draw();
     } catch (e) {
       error = e.message;
     }
+  }
+
+  async function refreshTrades() {
+    try {
+      const data = await fetchEquityTrades('QQQ', 200);
+      trades = data.trades || [];
+      draw();
+    } catch (e) {
+      // trades endpoint may fail if no trades yet — silent
+    }
+  }
+
+  onMount(async () => {
+    await refreshChart();
+    await refreshTrades();
     draw();
 
     resizeObserver = new ResizeObserver(() => draw());
     if (container) resizeObserver.observe(container);
+
+    // Auto-refresh chart every 60s
+    refreshTimer = setInterval(async () => {
+      await refreshChart();
+      await refreshTrades();
+    }, 60000);
   });
 
   onDestroy(() => {
     if (resizeObserver) resizeObserver.disconnect();
+    if (refreshTimer) clearInterval(refreshTimer);
   });
 
-  // Redraw when chartData store changes (e.g. from WS)
+  // Redraw when chartData store changes (e.g. from WS or fetch)
   $: if ($chartData) {
     candles = $chartData.candles || candles;
     sma = $chartData.sma || sma;
     draw();
   }
 
+  // Refetch when StrategyConfigChange clears chartData (WS event)
+  $: if ($chartData === null && candles.length) {
+    refreshChart();
+  }
+
+  // Update predictions when status or predictions change (WS or REST)
+  $: if (canvas && $status && $predictions) {
+    const lc = $status.last_close;
+    const p = $predictions.latest;
+    if (lc != null && p) {
+      // Handle both WS (pred_1d/5d/21d) and REST (pred_24h etc) shapes
+      preds = {
+        pred_1d: p.pred_1d ?? p.pred_24h ?? p.pred_1h,
+        pred_5d: p.pred_5d ?? p.pred_5h_approx,
+        pred_21d: p.pred_21d,
+      };
+      lastClose = lc;
+      draw();
+    }
+  }
+
   export function setPredictions(p, close) {
-    preds = p;
+    preds = {
+      pred_1d: p.pred_1d ?? p.pred_24h ?? p.pred_1h,
+      pred_5d: p.pred_5d ?? p.pred_5h_approx,
+      pred_21d: p.pred_21d,
+    };
     lastClose = close;
     draw();
   }
@@ -76,6 +126,13 @@
         }
       }
     }
+    // Include trade prices in range
+    for (const t of trades) {
+      if (t.price && t.price > 0) {
+        if (t.price < minP) minP = t.price;
+        if (t.price > maxP) maxP = t.price;
+      }
+    }
     const range = maxP - minP || 1;
     minP -= range * 0.05;
     maxP += range * 0.05;
@@ -83,6 +140,23 @@
     const n = candles.length;
     const xStep = cw / n;
     const yScale = (price) => padT + ch - ((price - minP) / (maxP - minP)) * ch;
+
+    // Map candle timestamp to x position
+    function tsToX(ts) {
+      for (let i = 0; i < n; i++) {
+        if (candles[i].ts === ts) return padL + i * xStep + xStep / 2;
+      }
+      // Fallback: parse date and interpolate
+      const target = new Date(ts).getTime();
+      let bestI = -1, bestDist = Infinity;
+      for (let i = 0; i < n; i++) {
+        const ct = new Date(candles[i].ts).getTime();
+        const d = Math.abs(ct - target);
+        if (d < bestDist) { bestDist = d; bestI = i; }
+      }
+      if (bestI >= 0) return padL + bestI * xStep + xStep / 2;
+      return null;
+    }
 
     // Grid lines
     ctx.strokeStyle = '#21262d';
@@ -136,6 +210,47 @@
         else ctx.lineTo(x, y);
       }
       ctx.stroke();
+    }
+
+    // Trade markers — entry/exit arrows
+    if (trades.length) {
+      ctx.font = '9px monospace';
+      for (const t of trades) {
+        const x = tsToX(t.ts);
+        if (x == null) continue;
+        const y = yScale(t.price);
+        const isLong = t.side === 'long';
+        const color = isLong ? '#3fb950' : '#f85149';
+        const arrowSize = 6;
+
+        ctx.strokeStyle = color;
+        ctx.fillStyle = color;
+        ctx.lineWidth = 1.5;
+
+        if (isLong) {
+          // Up arrow (entry long)
+          ctx.beginPath();
+          ctx.moveTo(x, y - arrowSize);
+          ctx.lineTo(x - arrowSize/2, y + arrowSize/2);
+          ctx.lineTo(x + arrowSize/2, y + arrowSize/2);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+        } else {
+          // Down arrow (entry short)
+          ctx.beginPath();
+          ctx.moveTo(x, y + arrowSize);
+          ctx.lineTo(x - arrowSize/2, y - arrowSize/2);
+          ctx.lineTo(x + arrowSize/2, y - arrowSize/2);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+        }
+
+        // Label: "L" or "S" + price
+        ctx.fillStyle = color;
+        ctx.fillText(isLong ? 'L' : 'S', x + arrowSize/2 + 1, y - arrowSize/2);
+      }
     }
 
     // Prediction cones
