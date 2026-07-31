@@ -1,5 +1,6 @@
 use axum::{extract::State, http::StatusCode, response::Json};
 use std::collections::HashMap;
+use tracing::info;
 
 use crate::db;
 
@@ -105,7 +106,7 @@ pub(crate) async fn handle_equity_backfill(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
 
-    let rows = crate::data::yahoo::backfill(&state.pool, &symbol, 0, &range)
+    let rows = crate::data::yahoo::backfill(&state.pool, &symbol, 0, &range, 0)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("yahoo: {e:#}")))?;
 
@@ -204,9 +205,275 @@ pub(crate) async fn handle_equity_features(
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/equity/trades — trading ledger
+// POST /api/equity/backfill_predictions — replay inference over historical bars
 // ---------------------------------------------------------------------------
 
+use crate::features::equities_v2::{compute_equity_features, EquityNormStats};
+
+/// Optional request body for the backfill_predictions endpoint.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct BackfillPredictionsQuery {
+    /// Override feature window size (default from FEATURE_WINDOW_SIZE env).
+    #[serde(default = "default_feature_window_size")]
+    pub feature_window_size: usize,
+    /// Override ATR lookback period (default 14).
+    #[serde(default = "default_atr_period")]
+    pub atr_period: usize,
+}
+
+fn default_feature_window_size() -> usize {
+    126
+}
+fn default_atr_period() -> usize {
+    14
+}
+
+/// Response shape for the backfill_predictions endpoint.
+#[derive(serde::Serialize)]
+pub(crate) struct BackfillPredictionsResponse {
+    pub symbol: String,
+    pub candles_processed: usize,
+    pub predictions_written: usize,
+    pub skipped_already_had: usize,
+    pub errors: usize,
+}
+
+/// `POST /api/equity/backfill_predictions`
+///
+/// Replays the scheduler's inference pipeline over every candle in the DB that
+/// does NOT already have a corresponding `equity_predictions` row.
+///
+/// Uses the ZMQ bridge to call the Python inference service, then upserts each
+/// prediction into `equity_predictions`.  Feature normalization uses the same
+/// `EquityNormStats` loaded at startup (norm_stats_qqq_v1.json).
+///
+/// This populates the prediction history needed by:
+///   - `POST /api/backtest`  (strategy replay)
+///   - `GET /api/accuracy`   (IC / directional accuracy)
+pub(crate) async fn handle_backfill_predictions(
+    State(state): State<super::AppState>,
+    axum::extract::Json(params): axum::extract::Json<BackfillPredictionsQuery>,
+) -> ApiResult<BackfillPredictionsResponse> {
+    let feature_window_size = params.feature_window_size;
+    let atr_period = params.atr_period;
+
+    // Load norm stats from the file path (same file the scheduler uses at startup).
+    let norm_stats = EquityNormStats::load_named(&state.norm_stats_path)
+        .map_err(|e| {
+            tracing::error!(error = %e, path = %state.norm_stats_path, "failed to load norm_stats");
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("norm_stats load: {e}"))
+        })?;
+
+    // Fetch VIX and TLT macro series once (used for every bar).
+    let fetch_count = (feature_window_size + atr_period + 50) as i64;
+    let vix_candles = db::fetch_equity_candles_asc(&state.pool, "^VIX", fetch_count)
+        .await
+        .unwrap_or_default();
+    let tlt_candles = db::fetch_equity_candles_asc(&state.pool, "TLT", fetch_count)
+        .await
+        .unwrap_or_default();
+
+    // Pull the full QQQ candle history (oldest-first for feature computation).
+    let candles = db::fetch_equity_candles_asc(&state.pool, &state.symbol, 50_000)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
+
+    if candles.len() < feature_window_size + atr_period + 10 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "insufficient candles: {} available, need {}",
+                candles.len(),
+                feature_window_size + atr_period + 10
+            ),
+        ));
+    }
+
+    // Build lookups for macro series.
+    let vix_map: HashMap<i64, f64> = vix_candles
+        .iter()
+        .map(|c| (c.ts, c.close))
+        .collect();
+    let tlt_map: HashMap<i64, f64> = tlt_candles
+        .iter()
+        .map(|c| (c.ts, c.close))
+        .collect();
+
+    // Pre-load existing prediction timestamps so we skip bars that already have one.
+    let existing: HashMap<i64, ()> = db::fetch_recent_equity_predictions(&state.pool, &state.symbol, 100_000)
+        .await
+        .map(|rows| rows.into_iter().map(|p| (p.candle_ts, ())).collect())
+        .unwrap_or_default();
+
+    // Align macro series to QQQ timestamps.
+    let vix_aligned = align_for_features(&candles, &vix_map);
+    let tlt_aligned = align_for_features(&candles, &tlt_map);
+
+    // Compute all features in one pass.
+    let all_features =
+        compute_equity_features(&candles, Some(&vix_aligned), Some(&tlt_aligned));
+    let norm_stats_clone = norm_stats.clone();
+
+    if all_features.len() < feature_window_size {
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "feature computation returned {} rows, need {}",
+                all_features.len(),
+                feature_window_size
+            ),
+        ));
+    }
+
+    // Connect ZMQ bridge to the inference service.
+    let mut bridge = crate::bridge::ZmqBridge::connect(&state.zmq_endpoint)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("ZMQ connect: {e}")))?;
+
+    let mut written = 0;
+    let mut skipped = 0;
+    let mut errors = 0;
+
+    // Iterate every candle that has enough warmup.
+    let start_idx = feature_window_size.max(atr_period);
+    for i in start_idx..candles.len() {
+        let candle = &candles[i];
+        let candle_ts = candle.ts;
+
+        // Skip if already predicted.
+        if existing.contains_key(&candle_ts) {
+            skipped += 1;
+            continue;
+        }
+
+        // Build feature window: last `feature_window_size` rows, normalized.
+        let fw_start = i.saturating_sub(feature_window_size);
+        let feature_window: Vec<[f64; 8]> = all_features[fw_start..=i]
+            .iter()
+            .map(|row| norm_stats_clone.normalize(row))
+            .collect();
+
+        // Compute ATR ratio for this candle.
+        let atr_ratio = compute_atr_for_bar(&candles[..=i], atr_period);
+        let atr_ratio = atr_ratio.unwrap_or(0.005);
+
+        // Call inference service.
+        match bridge
+            .predict_v3_with_retry(
+                &feature_window,
+                atr_ratio,
+                std::time::Duration::from_secs(10),
+                2,
+            )
+            .await
+        {
+            Ok(pred) => {
+                // Compute regime for this bar.
+                let closes: Vec<f64> = candles[..=i].iter().map(|c| c.close).collect();
+                let (sma, sma_valid) =
+                    crate::strategy::compute_sma(&closes, state.sma_window);
+                let regime = if !sma_valid {
+                    "unknown"
+                } else if candle.close > sma {
+                    "bull"
+                } else {
+                    "bear"
+                };
+
+                let features_json =
+                    serde_json::to_string(&feature_window).unwrap_or_else(|_| "{}".into());
+
+                if let Err(e) = db::insert_equity_prediction(
+                    &state.pool,
+                    &state.symbol,
+                    candle_ts,
+                    pred.pred_1d,
+                    pred.pred_5d,
+                    pred.pred_21d,
+                    regime,
+                    &features_json,
+                )
+                .await
+                {
+                    tracing::warn!(candle_ts, error = %e, "failed to persist prediction");
+                    errors += 1;
+                } else {
+                    written += 1;
+                    if written % 50 == 0 {
+                        info!(processed = i, written, skipped, errors, "backfill_predictions progress");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(candle_ts, error = %e, "inference failed for bar");
+                errors += 1;
+            }
+        }
+    }
+
+    info!(
+        symbol = %state.symbol,
+        candles_processed = candles.len(),
+        predictions_written = written,
+        skipped_already_had = skipped,
+        errors = errors,
+        "backfill_predictions complete"
+    );
+
+    Ok(Json(BackfillPredictionsResponse {
+        symbol: state.symbol.clone(),
+        candles_processed: candles.len(),
+        predictions_written: written,
+        skipped_already_had: skipped,
+        errors,
+    }))
+}
+
+/// Align a macro close series (HashMap ts→close) to the main candle list.
+/// Returns a Vec<f64> indexed by main-candle position, 0.0 for gaps.
+fn align_for_features(candles: &[crate::db::EquityCandle], series: &HashMap<i64, f64>) -> Vec<f64> {
+    let mut result = Vec::with_capacity(candles.len());
+    for c in candles {
+        result.push(series.get(&c.ts).copied().unwrap_or(0.0));
+    }
+    result
+}
+
+/// Compute ATR(period) / close for the bar at index `i`.
+fn compute_atr_for_bar(candles: &[crate::db::EquityCandle], period: usize) -> Option<f64> {
+    let n = candles.len();
+    if n <= period {
+        return None;
+    }
+    let mut tr = Vec::with_capacity(n);
+    tr.push(0.0_f64);
+    for i in 1..n {
+        let h = candles[i].high;
+        let l = candles[i].low;
+        let pc = candles[i - 1].close;
+        let h_l = h - l;
+        let h_c = (h - pc).abs();
+        let l_c = (l - pc).abs();
+        tr.push(h_l.max(h_c).max(l_c));
+    }
+    let warmup: f64 = tr[1..=period].iter().sum::<f64>() / period as f64;
+    let mut atr = warmup;
+    for i in (period + 1)..n {
+        atr = atr * ((period - 1) as f64 / period as f64) + tr[i] / period as f64;
+    }
+    let close = candles.last().map(|c| c.close).unwrap_or(1.0);
+    if atr <= 0.0 || close <= 0.0 {
+        Some(0.005)
+    } else {
+        Some(atr / close)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: align a secondary series to main candle timestamps
+// ---------------------------------------------------------------------------
+
+/// Align a secondary series (e.g. VIX, TLT) to the main symbol's timestamps.
 #[derive(serde::Serialize)]
 pub(crate) struct EquityTradePoint {
     id: i64,

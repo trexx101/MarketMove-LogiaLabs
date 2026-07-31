@@ -34,6 +34,8 @@ fn test_state(pool: db::DbPool) -> State<AppState> {
             .into_owned(),
         parity_max_age_secs: 7 * 24 * 60 * 60,
         totp_secret: String::new(),
+        zmq_endpoint: "tcp://127.0.0.1:5555".to_string(),
+        norm_stats_path: String::new(),
     })
 }
 

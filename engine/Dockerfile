@@ -19,19 +19,13 @@
 #     marketmarkovnet/engine:latest
 
 # ── Frontend build stage ─────────────────────────────────────────────────────
-# Build the Svelte SPA with Vite. Output goes to /build/frontend/dist/.
-# We use a separate stage so the Node toolchain is not in the runtime image.
-FROM node:20-bookworm-slim AS frontend-build
+# The Svelte SPA has already been built (npm run build) on the host and the
+# dist/ directory is volume-mounted or copied into the Docker build context.
+# We COPY it directly — no Node toolchain needed in the runtime image.
+FROM debian:bookworm-slim AS frontend-build
 
 WORKDIR /build/frontend
-
-# Cache npm install: copy manifests first.
-COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci --no-audit --no-fund
-
-# Bundle the Svelte app. The Vite build outputs index.html + assets/.
-COPY frontend/ ./
-RUN npm run build
+COPY frontend/dist/ ./
 
 # ── Engine build stage ───────────────────────────────────────────────────────
 # Pinned to a stable Debian bookworm toolchain to keep glibc / openssl
@@ -39,6 +33,12 @@ RUN npm run build
 FROM rust:1-bookworm AS build
 
 WORKDIR /build
+
+# Build tools needed to compile sqlite3-sys (which builds libsqlite3 from source
+# when a system libsqlite3-dev is not pre-installed in the image).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 # Cache deps: copy manifests only first.
 COPY Cargo.toml Cargo.lock ./
@@ -65,7 +65,7 @@ RUN touch engine/src/main.rs \
     && strip target/release/engine \
     && cp target/release/engine /usr/local/bin/engine
 
-# ── Runtime stage ────────────────────────────────────────────────────────────
+# ── Runtime stage ───────────────────────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
 
 # Runtime deps:
@@ -94,12 +94,9 @@ RUN mkdir -p /app/data && chown -R mmn:mmn /app
 # Binary from the engine build stage.
 COPY --from=build /usr/local/bin/engine /usr/local/bin/engine
 
-# Compiled Svelte bundle from the frontend build stage. The engine's
-# `ServeDir::new("frontend")` looks for index.html at `frontend/index.html`
-# and assets at `frontend/assets/*` — that's exactly what `dist/` produces.
-# We copy only the build artifacts (dist/) instead of the Svelte source tree
-# so the runtime image serves the actual app, not the Vite dev shell.
-COPY --from=frontend-build --chown=mmn:mmn /build/frontend/dist/ /app/frontend/
+# Pre-built Svelte bundle: copied directly from build context (already built).
+# No Node toolchain needed in the runtime image.
+COPY --from=frontend-build --chown=mmn:mmn /build/frontend/ /app/frontend/
 
 # Drop privileges.
 USER mmn

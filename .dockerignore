@@ -60,5 +60,8 @@ README.md
 scripts/
 tests/
 
-# Python (sibling crate) — not needed for the engine build
-inference/
+# Frontend build artifacts — required at build-time
+!frontend/dist/
+frontend/node_modules/
+frontend/.svelte-kit/
+frontend/build/

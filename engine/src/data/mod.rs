@@ -24,9 +24,14 @@ pub const MACRO_SYMBOLS: &[&str] = &["$VIX", "$UST10Y", "$DXY"];
 ///
 /// FRED is the primary macro source; Yahoo Finance `^VIX` is used as fallback
 /// for $VIX when FRED returns 0 rows (e.g. unreachable from VPS).
-pub async fn backfill_equities(pool: &DbPool) -> Result<()> {
+///
+/// `stale_threshold_secs` controls the freshness gate passed to the Yahoo
+/// client. Startup uses 3 days (conservative — just needs enough history).
+/// Daily top-up uses 18h (daily bars close at 16:00 ET; anything older than
+/// 18h means yesterday's bar was missed).
+pub async fn backfill_equities(pool: &DbPool, stale_threshold_secs: i64) -> Result<()> {
     // Yahoo equity OHLCV — 5y of daily history is plenty for features + retrains.
-    let n_eq = yahoo::backfill_many(pool, EQUITY_SYMBOLS, 250, "5y").await?;
+    let n_eq = yahoo::backfill_many(pool, EQUITY_SYMBOLS, 250, "5y", stale_threshold_secs).await?;
     info!(rows = n_eq, "equity OHLCV backfill complete");
 
     // FRED macro series — ~5y lookback cap.
@@ -38,7 +43,7 @@ pub async fn backfill_equities(pool: &DbPool) -> Result<()> {
     let vix_count = crate::db::count_equity_candles(pool, "$VIX").await?;
     if vix_count <= 1 {
         info!(count = vix_count, "FRED $VIX missing/empty — fetching ^VIX from Yahoo as fallback");
-        match yahoo::backfill(pool, "^VIX", 1, "2y").await {
+        match yahoo::backfill(pool, "^VIX", 1, "2y", stale_threshold_secs).await {
             Ok(n) if n > 0 => info!(rows = n, "Yahoo ^VIX fallback loaded — $VIX macro features active"),
             Ok(_) => debug!("Yahoo ^VIX returned 0 new rows (already up to date)"),
             Err(e) => tracing::warn!(error = %e, "Yahoo ^VIX fallback failed — VIX features will be 0.0"),
@@ -70,7 +75,7 @@ pub async fn run_equities_ingestion(pool: DbPool) -> Result<()> {
             tokio::time::interval_at(start, std::time::Duration::from_secs(24 * 3_600));
         loop {
             interval.tick().await;
-            if let Err(e) = backfill_equities(&topup_pool).await {
+            if let Err(e) = backfill_equities(&topup_pool, 18 * 3600).await {
                 tracing::error!(error = %e, "equities daily top-up failed");
             }
         }

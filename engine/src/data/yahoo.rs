@@ -26,9 +26,10 @@ const INTERVAL: &str = "1d";
 /// Fetch daily OHLCV for `symbol` and upsert into the DB.
 ///
 /// `min_candles` gates backfill: if the DB already has ≥ N rows AND the
-/// latest candle is within STALE_THRESHOLD_SECS, this is a no-op.
+/// latest candle is within `stale_threshold_secs`, this is a no-op.
 /// If the data is stale (latest candle older than the threshold) the
-/// backfill runs regardless of row count.
+/// backfill runs regardless of row count. Pass `stale_threshold_secs = 0`
+/// to always fetch (used by the manual API refresh endpoint).
 ///
 /// `range` is a Yahoo Finance period hint: "1y", "5y", "10y", "max".
 pub async fn backfill(
@@ -36,15 +37,14 @@ pub async fn backfill(
     symbol: &str,
     min_candles: i64,
     range: &str,
+    stale_threshold_secs: i64,
 ) -> Result<usize> {
     let count = db::count_equity_candles(pool, symbol).await?;
 
-    // Freshness gate: re-fetch if latest candle is older than this.
-    // 3 calendar days catches: weekend gaps (Fri→Mon = 72h) and missed daily runs.
-    let stale_threshold_secs = 3 * 24 * 3600;
     let now_ts = chrono::Utc::now().timestamp();
     let latest_ts = db::latest_equity_candle_ts(pool, symbol).await?;
-    let is_stale = latest_ts.map_or(true, |ts| now_ts.saturating_sub(ts) > stale_threshold_secs);
+    let is_stale = stale_threshold_secs == 0
+        || latest_ts.map_or(true, |ts| now_ts.saturating_sub(ts) > stale_threshold_secs);
 
     if count >= min_candles && !is_stale {
         debug!(symbol, count, min_candles, "sufficient equity candles — skipping backfill");
@@ -180,10 +180,11 @@ pub async fn backfill_many(
     symbols: &[&str],
     min_candles: i64,
     range: &str,
+    stale_threshold_secs: i64,
 ) -> Result<usize> {
     let mut total = 0;
     for s in symbols {
-        match backfill(pool, s, min_candles, range).await {
+        match backfill(pool, s, min_candles, range, stale_threshold_secs).await {
             Ok(n) => total += n,
             Err(e) => {
                 warn!(symbol = s, "backfill error: {e:#}");

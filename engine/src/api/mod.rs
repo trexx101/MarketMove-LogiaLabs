@@ -28,6 +28,10 @@ pub struct AppState {
     pub parity_max_age_secs: i64,
     /// Base32 TOTP secret used by /api/mode to authorize live-mode flips.
     pub totp_secret: String,
+    /// ZMQ endpoint for the inference service (e.g. `tcp://127.0.0.1:5555`).
+    pub zmq_endpoint: String,
+    /// Path to the norm stats JSON file for feature normalization.
+    pub norm_stats_path: String,
 }
 
 pub fn router(pool: db::DbPool, config: &Config, tx: ws::TelemetrySender) -> Router {
@@ -41,6 +45,8 @@ pub fn router(pool: db::DbPool, config: &Config, tx: ws::TelemetrySender) -> Rou
         parity_marker_path: config.parity_marker_path.clone(),
         parity_max_age_secs: config.parity_max_age_secs,
         totp_secret: config.totp_secret.clone(),
+        zmq_endpoint: config.zmq_endpoint.clone(),
+        norm_stats_path: config.norm_stats_path.clone(),
     };
 
     let cors = CorsLayer::new()
@@ -56,6 +62,7 @@ pub fn router(pool: db::DbPool, config: &Config, tx: ws::TelemetrySender) -> Rou
         .route("/api/chart", get(chart::handle_chart))
         .route("/api/equity/data", get(equity::handle_equity_data))
         .route("/api/equity/backfill", get(equity::handle_equity_backfill))
+        .route("/api/equity/backfill_predictions", post(equity::handle_backfill_predictions))
         .route("/api/equity/macro", get(equity::handle_equity_macro))
         .route("/api/equity/features", get(equity::handle_equity_features))
         .route("/api/equity/trades", get(equity::handle_equity_trades))

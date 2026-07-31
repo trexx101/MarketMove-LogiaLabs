@@ -129,7 +129,7 @@ async fn main() {
     // ingestion supervisor. This seeds QQQ + constituents + macro history so
     // downstream features have enough lookback. Idempotent: re-runs top up
     // only missing rows. (Crypto data source is retired — Wave A equities.)
-    if let Err(e) = data::backfill_equities(&pool).await {
+    if let Err(e) = data::backfill_equities(&pool, 3 * 24 * 3600).await {
         eprintln!("equities backfill fatal error: {:#}", e);
         process::exit(1);
     }
@@ -163,6 +163,7 @@ async fn main() {
         enable_shorting: cfg.enable_shorting,
         short_entry_threshold: cfg.short_entry_threshold,
         short_exit_threshold: cfg.short_exit_threshold,
+        pred_5d_filter: true,
     };
     let scheduler_tx = tx.clone();
     let scheduler_trading_mode = trading_mode.clone();

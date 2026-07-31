@@ -12,6 +12,7 @@
   import ModelHealth from '../lib/components/ModelHealth.svelte';
 
   let chartComponent;
+  let statusInterval;
 
   onMount(async () => {
     // Fetch initial data via REST (fallback if WS not available)
@@ -45,10 +46,22 @@
 
     // Connect WebSocket for real-time updates
     connectWebSocket();
+
+    // Poll /api/status every 30s as a fallback for staleness and other
+    // fields that aren't pushed via WS (StalenessAlert is never emitted).
+    statusInterval = setInterval(async () => {
+      try {
+        const s = await fetchStatus();
+        status.set(s);
+      } catch (e) {
+        // Silent — WS may still be delivering updates
+      }
+    }, 30000);
   });
 
   onDestroy(() => {
     disconnectWebSocket();
+    if (statusInterval) clearInterval(statusInterval);
   });
 
   // Update chart predictions when status or predictions change

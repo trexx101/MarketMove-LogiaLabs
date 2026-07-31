@@ -143,6 +143,10 @@ pub struct EquityStrategyParams {
     /// Short exit threshold: pred_1d rising above this exits the short to flat.
     #[serde(default = "default_short_exit_threshold")]
     pub short_exit_threshold: f64,
+    /// Require pred_5d > 0.0 as an additional confirmation filter for long entries.
+    /// Defaults to true (original behavior). Set to false to fire more trades.
+    #[serde(default = "default_pred_5d_filter")]
+    pub pred_5d_filter: bool,
 }
 
 fn default_short_entry_threshold() -> f64 {
@@ -150,6 +154,9 @@ fn default_short_entry_threshold() -> f64 {
 }
 fn default_short_exit_threshold() -> f64 {
     0.001
+}
+fn default_pred_5d_filter() -> bool {
+    true
 }
 
 impl Default for EquityStrategyParams {
@@ -161,6 +168,7 @@ impl Default for EquityStrategyParams {
             enable_shorting: false,
             short_entry_threshold: default_short_entry_threshold(),
             short_exit_threshold: default_short_exit_threshold(),
+            pred_5d_filter: default_pred_5d_filter(),
         }
     }
 }
@@ -221,7 +229,7 @@ pub fn next_equity_position(
         // Bullish regime: long entries only.
         if current == Position::Flat
             && input.pred_1d > params.entry_threshold
-            && input.pred_5d > 0.0
+            && (!params.pred_5d_filter || input.pred_5d > 0.0)
         {
             return Position::Long;
         }
@@ -359,6 +367,7 @@ mod tests {
         exit: f64,
         short_entry: f64,
         short_exit: f64,
+        pred_5d_filter: bool,
     ) -> EquityStrategyParams {
         EquityStrategyParams {
             entry_threshold: entry,
@@ -367,6 +376,7 @@ mod tests {
             enable_shorting,
             short_entry_threshold: short_entry,
             short_exit_threshold: short_exit,
+            pred_5d_filter,
         }
     }
 
@@ -390,7 +400,7 @@ mod tests {
     #[test]
     fn equity_short_entry_in_bearish_regime() {
         // Shorting on, bearish regime, strongly negative pred_1d → Short.
-        let p = eq_params(true, 0.003, -0.001, -0.004, 0.001);
+        let p = eq_params(true, 0.003, -0.001, -0.004, 0.001, true);
         let input = eq_signal(-0.006, -0.01, 49000.0, 50000.0, true);
         let result = next_equity_position(Position::Flat, &input, &p);
         assert_eq!(result, Position::Short);
@@ -409,7 +419,7 @@ mod tests {
     #[test]
     fn equity_short_entry_requires_bearish_regime() {
         // Strongly negative pred_1d but bullish regime (close > SMA) → no Short.
-        let p = eq_params(true, 0.003, -0.001, -0.004, 0.001);
+        let p = eq_params(true, 0.003, -0.001, -0.004, 0.001, true);
         let input = eq_signal(-0.006, -0.01, 51000.0, 50000.0, true);
         let result = next_equity_position(Position::Flat, &input, &p);
         assert_eq!(result, Position::Flat);
@@ -418,7 +428,7 @@ mod tests {
     #[test]
     fn equity_short_entry_requires_flat() {
         // Already Long: short entry must NOT fire — long exits first, no Short.
-        let p = eq_params(true, 0.003, -0.001, -0.004, 0.001);
+        let p = eq_params(true, 0.003, -0.001, -0.004, 0.001, true);
         let input = eq_signal(-0.006, -0.01, 49000.0, 50000.0, true);
         let result = next_equity_position(Position::Long, &input, &p);
         assert_eq!(result, Position::Flat);
@@ -427,7 +437,7 @@ mod tests {
     #[test]
     fn equity_short_exit_to_flat() {
         // Held Short, pred_1d recovers above short_exit_threshold → Flat.
-        let p = eq_params(true, 0.003, -0.001, -0.004, 0.001);
+        let p = eq_params(true, 0.003, -0.001, -0.004, 0.001, true);
         let input = eq_signal(0.003, 0.01, 51000.0, 50000.0, true);
         let result = next_equity_position(Position::Short, &input, &p);
         assert_eq!(result, Position::Flat);
@@ -436,7 +446,7 @@ mod tests {
     #[test]
     fn equity_short_holds_when_signal_weak() {
         // Held Short, pred_1d still below short_exit_threshold → keep Short.
-        let p = eq_params(true, 0.003, -0.001, -0.004, 0.001);
+        let p = eq_params(true, 0.003, -0.001, -0.004, 0.001, true);
         let input = eq_signal(-0.02, -0.03, 48000.0, 50000.0, true);
         let result = next_equity_position(Position::Short, &input, &p);
         assert_eq!(result, Position::Short);
@@ -455,7 +465,7 @@ mod tests {
     fn equity_long_to_short_is_two_step() {
         // A long in a bearish regime with a strongly negative pred must first
         // return Flat (not jump directly to Short). Verified across two ticks.
-        let p = eq_params(true, 0.003, -0.001, -0.004, 0.001);
+        let p = eq_params(true, 0.003, -0.001, -0.004, 0.001, true);
         // Tick 1: Long + very negative pred → exit to Flat.
         let input = eq_signal(-0.006, -0.01, 49000.0, 50000.0, true);
         let t1 = next_equity_position(Position::Long, &input, &p);
@@ -481,6 +491,40 @@ mod tests {
         let input = eq_signal(0.0, 0.0, 49000.0, 50000.0, true);
         let result = next_equity_position(Position::Long, &input, &p);
         assert_eq!(result, Position::Long);
+    }
+
+    #[test]
+    fn equity_pred_5d_filter_false_allows_negative_pred_5d() {
+        // pred_5d_filter=false: long entry fires even when pred_5d < 0.
+        let p = eq_params(true, 0.002, -0.0005, -0.001, 0.0005, false);
+        let input = eq_signal(0.003, -0.010, 400.0, 380.0, true); // bearish regime
+        // close=400 < sma=380? No — wait, 400 > 380 so this is bullish. Let me fix.
+        // Actually: close > sma = bullish. For bearish: close < sma.
+        // pred_5d=-0.01 (negative), pred_1d=0.003 (positive, above entry=0.002)
+        // In a bullish regime this should enter long even with pred_5d < 0 (filter=false).
+        let input_bullish = eq_signal(0.003, -0.010, 400.0, 380.0, true);
+        let result = next_equity_position(Position::Flat, &input_bullish, &p);
+        assert_eq!(result, Position::Long);
+    }
+
+    #[test]
+    fn equity_pred_5d_filter_true_blocks_negative_pred_5d() {
+        // pred_5d_filter=true (default): negative pred_5d blocks long entry.
+        let p = eq_params(true, 0.002, -0.0005, -0.001, 0.0005, true);
+        let input = eq_signal(0.003, -0.010, 400.0, 380.0, true);
+        let result = next_equity_position(Position::Flat, &input, &p);
+        assert_eq!(result, Position::Flat); // blocked by pred_5d filter
+    }
+
+    #[test]
+    fn equity_pred_5d_filter_default_is_true() {
+        // Default params must have pred_5d_filter=true (backward compatible).
+        let p = EquityStrategyParams::default();
+        assert!(p.pred_5d_filter);
+        // And the blocking behavior must hold.
+        let input = eq_signal(0.005, -0.010, 51000.0, 50000.0, true);
+        let result = next_equity_position(Position::Flat, &input, &p);
+        assert_eq!(result, Position::Flat); // blocked by pred_5d
     }
 
     #[test]
