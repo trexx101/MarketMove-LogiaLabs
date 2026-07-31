@@ -2,7 +2,7 @@ use axum::{
     extract::State,
     http::StatusCode,
     response::Json,
-    routing::{get, post},
+    routing::{get, post, put},
     Router,
 };
 use tower_http::cors::{Any, CorsLayer};
@@ -10,6 +10,8 @@ use tower_http::services::{ServeDir, ServeFile};
 use tracing::error;
 
 use crate::{config::Config, db};
+
+use crate::strategy::EquityStrategyParams;
 
 pub(crate) type ApiResult<T> = Result<Json<T>, (StatusCode, String)>;
 
@@ -19,8 +21,9 @@ pub struct AppState {
     /// Current trading mode. Wrapped in `Arc<RwLock>` so the runtime toggle
     /// endpoint can flip it while the scheduler is reading it.
     pub trading_mode: std::sync::Arc<tokio::sync::RwLock<crate::config::TradingMode>>,
+    /// Shared strategy params — mutable at runtime via /api/strategy-config.
+    pub strategy_params: std::sync::Arc<tokio::sync::RwLock<EquityStrategyParams>>,
     pub symbol: String,
-    pub sma_window: usize,
     pub tx: ws::TelemetrySender,
     /// Path to the parity marker JSON (re-checked at request time by /api/mode).
     pub parity_marker_path: String,
@@ -36,11 +39,20 @@ pub struct AppState {
 
 pub fn router(pool: db::DbPool, config: &Config, tx: ws::TelemetrySender) -> Router {
     let trading_mode = std::sync::Arc::new(tokio::sync::RwLock::new(config.trading_mode));
+    let strategy_params = std::sync::Arc::new(tokio::sync::RwLock::new(EquityStrategyParams {
+        entry_threshold: config.entry_threshold,
+        exit_threshold: config.exit_threshold,
+        sma_window: config.sma_window,
+        enable_shorting: config.enable_shorting,
+        short_entry_threshold: config.short_entry_threshold,
+        short_exit_threshold: config.short_exit_threshold,
+        pred_5d_filter: config.pred_5d_filter,
+    }));
     let state = AppState {
         pool,
         trading_mode,
+        strategy_params,
         symbol: config.symbol.clone(),
-        sma_window: config.sma_window,
         tx,
         parity_marker_path: config.parity_marker_path.clone(),
         parity_max_age_secs: config.parity_max_age_secs,
@@ -69,6 +81,8 @@ pub fn router(pool: db::DbPool, config: &Config, tx: ws::TelemetrySender) -> Rou
         .route("/api/backtest", post(backtest::handle_backtest))
         .route("/api/strategies", get(crate::strategy_lab::api::handle_list_strategies))
         .route("/api/strategies", post(crate::strategy_lab::api::handle_save_strategy))
+        .route("/api/strategy-config", get(strategy_config::handle_get))
+        .route("/api/strategy-config", put(strategy_config::handle_put))
         .route("/api/mode", get(mode::handle_get_mode))
         .route("/api/mode", post(mode::handle_set_mode))
         .route("/api/v1/ws", get(ws::ws_handler))
@@ -101,6 +115,7 @@ mod chart;
 mod equity;
 mod backtest;
 pub mod mode;
+mod strategy_config;
 pub(crate) mod ws;
 
 #[cfg(test)]

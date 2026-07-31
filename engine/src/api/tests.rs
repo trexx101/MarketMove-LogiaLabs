@@ -20,13 +20,24 @@ async fn test_pool() -> db::DbPool {
 
 fn test_state(pool: db::DbPool) -> State<AppState> {
     let (tx, _rx) = tokio::sync::broadcast::channel(64);
+    let strategy_params = std::sync::Arc::new(tokio::sync::RwLock::new(
+        strategy::EquityStrategyParams {
+            entry_threshold: 0.005,
+            exit_threshold: -0.0017,
+            sma_window: TEST_SMA_WINDOW,
+            enable_shorting: false,
+            short_entry_threshold: -0.004,
+            short_exit_threshold: 0.001,
+            pred_5d_filter: true,
+        },
+    ));
     State(AppState {
         pool,
         trading_mode: std::sync::Arc::new(tokio::sync::RwLock::new(
             crate::config::TradingMode::Paper,
         )),
+        strategy_params,
         symbol: "BTC/USD".to_string(),
-        sma_window: TEST_SMA_WINDOW,
         tx,
         parity_marker_path: std::env::temp_dir()
             .join("parity_marker_test_default.json")
@@ -221,6 +232,9 @@ async fn router_serves_static_files_and_api() {
             enable_shorting: false,
             short_entry_threshold: -0.004,
             short_exit_threshold: 0.001,
+            entry_threshold: 0.005,
+            exit_threshold: -0.0017,
+            pred_5d_filter: true,
             http_port: 0,
             symbol: "BTC/USD".to_string(),
             short_symbol: "PSQ".to_string(),

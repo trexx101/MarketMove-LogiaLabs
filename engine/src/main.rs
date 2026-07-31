@@ -156,18 +156,21 @@ async fn main() {
     let zmq_endpoint = cfg.zmq_endpoint.clone();
     let feature_window_size = cfg.feature_window_size;
     let symbol = cfg.symbol.clone();
-    let eq_strategy_params = strategy::EquityStrategyParams {
-        entry_threshold: cfg.magnitude_threshold,
-        exit_threshold: -cfg.magnitude_threshold / 3.0,
-        sma_window: cfg.sma_window,
-        enable_shorting: cfg.enable_shorting,
-        short_entry_threshold: cfg.short_entry_threshold,
-        short_exit_threshold: cfg.short_exit_threshold,
-        pred_5d_filter: true,
-    };
+    let strategy_params = std::sync::Arc::new(tokio::sync::RwLock::new(
+        strategy::EquityStrategyParams {
+            entry_threshold: cfg.entry_threshold,
+            exit_threshold: cfg.exit_threshold,
+            sma_window: cfg.sma_window,
+            enable_shorting: cfg.enable_shorting,
+            short_entry_threshold: cfg.short_entry_threshold,
+            short_exit_threshold: cfg.short_exit_threshold,
+            pred_5d_filter: cfg.pred_5d_filter,
+        },
+    ));
     let scheduler_tx = tx.clone();
     let scheduler_trading_mode = trading_mode.clone();
     let scheduler_executor = executor.clone();
+    let scheduler_strategy_params = strategy_params.clone();
     tokio::spawn(async move {
         match scheduler::EquityScheduler::new(
             scheduler_pool,
@@ -175,7 +178,7 @@ async fn main() {
             &zmq_endpoint,
             norm_stats,
             feature_window_size,
-            eq_strategy_params,
+            scheduler_strategy_params,
             scheduler_trading_mode,
             scheduler_executor,
             Some(scheduler_tx),

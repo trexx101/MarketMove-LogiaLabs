@@ -371,7 +371,7 @@ pub(crate) async fn handle_backfill_predictions(
                 // Compute regime for this bar.
                 let closes: Vec<f64> = candles[..=i].iter().map(|c| c.close).collect();
                 let (sma, sma_valid) =
-                    crate::strategy::compute_sma(&closes, state.sma_window);
+                    crate::strategy::compute_sma(&closes, state.strategy_params.read().await.sma_window);
                 let regime = if !sma_valid {
                     "unknown"
                 } else if candle.close > sma {

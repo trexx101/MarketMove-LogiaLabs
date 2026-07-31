@@ -155,3 +155,31 @@ export async function setMode(mode, authToken) {
   }
   return res.json();
 }
+
+/**
+ * Fetch current strategy configuration (Phase 3).
+ * @returns {Promise<object>} StrategyConfigResponse
+ */
+export async function fetchStrategyConfig() {
+  const res = await fetch(`${API_BASE}/strategy-config`);
+  if (!res.ok) throw new Error(`strategy-config: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Update strategy configuration at runtime (Phase 3).
+ * @param {object} params - partial {entry_threshold?, exit_threshold?, sma_window?, pred_5d_filter?, enable_shorting?, short_entry_threshold?, short_exit_threshold?}
+ * @returns {Promise<object>} Updated strategy config
+ */
+export async function saveStrategyConfig(params) {
+  const res = await fetch(`${API_BASE}/strategy-config`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`strategy-config PUT rejected (${res.status}): ${text}`);
+  }
+  return res.json();
+}

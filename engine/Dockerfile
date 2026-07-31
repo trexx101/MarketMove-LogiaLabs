@@ -110,8 +110,11 @@ ENV HTTP_PORT=8080 \
     NORM_STATS_PATH=/models/norm_stats_qqq_v1.json \
     PARITY_MARKER_PATH=/app/data/parity_verified.json \
     RUST_LOG=info \
-    SMA_WINDOW=200 \
+    SMA_WINDOW=40 \
     FEATURE_WINDOW_SIZE=126 \
+    ENTRY_THRESHOLD=0.001 \
+    EXIT_THRESHOLD=-0.0005 \
+    PRED_5D_FILTER=false \
     MAGNITUDE_THRESHOLD=0.005 \
     PAPER_FEE=0.0015 \
     ZMQ_ENDPOINT=tcp://inference:5555 \
@@ -120,7 +123,9 @@ ENV HTTP_PORT=8080 \
     TRADING_MODE=paper \
     LIVE_EXECUTOR=paper \
     MOOMOO_TRD_ENV=SIMULATE \
-    ENABLE_SHORTING=false \
+    ENABLE_SHORTING=true \
+    SHORT_ENTRY_THRESHOLD=-0.001 \
+    SHORT_EXIT_THRESHOLD=0.0005 \
     PYTHONUNBUFFERED=1
 
 # Persistent SQLite + parity marker live under /app/data.

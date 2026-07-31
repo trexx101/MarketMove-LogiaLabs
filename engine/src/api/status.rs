@@ -6,6 +6,17 @@ use crate::{db, features::equities_v2, market_hours::MarketState, strategy};
 use super::{internal_error, ts_to_rfc3339, ApiResult, AppState};
 
 #[derive(Serialize)]
+pub(crate) struct StrategyInfo {
+    pub entry_threshold: f64,
+    pub exit_threshold: f64,
+    pub sma_window: usize,
+    pub pred_5d_filter: bool,
+    pub enable_shorting: bool,
+    pub short_entry_threshold: f64,
+    pub short_exit_threshold: f64,
+}
+
+#[derive(Serialize)]
 pub(crate) struct StatusResponse {
     pub mode: String,
     pub symbol: String,
@@ -22,6 +33,7 @@ pub(crate) struct StatusResponse {
     pub pred_5h_approx: Option<f64>,
     pub staleness_secs: u64,
     pub sma_200: Option<f64>,
+    pub strategy: StrategyInfo,
 }
 
 pub(crate) async fn handle_market_state() -> Json<MarketState> {
@@ -95,6 +107,7 @@ pub(crate) async fn handle_status(State(state): State<AppState>) -> ApiResult<St
     // Phase 3.4: trading mode lives behind an Arc<RwLock<_>> for the runtime
     // toggle. Read briefly to render the current value.
     let mode = *state.trading_mode.read().await;
+    let sp = state.strategy_params.read().await;
 
     Ok(Json(StatusResponse {
         mode: mode.to_string(),
@@ -112,5 +125,14 @@ pub(crate) async fn handle_status(State(state): State<AppState>) -> ApiResult<St
         pred_5h_approx: latest_pred.as_ref().map(|p| p.pred_1d * (5.0 / 6.5)),
         staleness_secs,
         sma_200,
+        strategy: StrategyInfo {
+            entry_threshold: sp.entry_threshold,
+            exit_threshold: sp.exit_threshold,
+            sma_window: sp.sma_window,
+            pred_5d_filter: sp.pred_5d_filter,
+            enable_shorting: sp.enable_shorting,
+            short_entry_threshold: sp.short_entry_threshold,
+            short_exit_threshold: sp.short_exit_threshold,
+        },
     }))
 }

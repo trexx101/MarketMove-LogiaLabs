@@ -67,6 +67,16 @@ pub enum TelemetryEvent {
         last_candle_ts: Option<i64>,
         seconds_since_last: i64,
     },
+    /// Strategy config changed via PUT /api/strategy-config.
+    StrategyConfigChange {
+        entry_threshold: f64,
+        exit_threshold: f64,
+        sma_window: usize,
+        pred_5d_filter: bool,
+        enable_shorting: bool,
+        short_entry_threshold: f64,
+        short_exit_threshold: f64,
+    },
 }
 
 /// Sender half of the telemetry broadcast channel.

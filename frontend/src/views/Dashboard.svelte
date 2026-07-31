@@ -10,6 +10,7 @@
   import FeatureInspector from '../lib/components/FeatureInspector.svelte';
   import TradeHistory from '../lib/components/TradeHistory.svelte';
   import ModelHealth from '../lib/components/ModelHealth.svelte';
+  import StrategyConfigPanel from '../lib/components/StrategyConfigPanel.svelte';
 
   let chartComponent;
   let statusInterval;
@@ -88,6 +89,10 @@
       <StatusPanel />
     </div>
 
+    <div class="grid-item strategy-area">
+      <StrategyConfigPanel />
+    </div>
+
     <div class="grid-item feature-area">
       <FeatureInspector />
     </div>
@@ -116,9 +121,10 @@
   .chart-area { grid-column: 1 / 2; }
   .pnl-area { grid-column: 2 / 3; }
   .status-area { grid-column: 3 / 4; }
-  .feature-area { grid-column: 1 / 3; }
-  .health-area { grid-column: 3 / 4; }
-  .trade-area { grid-column: 1 / 4; }
+  .strategy-area { grid-column: 1 / 2; }
+  .feature-area { grid-column: 2 / 4; }
+  .health-area { grid-column: 1 / 2; }
+  .trade-area { grid-column: 2 / 4; }
 
   @media (max-width: 1024px) {
     .grid {
@@ -127,8 +133,9 @@
     .chart-area { grid-column: 1 / 3; }
     .pnl-area { grid-column: 1 / 2; }
     .status-area { grid-column: 2 / 3; }
-    .feature-area { grid-column: 1 / 3; }
-    .health-area { grid-column: 1 / 3; }
+    .strategy-area { grid-column: 1 / 2; }
+    .feature-area { grid-column: 2 / 3; }
+    .health-area { grid-column: 1 / 2; }
     .trade-area { grid-column: 1 / 3; }
   }
 

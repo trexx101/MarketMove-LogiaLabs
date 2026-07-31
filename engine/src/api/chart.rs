@@ -29,7 +29,8 @@ pub(crate) struct SmaPoint {
 }
 
 pub(crate) async fn handle_chart(State(state): State<AppState>) -> ApiResult<ChartResponse> {
-    let limit = (state.sma_window * 2).min(500);
+    let sma_window = state.strategy_params.read().await.sma_window;
+    let limit = (sma_window * 2).min(500);
     let candles = db::fetch_recent_equity_candles(&state.pool, &state.symbol, limit as i64)
         .await
         .map_err(|e| internal_error("fetch_recent_equity_candles", e))?;
@@ -38,7 +39,7 @@ pub(crate) async fn handle_chart(State(state): State<AppState>) -> ApiResult<Cha
     let mut sma_points = Vec::new();
 
     for i in 0..candles.len() {
-        let (mean, valid) = strategy::compute_sma(&closes[..=i], state.sma_window);
+        let (mean, valid) = strategy::compute_sma(&closes[..=i], sma_window);
         if valid {
             sma_points.push(SmaPoint {
                 ts: ts_to_rfc3339(candles[i].ts),

@@ -36,7 +36,7 @@ pub struct EquityScheduler {
     norm_stats: EquityNormStats,
     feature_window_size: usize,
     last_processed_ts: Option<i64>,
-    strategy_params: EquityStrategyParams,
+    strategy_params: Arc<RwLock<EquityStrategyParams>>,
     /// Trading mode. Read at the start of each cycle; flipped by `POST /api/mode`.
     trading_mode: Arc<RwLock<TradingMode>>,
     /// Executor used to place orders. Read at the start of each cycle; the
@@ -53,7 +53,7 @@ impl EquityScheduler {
         zmq_endpoint: &str,
         norm_stats: EquityNormStats,
         feature_window_size: usize,
-        strategy_params: EquityStrategyParams,
+        strategy_params: Arc<RwLock<EquityStrategyParams>>,
         trading_mode: Arc<RwLock<TradingMode>>,
         executor: Arc<RwLock<ExecutorKind>>,
         tx: Option<TelemetrySender>,
@@ -168,7 +168,11 @@ impl EquityScheduler {
 
         // Compute regime label for audit.
         let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
-        let (sma, sma_valid) = strategy::compute_sma(&closes, self.strategy_params.sma_window);
+        let sma_window = {
+            let params = self.strategy_params.read().await;
+            params.sma_window
+        };
+        let (sma, sma_valid) = strategy::compute_sma(&closes, sma_window);
         let latest_close = candles.last().map(|c| c.close).unwrap_or(0.0);
         let regime = if !sma_valid {
             "unknown"
@@ -246,7 +250,9 @@ impl EquityScheduler {
             sma_valid,
         };
 
-        let new_pos = strategy::next_equity_position(current_pos, &input, &self.strategy_params);
+        let params = self.strategy_params.read().await;
+        let new_pos = strategy::next_equity_position(current_pos, &input, &params);
+        drop(params);
 
         let regime: i64 = if sma_valid {
             if latest_close > sma { 1 } else { -1 }
@@ -452,7 +458,7 @@ mod tests {
             norm_stats: test_norm_stats(),
             feature_window_size: 10,
             last_processed_ts: None,
-            strategy_params: EquityStrategyParams::default(),
+            strategy_params: Arc::new(RwLock::new(EquityStrategyParams::default())),
             trading_mode: Arc::new(RwLock::new(TradingMode::Paper)),
             executor: Arc::new(RwLock::new(executor)),
             tx: None,

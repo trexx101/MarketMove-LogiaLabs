@@ -38,6 +38,15 @@ pub struct Config {
     pub short_entry_threshold: f64,
     /// Short exit threshold for the equities strategy (pred_1d above this → Flat).
     pub short_exit_threshold: f64,
+    /// Long entry threshold for the equities strategy (pred_1d above this → Long).
+    /// Default: 0.001 (optimal from sweep).
+    pub entry_threshold: f64,
+    /// Long exit threshold for the equities strategy (pred_1d below this → Flat).
+    /// Default: -0.0005 (optimal from sweep).
+    pub exit_threshold: f64,
+    /// Require pred_5d > 0.0 as an additional entry filter for longs.
+    /// Default: false (disabled — lets more trades fire).
+    pub pred_5d_filter: bool,
     /// Primary symbol traded for long positions (e.g. "QQQ").
     pub symbol: String,
     /// Inverse-ETF symbol used to express short positions (default "PSQ").
@@ -158,6 +167,21 @@ impl Config {
             ));
         }
 
+        let entry_threshold = parse_env::<f64>("ENTRY_THRESHOLD", "0.001")
+            .context("ENTRY_THRESHOLD must be a number")?;
+        if entry_threshold <= 0.0 {
+            return Err(anyhow!("ENTRY_THRESHOLD must be > 0, got {}", entry_threshold));
+        }
+
+        let exit_threshold = parse_env::<f64>("EXIT_THRESHOLD", "-0.0005")
+            .context("EXIT_THRESHOLD must be a number")?;
+        if exit_threshold >= 0.0 {
+            return Err(anyhow!("EXIT_THRESHOLD must be < 0, got {}", exit_threshold));
+        }
+
+        let pred_5d_filter = parse_env::<bool>("PRED_5D_FILTER", "false")
+            .context("PRED_5D_FILTER must be 'true' or 'false'")?;
+
         let http_port = parse_env::<u16>("HTTP_PORT", "8080")
             .context("HTTP_PORT must be a u16 in the range 1..=65535")?;
         if http_port == 0 {
@@ -247,6 +271,9 @@ impl Config {
             enable_shorting,
             short_entry_threshold,
             short_exit_threshold,
+            entry_threshold,
+            exit_threshold,
+            pred_5d_filter,
             http_port,
             symbol,
             short_symbol,
@@ -342,10 +369,14 @@ mod tests {
             "ENABLE_SHORTING",
             "SHORT_ENTRY_THRESHOLD",
             "SHORT_EXIT_THRESHOLD",
+            "ENTRY_THRESHOLD",
+            "EXIT_THRESHOLD",
+            "PRED_5D_FILTER",
             "HTTP_PORT",
             "SYMBOL",
             "KRAKEN_API_KEY",
             "KRAKEN_API_SECRET",
+            "SHORT_SYMBOL",
             "DATABASE_URL",
             "NORM_STATS_PATH",
             "FEATURE_WINDOW_SIZE",
@@ -391,6 +422,9 @@ mod tests {
         assert!(!cfg.enable_shorting);
         assert!((cfg.short_entry_threshold - (-0.004)).abs() < 1e-12);
         assert!((cfg.short_exit_threshold - 0.001).abs() < 1e-12);
+        assert!((cfg.entry_threshold - 0.001).abs() < 1e-12);
+        assert!((cfg.exit_threshold - (-0.0005)).abs() < 1e-12);
+        assert!(!cfg.pred_5d_filter);
         assert_eq!(cfg.http_port, 8080);
         assert_eq!(cfg.symbol, "BTC/USD");
         assert_eq!(cfg.database_url, "sqlite://data/candles.db");
