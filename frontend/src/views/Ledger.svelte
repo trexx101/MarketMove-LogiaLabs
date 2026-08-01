@@ -22,9 +22,7 @@
     if (resizeObserver) resizeObserver.disconnect();
   });
 
-  // Live-update when a new trade fill arrives via WS
   $: if ($tradesStore && $tradesStore.length > 0) {
-    // Only reload if we already have data (don't override initial load)
     if (!loading && trades.length > 0) {
       loadData();
     }
@@ -89,11 +87,10 @@
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, w, h);
 
-    const padL = 60, padR = 10, padT = 10, padB = 25;
+    const padL = 62, padR = 12, padT = 12, padB = 25;
     const cw = w - padL - padR;
     const ch = h - padT - padB;
 
-    // Cumulative PnL from trades
     const points = trades.map((t) => t.cumulative_pnl);
     if (points.length < 1) return;
 
@@ -107,8 +104,8 @@
 
     // Grid
     ctx.font = '10px monospace';
-    ctx.fillStyle = '#484f58';
-    ctx.strokeStyle = '#21262d';
+    ctx.fillStyle = '#5c5e6e';
+    ctx.strokeStyle = '#1c1d27';
     for (let i = 0; i <= 4; i++) {
       const y = padT + (ch / 4) * i;
       ctx.beginPath();
@@ -121,7 +118,7 @@
 
     // Zero line
     const zeroY = yScale(0);
-    ctx.strokeStyle = '#484f58';
+    ctx.strokeStyle = '#2e2f3d';
     ctx.setLineDash([2, 2]);
     ctx.beginPath();
     ctx.moveTo(padL, zeroY);
@@ -131,7 +128,7 @@
 
     // Cumulative PnL line
     const lastP = points[n - 1];
-    ctx.strokeStyle = lastP >= 0 ? '#3fb950' : '#f85149';
+    ctx.strokeStyle = lastP >= 0 ? '#149e61' : '#e5484d';
     ctx.lineWidth = 1.5;
     ctx.beginPath();
     for (let i = 0; i < n; i++) {
@@ -148,7 +145,7 @@
       ctx.lineTo(padL, zeroY);
     }
     ctx.closePath();
-    ctx.fillStyle = lastP >= 0 ? '#3fb95022' : '#f8514922';
+    ctx.fillStyle = lastP >= 0 ? 'rgba(20,158,97,0.12)' : 'rgba(229,72,77,0.12)';
     ctx.fill();
 
     // Trade markers
@@ -156,7 +153,7 @@
       const x = n > 1 ? padL + i * xStep : padL + cw / 2;
       const y = yScale(points[i]);
       const isBuy = trades[i].side.toLowerCase() === 'buy';
-      ctx.fillStyle = isBuy ? '#3fb950' : '#f85149';
+      ctx.fillStyle = isBuy ? '#149e61' : '#e5484d';
       ctx.beginPath();
       ctx.arc(x, y, 2.5, 0, Math.PI * 2);
       ctx.fill();
@@ -166,7 +163,7 @@
 
 <div class="ledger">
   <div class="ledger-header">
-    <h2>Ledger — {symbol}</h2>
+    <h1>Ledger — {symbol}</h1>
     <div class="controls">
       <input bind:value={symbol} placeholder="Symbol" on:keydown={(e) => e.key === 'Enter' && loadData()} />
       <button on:click={loadData}>Load</button>
@@ -200,149 +197,187 @@
     </div>
   </div>
 
-  <div class="equity-curve-container" bind:this={container}>
+  <div class="chart-card" bind:this={container}>
+    <div class="chart-label">Equity Curve</div>
     <canvas bind:this={canvas}></canvas>
     {#if loading}
-      <div class="loading">Loading…</div>
+      <div class="loading">Loading...</div>
     {/if}
     {#if !loading && trades.length === 0}
       <div class="loading">No trades yet</div>
     {/if}
   </div>
 
-  <div class="table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th>#</th>
-          <th>Time</th>
-          <th>Side</th>
-          <th>Qty</th>
-          <th>Price</th>
-          <th>Fee</th>
-          <th>Realized PnL</th>
-          <th>Cumulative PnL</th>
-        </tr>
-      </thead>
-      <tbody>
-        {#if loading}
-          <tr><td colspan="8" class="center">Loading…</td></tr>
-        {:else if trades.length === 0}
-          <tr><td colspan="8" class="center">No trades yet</td></tr>
-        {:else}
-          {#each trades as t, i}
-            <tr>
-              <td class="mono">{i + 1}</td>
-              <td class="mono">{fmtTime(t.ts)}</td>
-              <td class="side-{(t.side || '').toLowerCase()}">{t.side || '—'}</td>
-              <td class="mono">{t.qty ?? '—'}</td>
-              <td class="mono">{fmt(t.price)}</td>
-              <td class="mono">{fmt(t.fee)}</td>
-              <td class="mono {pnlColor(t.realized_pnl)}">{fmt(t.realized_pnl)}</td>
-              <td class="mono {pnlColor(t.cumulative_pnl)}">{fmt(t.cumulative_pnl)}</td>
-            </tr>
-          {/each}
-        {/if}
-      </tbody>
-    </table>
+  <div class="table-card">
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Time</th>
+            <th>Side</th>
+            <th>Qty</th>
+            <th>Price</th>
+            <th>Fee</th>
+            <th>Realized PnL</th>
+            <th>Cumulative PnL</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#if loading}
+            <tr><td colspan="8" class="center">Loading...</td></tr>
+          {:else if trades.length === 0}
+            <tr><td colspan="8" class="center">No trades yet</td></tr>
+          {:else}
+            {#each trades as t, i}
+              <tr>
+                <td class="mono">{i + 1}</td>
+                <td class="mono">{fmtTime(t.ts)}</td>
+                <td class="side-{(t.side || '').toLowerCase()}">{t.side || '—'}</td>
+                <td class="mono">{t.qty ?? '—'}</td>
+                <td class="mono">{fmt(t.price)}</td>
+                <td class="mono">{fmt(t.fee)}</td>
+                <td class="mono {pnlColor(t.realized_pnl)}">{fmt(t.realized_pnl)}</td>
+                <td class="mono {pnlColor(t.cumulative_pnl)}">{fmt(t.cumulative_pnl)}</td>
+              </tr>
+            {/each}
+          {/if}
+        </tbody>
+      </table>
+    </div>
   </div>
 </div>
 
 <style>
   .ledger {
-    padding: 1rem;
+    padding: 1.25rem;
   }
 
   .ledger-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 1rem;
+    margin-bottom: 1.25rem;
   }
 
-  h2 {
-    font-size: 1.1rem;
-    color: #c9d1d9;
+  h1 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    letter-spacing: -0.01em;
   }
 
   .controls {
     display: flex;
-    gap: 0.5rem;
+    gap: 0.4rem;
   }
 
   input {
-    background: #0d1117;
-    border: 1px solid #30363d;
-    color: #c9d1d9;
-    padding: 0.3rem 0.5rem;
-    border-radius: 4px;
-    font-size: 0.85rem;
+    background: var(--bg-inset);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    padding: 0.35rem 0.55rem;
+    border-radius: var(--radius-xs);
+    font-size: 0.82rem;
+    font-family: inherit;
     width: 80px;
+  }
+  input:focus {
+    outline: none;
+    border-color: var(--accent);
   }
 
   button {
-    background: #238636;
+    background: var(--accent);
     color: #fff;
     border: none;
-    padding: 0.3rem 0.8rem;
-    border-radius: 4px;
+    padding: 0.35rem 0.9rem;
+    border-radius: var(--radius-xs);
     cursor: pointer;
-    font-size: 0.85rem;
+    font-size: 0.82rem;
+    font-weight: 500;
+    font-family: inherit;
+    transition: background 0.15s;
   }
-  button:hover { background: #2ea043; }
+  button:hover { background: var(--accent-dark); }
 
   .summary-row {
     display: flex;
-    gap: 1.5rem;
-    margin-bottom: 1rem;
+    gap: 2rem;
+    margin-bottom: 1.25rem;
     flex-wrap: wrap;
   }
 
   .stat {
     display: flex;
     flex-direction: column;
-    gap: 0.15rem;
+    gap: 0.2rem;
   }
 
   .stat-label {
-    font-size: 0.7rem;
+    font-size: 0.68rem;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: #8b949e;
+    letter-spacing: 0.06em;
+    color: var(--text-secondary);
+    font-weight: 600;
   }
 
   .stat-value {
-    font-size: 1.1rem;
-    font-family: monospace;
+    font-size: 1.15rem;
+    font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
-    color: #c9d1d9;
+    color: var(--text-primary);
+    font-weight: 500;
   }
 
-  .equity-curve-container {
+  .stat-value.pos { color: var(--green); }
+  .stat-value.neg { color: var(--red); }
+
+  .chart-card {
     position: relative;
     width: 100%;
     height: 200px;
-    background: #0d1117;
-    border: 1px solid #30363d;
-    border-radius: 8px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
     margin-bottom: 1rem;
     overflow: hidden;
   }
+
+  .chart-label {
+    position: absolute;
+    top: 0.6rem;
+    left: 0.75rem;
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-secondary);
+    font-weight: 600;
+    z-index: 1;
+    pointer-events: none;
+  }
+
+  canvas { display: block; }
 
   .loading {
     position: absolute;
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
-    color: #8b949e;
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+  }
+
+  .table-card {
+    max-height: 500px;
+    overflow-y: auto;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
   }
 
   .table-wrap {
-    max-height: 500px;
     overflow-y: auto;
-    background: #161b22;
-    border: 1px solid #30363d;
-    border-radius: 8px;
   }
 
   table {
@@ -353,27 +388,30 @@
 
   th {
     text-align: left;
-    color: #8b949e;
+    color: var(--text-secondary);
     font-weight: 500;
-    padding: 0.4rem 0.6rem;
-    border-bottom: 1px solid #30363d;
+    padding: 0.5rem 0.65rem;
+    border-bottom: 1px solid var(--border);
     position: sticky;
     top: 0;
-    background: #161b22;
+    background: var(--bg-surface);
     z-index: 1;
   }
 
   td {
-    padding: 0.3rem 0.6rem;
-    color: #c9d1d9;
-    border-bottom: 1px solid #21262d;
+    padding: 0.4rem 0.65rem;
+    color: var(--text-primary);
+    border-bottom: 1px solid var(--border);
   }
 
-  .mono { font-family: monospace; font-variant-numeric: tabular-nums; }
-  .center { text-align: center; color: #8b949e; }
-  .error { color: #f85149; margin-bottom: 1rem; }
-  .pos { color: #3fb950; }
-  .neg { color: #f85149; }
-  .side-buy { color: #3fb950; font-weight: 600; }
-  .side-sell { color: #f85149; font-weight: 600; }
+  .mono {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+  .center { text-align: center; color: var(--text-secondary); }
+  .error { color: var(--red); margin-bottom: 1rem; }
+  .pos { color: var(--green); }
+  .neg { color: var(--red); }
+  .side-buy { color: var(--green); font-weight: 600; }
+  .side-sell { color: var(--red); font-weight: 600; }
 </style>

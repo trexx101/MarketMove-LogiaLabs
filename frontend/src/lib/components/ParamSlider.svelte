@@ -48,18 +48,18 @@
 
   .slider-label {
     font-size: 0.8rem;
-    color: #8b949e;
+    color: var(--text-secondary);
     font-weight: 500;
   }
 
   .slider-value {
-    font-size: 0.85rem;
-    color: #c9d1d9;
+    font-size: 0.82rem;
+    color: var(--text-primary);
     font-variant-numeric: tabular-nums;
-    font-family: monospace;
-    background: #0d1117;
-    border: 1px solid #30363d;
-    border-radius: 4px;
+    font-family: var(--font-mono);
+    background: var(--bg-inset);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
     padding: 0.15rem 0.5rem;
     min-width: 70px;
     text-align: right;
@@ -74,9 +74,9 @@
   .slider-min,
   .slider-max {
     font-size: 0.7rem;
-    color: #484f58;
+    color: var(--text-muted);
     font-variant-numeric: tabular-nums;
-    font-family: monospace;
+    font-family: var(--font-mono);
     min-width: 40px;
   }
 
@@ -89,7 +89,7 @@
     appearance: none;
     flex: 1;
     height: 6px;
-    background: #21262d;
+    background: var(--bg-inset);
     border-radius: 3px;
     outline: none;
     cursor: pointer;
@@ -100,21 +100,21 @@
     appearance: none;
     width: 16px;
     height: 16px;
-    background: #58a6ff;
+    background: var(--accent);
     border-radius: 50%;
     cursor: pointer;
-    border: 2px solid #0d1117;
-    box-shadow: 0 0 4px rgba(88, 166, 255, 0.4);
+    border: 2px solid var(--bg-base);
+    box-shadow: 0 0 4px var(--accent-glow);
   }
 
   input[type="range"]::-moz-range-thumb {
     width: 16px;
     height: 16px;
-    background: #58a6ff;
+    background: var(--accent);
     border-radius: 50%;
     cursor: pointer;
-    border: 2px solid #0d1117;
-    box-shadow: 0 0 4px rgba(88, 166, 255, 0.4);
+    border: 2px solid var(--bg-base);
+    box-shadow: 0 0 4px var(--accent-glow);
   }
 
   input[type="range"]::-webkit-slider-runnable-track {
@@ -122,10 +122,10 @@
     border-radius: 3px;
     background: linear-gradient(
       to right,
-      #58a6ff 0%,
-      #58a6ff var(--pct),
-      #21262d var(--pct),
-      #21262d 100%
+      var(--accent) 0%,
+      var(--accent) var(--pct),
+      var(--bg-inset) var(--pct),
+      var(--bg-inset) 100%
     );
   }
 </style>

@@ -392,9 +392,10 @@ fn should_exit(ctx) {
   }
 
   .page-title {
-    font-size: 1.4rem;
+    font-size: 1.25rem;
     font-weight: 600;
-    color: #c9d1d9;
+    color: var(--text-primary);
+    letter-spacing: -0.01em;
     margin-bottom: 1.25rem;
   }
 
@@ -403,48 +404,50 @@ fn should_exit(ctx) {
     display: flex;
     gap: 0;
     margin-bottom: 1.25rem;
-    border-bottom: 1px solid #30363d;
+    border-bottom: 1px solid var(--border);
   }
 
   .tab-btn {
     padding: 0.6rem 1.2rem;
     cursor: pointer;
-    color: #8b949e;
+    color: var(--text-secondary);
     background: none;
     border: none;
     border-bottom: 2px solid transparent;
-    font-size: 0.9rem;
+    font-size: 0.875rem;
+    font-weight: 500;
     font-family: inherit;
     transition: all 0.15s;
   }
 
   .tab-btn:hover {
-    color: #c9d1d9;
-    background: #21262d;
+    color: var(--text-primary);
+    background: var(--bg-surface-hover);
   }
 
   .tab-btn.active {
-    color: #58a6ff;
-    border-bottom-color: #58a6ff;
+    color: var(--accent);
+    border-bottom-color: var(--accent);
   }
 
   /* Cards */
   .card {
-    background: #161b22;
-    border: 1px solid #30363d;
-    border-radius: 8px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
     padding: 1rem;
     margin-bottom: 1rem;
   }
 
   .card-header {
-    font-size: 0.7rem;
+    font-size: 0.68rem;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: #8b949e;
+    letter-spacing: 0.06em;
+    color: var(--text-secondary);
+    font-weight: 600;
     margin-bottom: 0.75rem;
     padding-bottom: 0.5rem;
-    border-bottom: 1px solid #21262d;
+    border-bottom: 1px solid var(--border);
   }
 
   .card-span {
@@ -478,14 +481,14 @@ fn should_exit(ctx) {
   .date-group label,
   .save-group label {
     font-size: 0.75rem;
-    color: #8b949e;
+    color: var(--text-secondary);
   }
 
   .date-group input[type="date"] {
-    background: #0d1117;
-    border: 1px solid #30363d;
-    border-radius: 4px;
-    color: #c9d1d9;
+    background: var(--bg-inset);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    color: var(--text-primary);
     padding: 0.4rem 0.5rem;
     font-size: 0.82rem;
     font-family: inherit;
@@ -493,7 +496,7 @@ fn should_exit(ctx) {
   }
 
   .date-group input[type="date"]:focus {
-    border-color: #58a6ff;
+    border-color: var(--accent);
   }
 
   .save-row {
@@ -503,10 +506,10 @@ fn should_exit(ctx) {
 
   .save-row input[type="text"] {
     flex: 1;
-    background: #0d1117;
-    border: 1px solid #30363d;
-    border-radius: 4px;
-    color: #c9d1d9;
+    background: var(--bg-inset);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    color: var(--text-primary);
     padding: 0.4rem 0.5rem;
     font-size: 0.82rem;
     font-family: inherit;
@@ -514,24 +517,27 @@ fn should_exit(ctx) {
   }
 
   .save-row input[type="text"]:focus {
-    border-color: #58a6ff;
+    border-color: var(--accent);
   }
 
   .save-btn {
     padding: 0.4rem 1rem;
-    background: #21262d;
-    border: 1px solid #30363d;
-    border-radius: 6px;
-    color: #c9d1d9;
+    background: var(--bg-surface-hover);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    color: var(--text-primary);
     font-size: 0.82rem;
+    font-weight: 500;
     font-family: inherit;
     cursor: pointer;
-    transition: background 0.15s;
+    transition: all 0.15s;
     white-space: nowrap;
   }
 
   .save-btn:hover {
-    background: #30363d;
+    background: var(--accent-subtle);
+    border-color: var(--accent);
+    color: var(--accent);
   }
 
   .save-msg {
@@ -539,13 +545,8 @@ fn should_exit(ctx) {
     margin-top: 0.3rem;
   }
 
-  .save-error {
-    color: #f85149;
-  }
-
-  .save-success {
-    color: #3fb950;
-  }
+  .save-error { color: var(--red); }
+  .save-success { color: var(--green); }
 
   /* Run Button */
   .run-section {
@@ -558,11 +559,11 @@ fn should_exit(ctx) {
 
   .run-btn {
     padding: 0.65rem 1.75rem;
-    background: #238636;
-    border: 1px solid #2ea043;
-    border-radius: 6px;
+    background: var(--accent);
+    border: none;
+    border-radius: var(--radius-xs);
     color: #fff;
-    font-size: 0.95rem;
+    font-size: 0.9rem;
     font-weight: 600;
     font-family: inherit;
     cursor: pointer;
@@ -573,7 +574,7 @@ fn should_exit(ctx) {
   }
 
   .run-btn:hover:not(:disabled) {
-    background: #2ea043;
+    background: var(--accent-dark);
   }
 
   .run-btn:disabled {
@@ -582,11 +583,10 @@ fn should_exit(ctx) {
   }
 
   .error-msg {
-    font-size: 0.85rem;
-    color: #f85149;
-    background: #da363322;
-    border: 1px solid #da363344;
-    border-radius: 4px;
+    font-size: 0.82rem;
+    color: var(--red);
+    background: var(--red-subtle);
+    border-radius: var(--radius-xs);
     padding: 0.4rem 0.75rem;
   }
 
@@ -613,7 +613,7 @@ fn should_exit(ctx) {
   .section-title {
     font-size: 1.1rem;
     font-weight: 600;
-    color: #c9d1d9;
+    color: var(--text-primary);
     margin-bottom: 0.75rem;
   }
 
@@ -638,49 +638,36 @@ fn should_exit(ctx) {
   .trade-list table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 0.82rem;
+    font-size: 0.8rem;
   }
 
   .trade-list th {
     text-align: left;
     padding: 0.4rem 0.5rem;
-    color: #8b949e;
+    color: var(--text-secondary);
     font-weight: 500;
-    border-bottom: 1px solid #30363d;
+    border-bottom: 1px solid var(--border);
     position: sticky;
     top: 0;
-    background: #161b22;
+    background: var(--bg-surface);
   }
 
   .trade-list td {
     padding: 0.35rem 0.5rem;
-    color: #c9d1d9;
-    border-bottom: 1px solid #21262d;
+    color: var(--text-primary);
+    border-bottom: 1px solid var(--border);
   }
 
   .mono {
-    font-family: monospace;
+    font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
   }
 
-  .pos { color: #3fb950; }
-  .neg { color: #f85149; }
+  .pos { color: var(--green); }
+  .neg { color: var(--red); }
 
   .action-long,
-  .action-entry { color: #3fb950; }
+  .action-entry { color: var(--green); }
   .action-short,
-  .action-exit { color: #f85149; }
-
-  .trade-list::-webkit-scrollbar {
-    width: 6px;
-  }
-
-  .trade-list::-webkit-scrollbar-track {
-    background: #0d1117;
-  }
-
-  .trade-list::-webkit-scrollbar-thumb {
-    background: #30363d;
-    border-radius: 3px;
-  }
+  .action-exit { color: var(--red); }
 </style>

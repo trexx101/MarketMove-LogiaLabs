@@ -69,6 +69,7 @@ pub fn router(pool: db::DbPool, config: &Config, tx: ws::TelemetrySender) -> Rou
     Router::new()
         .route("/api/status", get(status::handle_status))
         .route("/api/market_state", get(status::handle_market_state))
+        .route("/api/quote", get(quote::handle_quote))
         .route("/api/predictions", get(predictions::handle_predictions))
         .route("/api/accuracy", get(predictions::handle_accuracy))
         .route("/api/chart", get(chart::handle_chart))
@@ -109,14 +110,15 @@ pub(crate) fn internal_error(context: &str, err: anyhow::Error) -> (StatusCode, 
     (StatusCode::INTERNAL_SERVER_ERROR, format!("{context}: {err:#}"))
 }
 
+pub(crate) mod ws;
 mod status;
 mod predictions;
 mod chart;
 mod equity;
 mod backtest;
 pub mod mode;
+mod quote;
 mod strategy_config;
-pub(crate) mod ws;
 
 #[cfg(test)]
 mod tests;

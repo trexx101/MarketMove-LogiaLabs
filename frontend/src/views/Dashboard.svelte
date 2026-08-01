@@ -16,7 +16,6 @@
   let statusInterval;
 
   onMount(async () => {
-    // Fetch initial data via REST (fallback if WS not available)
     try {
       const s = await fetchStatus();
       status.set(s);
@@ -45,11 +44,8 @@
       console.error('Failed to fetch accuracy:', e);
     }
 
-    // Connect WebSocket for real-time updates
     connectWebSocket();
 
-    // Poll /api/status every 30s as a fallback for staleness and other
-    // fields that aren't pushed via WS (StalenessAlert is never emitted).
     statusInterval = setInterval(async () => {
       try {
         const s = await fetchStatus();
@@ -65,7 +61,6 @@
     if (statusInterval) clearInterval(statusInterval);
   });
 
-  // Update chart predictions when status or predictions change
   $: if (chartComponent && $status && $predictions) {
     const lastClose = $status.last_close;
     const preds = $predictions.latest;
@@ -76,6 +71,11 @@
 </script>
 
 <div class="dashboard">
+  <div class="dash-header">
+    <h1>Dashboard</h1>
+    <span class="dash-subtitle">Logia — Real-time monitoring</span>
+  </div>
+
   <div class="grid">
     <div class="grid-item chart-area">
       <CandlestickChart bind:this={chartComponent} />
@@ -109,7 +109,26 @@
 
 <style>
   .dashboard {
-    padding: 1rem;
+    padding: 1.25rem;
+  }
+
+  .dash-header {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    margin-bottom: 1.25rem;
+  }
+
+  .dash-header h1 {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    letter-spacing: -0.01em;
+  }
+
+  .dash-subtitle {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
   }
 
   .grid {

@@ -20,10 +20,10 @@ The `pred_5d > 0.0` filter is hardcoded. Removing it (or making it configurable)
 
 **Confirmed results from live backtest sweep (2022-01 to 2025-07, 895 days):**
 
-| Config | Trades | CAGR | Sharpe | Max DD | Win Rate | PF |
-|--------|--------|------|--------|--------|----------|----|
-| SMA=200, entry=0.003, exit=-0.001 | 10 | 10.9% | 1.05 | 22.9% | 80% | 5.38 |
-| SMA=40, entry=0.001, exit=-0.0005 | 24 | **18.0%** | **1.41** | 22.9% | 83% | 5.85 |
+| Config                            | Trades | CAGR     | Sharpe | Max DD | Win Rate | PF |
+|-----------------------------------|--------|----------|--------|--------|----------|----|
+| SMA=200, entry=0.003, exit=-0.001 | 10     | 10.9%  | 1.05 | 22.9% | 80% | 5.38 |
+| SMA=40, entry=0.001, exit=-0.0005 | 24     | **18.0%** | **1.41** | 22.9% | 83% | 5.85 |
 
 The SMA=40 config is **strictly dominant** — more trades, higher return, better risk-adjusted. The `pred_5d` filter is the remaining constraint.
 

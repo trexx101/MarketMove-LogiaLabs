@@ -99,25 +99,26 @@
 
 <style>
   .ab-comparison {
-    background: #161b22;
-    border: 1px solid #30363d;
-    border-radius: 8px;
-    padding: 0.75rem;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.85rem;
     display: flex;
     flex-direction: column;
-    gap: 0.6rem;
+    gap: 0.65rem;
   }
 
   .ab-header {
-    font-size: 0.7rem;
+    font-size: 0.68rem;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: #8b949e;
+    letter-spacing: 0.06em;
+    color: var(--text-secondary);
+    font-weight: 600;
   }
 
   .ab-hint {
-    font-size: 0.82rem;
-    color: #484f58;
+    font-size: 0.8rem;
+    color: var(--text-muted);
     padding: 0.5rem 0;
   }
 
@@ -135,14 +136,14 @@
 
   .ab-select-group label {
     font-size: 0.75rem;
-    color: #8b949e;
+    color: var(--text-secondary);
   }
 
   .ab-select-group select {
-    background: #0d1117;
-    border: 1px solid #30363d;
-    border-radius: 4px;
-    color: #c9d1d9;
+    background: var(--bg-inset);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
+    color: var(--text-primary);
     padding: 0.4rem 0.5rem;
     font-size: 0.82rem;
     font-family: inherit;
@@ -151,16 +152,16 @@
   }
 
   .ab-select-group select:focus {
-    border-color: #58a6ff;
+    border-color: var(--accent);
   }
 
   .compare-btn {
     padding: 0.5rem 1rem;
-    background: #238636;
-    border: 1px solid #2ea043;
-    border-radius: 6px;
+    background: var(--accent);
+    border: none;
+    border-radius: var(--radius-xs);
     color: #fff;
-    font-size: 0.85rem;
+    font-size: 0.82rem;
     font-weight: 500;
     font-family: inherit;
     cursor: pointer;
@@ -169,7 +170,7 @@
   }
 
   .compare-btn:hover:not(:disabled) {
-    background: #2ea043;
+    background: var(--accent-dark);
   }
 
   .compare-btn:disabled {
@@ -178,11 +179,10 @@
   }
 
   .ab-error {
-    font-size: 0.8rem;
-    color: #f85149;
-    background: #da363322;
-    border: 1px solid #da363344;
-    border-radius: 4px;
+    font-size: 0.78rem;
+    color: var(--red);
+    background: var(--red-subtle);
+    border-radius: var(--radius-xs);
     padding: 0.4rem 0.6rem;
   }
 </style>

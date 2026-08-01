@@ -3,7 +3,6 @@
   import { fetchEquityFeatures } from '../api.js';
   import { features } from '../stores.js';
 
-  // Must match EQ_FEATURE_NAMES in engine/src/features/equities_v2.rs
   const FEATURE_DEFS = [
     { key: 'trend_slope',            label: 'trend_slope',  center: 0,   scale: 0.05 },
     { key: 'trend_adx',              label: 'trend_adx',    center: 25,  scale: 50   },
@@ -29,18 +28,13 @@
     }
   });
 
-  // Prefer WS feature updates over REST
   $: if ($features) {
     localFeatures = $features;
   }
 
-  // Normalize WS payload {features: [...], normalized: [...]} into the same
-  // named-field shape as the REST /api/equity/features response.
   $: resolvedFeatures = (() => {
     if (!localFeatures) return null;
-    // REST shape: { trend_slope, trend_adx, ... }
     if (localFeatures.trend_slope !== undefined) return localFeatures;
-    // WS shape: { features: [f0, f1, ...], normalized: [n0, n1, ...] }
     if (Array.isArray(localFeatures.features)) {
       const obj = {};
       FEATURE_DEFS.forEach((d, i) => {
@@ -61,9 +55,9 @@
   })();
 
   function barColor(v) {
-    if (v > 0) return '#3fb950';
-    if (v < 0) return '#f85149';
-    return '#8b949e';
+    if (v > 0) return 'var(--green)';
+    if (v < 0) return 'var(--red)';
+    return 'var(--text-secondary)';
   }
 
   function fmtRaw(v) {
@@ -73,8 +67,8 @@
   }
 </script>
 
-<div class="feature-inspector">
-  <div class="panel-header">Feature Inspector</div>
+<div class="card">
+  <div class="card-header">Feature Inspector</div>
   {#if error}
     <div class="error">Error: {error}</div>
   {/if}
@@ -96,46 +90,48 @@
 </div>
 
 <style>
-  .feature-inspector {
-    background: #161b22;
-    border: 1px solid #30363d;
-    border-radius: 8px;
-    padding: 0.75rem;
+  .card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.85rem;
   }
 
-  .panel-header {
-    font-size: 0.7rem;
+  .card-header {
+    font-size: 0.68rem;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: #8b949e;
-    margin-bottom: 0.5rem;
+    letter-spacing: 0.06em;
+    color: var(--text-secondary);
+    font-weight: 600;
+    margin-bottom: 0.6rem;
   }
 
   .bars {
     display: flex;
     flex-direction: column;
-    gap: 0.35rem;
+    gap: 0.4rem;
   }
 
   .bar-row {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: 0.6rem;
     font-size: 0.75rem;
   }
 
   .bar-label {
     width: 70px;
-    color: #8b949e;
-    font-family: monospace;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
     flex-shrink: 0;
   }
 
   .bar-track {
     flex: 1;
-    height: 14px;
-    background: #21262d;
-    border-radius: 3px;
+    height: 16px;
+    background: var(--bg-inset);
+    border-radius: var(--radius-xs);
     position: relative;
     overflow: hidden;
   }
@@ -146,7 +142,7 @@
     top: 0;
     bottom: 0;
     width: 1px;
-    background: #484f58;
+    background: var(--border-light);
   }
 
   .bar-fill {
@@ -160,11 +156,11 @@
   .bar-raw {
     width: 50px;
     text-align: right;
-    color: #c9d1d9;
-    font-family: monospace;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
     font-size: 0.7rem;
     flex-shrink: 0;
   }
 
-  .error { color: #f85149; font-size: 0.8rem; }
+  .error { color: var(--red); font-size: 0.78rem; }
 </style>

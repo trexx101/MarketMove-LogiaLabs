@@ -197,6 +197,75 @@ pub async fn backfill_many(
     Ok(total)
 }
 
+// ─── Live quote ───────────────────────────────────────────────────────────────
+
+/// A thin snapshot of the current market price for one symbol.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Quote {
+    pub symbol: String,
+    pub price: f64,
+    pub prev_close: f64,
+    pub change: f64,
+    pub change_pct: f64,
+    pub timestamp: i64,
+}
+
+/// Fetch just the current quote for `symbol` from Yahoo Finance.
+/// Uses the same chart endpoint as `backfill` but only parses the `meta`
+/// block so it is very fast (no OHLCV history needed).
+pub async fn fetch_quote(symbol: &str) -> Result<Quote> {
+    let client = reqwest::Client::builder()
+        .use_native_tls()
+        .user_agent("Mozilla/5.0 (MarketMarkovNet; equities-wave-a)")
+        .timeout(Duration::from_secs(15))
+        .connect_timeout(Duration::from_secs(8))
+        .build()
+        .context("building reqwest client")?;
+
+    let url = format!("{REST_URL}/{symbol}?interval=1d&range=5d");
+    let resp_text = client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("Yahoo quote request for {symbol}"))?
+        .text()
+        .await
+        .context("read Yahoo quote response")?;
+
+    let v: Value =
+        serde_json::from_str(&resp_text).context("decode Yahoo quote JSON")?;
+
+    let result = &v["chart"]["result"];
+    if !result.is_array() || result.as_array().unwrap().is_empty() {
+        bail!("Yahoo: empty chart result for quote {symbol}");
+    }
+    let meta = &result[0]["meta"];
+
+    let price = meta["regularMarketPrice"]
+        .as_f64()
+        .context("missing regularMarketPrice")?;
+    let prev_close = meta["chartPreviousClose"]
+        .as_f64()
+        .or_else(|| meta["regularMarketPreviousClose"].as_f64())
+        .unwrap_or(price);
+    let change = price - prev_close;
+    let change_pct = if prev_close > 0.0 {
+        (change / prev_close) * 100.0
+    } else {
+        0.0
+    };
+    let timestamp = meta["regularMarketTime"].as_i64().unwrap_or(0);
+
+    Ok(Quote {
+        symbol: symbol.to_string(),
+        price,
+        prev_close,
+        change,
+        change_pct,
+        timestamp,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

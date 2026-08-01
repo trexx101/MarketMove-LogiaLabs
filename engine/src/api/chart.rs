@@ -1,5 +1,8 @@
-use axum::{extract::State, response::Json};
-use serde::Serialize;
+use std::collections::HashMap;
+
+use axum::{extract::State, response::Json, http::StatusCode};
+use serde::{Deserialize, Serialize};
+use tokio::time::{sleep, Duration};
 
 use crate::{db, strategy};
 
@@ -9,6 +12,16 @@ use super::{internal_error, ts_to_rfc3339, ApiResult, AppState};
 pub(crate) struct ChartResponse {
     pub candles: Vec<CandleDto>,
     pub sma: Vec<SmaPoint>,
+    pub stale: bool,
+    pub live_quote: Option<LiveQuote>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct LiveQuote {
+    pub price: f64,
+    pub prev_close: f64,
+    pub change: f64,
+    pub change_pct: f64,
 }
 
 #[derive(Serialize)]
@@ -28,13 +41,122 @@ pub(crate) struct SmaPoint {
     pub value: f64,
 }
 
-pub(crate) async fn handle_chart(State(state): State<AppState>) -> ApiResult<ChartResponse> {
-    let sma_window = state.strategy_params.read().await.sma_window;
-    let limit = (sma_window * 2).min(500);
-    let candles = db::fetch_recent_equity_candles(&state.pool, &state.symbol, limit as i64)
-        .await
-        .map_err(|e| internal_error("fetch_recent_equity_candles", e))?;
+#[derive(Deserialize)]
+pub(crate) struct ChartQuery {
+    pub range: Option<String>,
+    pub limit: Option<i64>,
+}
 
+impl ChartQuery {
+    fn limit(&self) -> i64 {
+        self.limit.unwrap_or(500).min(1500).max(10)
+    }
+
+    fn range(&self) -> &str {
+        match self.range.as_deref() {
+            Some("1y" | "2y" | "5y" | "max") => self.range.as_deref().unwrap(),
+            _ => "5y",
+        }
+    }
+}
+
+/// `GET /api/chart?range=5y&limit=500`
+///
+/// Always attempts a fresh Yahoo Finance backfill so the chart is never stale.
+/// Also fetches the current live quote to anchor the price line and projections.
+pub(crate) async fn handle_chart(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> ApiResult<ChartResponse> {
+    let query = ChartQuery {
+        range: params.get("range").cloned(),
+        limit: params.get("limit").and_then(|s| s.parse().ok()),
+    };
+    let limit = query.limit() as i64;
+    let range = query.range();
+
+    // Always try to refresh from Yahoo (will skip if data is fresh enough).
+    let backfill_started = std::time::Instant::now();
+    let backfill_err = match crate::data::yahoo::backfill(
+        &state.pool,
+        &state.symbol,
+        200,
+        range,
+        43_200, // 12-hour stale threshold
+    )
+    .await
+    {
+        Ok(n) => {
+            if n > 0 {
+                tracing::info!(
+                    symbol = %state.symbol,
+                    fetched = n,
+                    range,
+                    elapsed_ms = backfill_started.elapsed().as_millis(),
+                    "chart backfill complete"
+                );
+            }
+            None
+        }
+        Err(e) => {
+            tracing::warn!(symbol = %state.symbol, error = %e, "chart backfill failed");
+            Some(e)
+        }
+    };
+
+    // Yield briefly so the DB write commits.
+    sleep(Duration::from_millis(50)).await;
+
+    let candles =
+        db::fetch_recent_equity_candles(&state.pool, &state.symbol, limit)
+            .await
+            .map_err(|e| internal_error("fetch_recent_equity_candles", e))?;
+
+    // Detect staleness: no candles OR latest candle > 48h old.
+    let now_ts = chrono::Utc::now().timestamp();
+    let latest_ts = candles.last().map(|c| c.ts).unwrap_or(0);
+    let stale = candles.is_empty()
+        || now_ts.saturating_sub(latest_ts) > 172_800; // 48 h
+
+    // Fetch live quote — this is the single most important price to get right.
+    // It anchors the live-price dashed line and the prediction projections.
+    let live_quote = match crate::data::yahoo::fetch_quote(&state.symbol).await {
+        Ok(q) => {
+            tracing::debug!(
+                symbol = %state.symbol,
+                price = q.price,
+                change_pct = q.change_pct,
+                "live quote fetched"
+            );
+            Some(LiveQuote {
+                price: q.price,
+                prev_close: q.prev_close,
+                change: q.change,
+                change_pct: q.change_pct,
+            })
+        }
+        Err(e) => {
+            tracing::warn!(
+                symbol = %state.symbol,
+                error = %e,
+                "live quote fetch failed — chart will not show live price"
+            );
+            None
+        }
+    };
+
+    if candles.is_empty() && live_quote.is_none() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "no candle data for {} and live quote unavailable — \
+                 ensure /api/equity/backfill has been run or check network access",
+                state.symbol
+            ),
+        ));
+    }
+
+    let sma_window = state.strategy_params.read().await.sma_window;
     let closes: Vec<f64> = candles.iter().map(|c| c.close).collect();
     let mut sma_points = Vec::new();
 
@@ -48,11 +170,18 @@ pub(crate) async fn handle_chart(State(state): State<AppState>) -> ApiResult<Cha
         }
     }
 
-    let candle_dtos: Vec<CandleDto> = candles.iter().map(equity_candle_to_dto).collect();
+    // fetch_recent_equity_candles returns newest-first; reverse for chart (ascending ts).
+    let candle_dtos: Vec<CandleDto> = candles
+        .iter()
+        .rev()
+        .map(equity_candle_to_dto)
+        .collect();
 
     Ok(Json(ChartResponse {
         candles: candle_dtos,
         sma: sma_points,
+        stale,
+        live_quote,
     }))
 }
 

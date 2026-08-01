@@ -77,11 +77,11 @@
   }
 </script>
 
-<div class="strategy-panel">
-  <div class="panel-header">
+<div class="card">
+  <div class="card-header">
     <span>Strategy Config</span>
-    <span class="strategy-badge badge-threshold">
-      SMA={config.sma_window}, pred5d={config.pred_5d_filter ? 'on' : 'off'}
+    <span class="strategy-badge">
+      SMA={config.sma_window} / pred5d={config.pred_5d_filter ? 'on' : 'off'}
     </span>
   </div>
 
@@ -95,7 +95,6 @@
   </div>
 
   <div class="fields">
-    <!-- Entry / Exit -->
     <div class="field-row">
       <label for="entry_threshold">Entry</label>
       <input
@@ -190,7 +189,7 @@
     disabled={saving}
     class:dirty
   >
-    {saving ? 'Saving…' : dirty ? 'Save Changes' : 'Saved'}
+    {saving ? 'Saving...' : dirty ? 'Save Changes' : 'Saved'}
   </button>
 
   {#if error}
@@ -202,37 +201,36 @@
 </div>
 
 <style>
-  .strategy-panel {
-    background: #161b22;
-    border: 1px solid #30363d;
-    border-radius: 8px;
-    padding: 0.75rem;
+  .card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.85rem;
     display: flex;
     flex-direction: column;
-    gap: 0.6rem;
+    gap: 0.65rem;
   }
 
-  .panel-header {
+  .card-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    font-size: 0.7rem;
+    font-size: 0.68rem;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: #8b949e;
+    letter-spacing: 0.06em;
+    color: var(--text-secondary);
+    font-weight: 600;
   }
 
   .strategy-badge {
-    padding: 0.1rem 0.5rem;
-    border-radius: 4px;
+    padding: 0.12rem 0.5rem;
+    border-radius: var(--radius-xs);
     font-size: 0.65rem;
-    font-weight: 600;
+    font-weight: 500;
     text-transform: none;
-  }
-
-  .badge-threshold {
-    background: #1f6feb22;
-    color: #58a6ff;
+    background: var(--accent-subtle);
+    color: var(--accent);
+    font-family: var(--font-mono);
   }
 
   .presets {
@@ -242,25 +240,26 @@
 
   .preset-btn {
     flex: 1;
-    padding: 0.3rem 0.5rem;
-    border: 1px solid #30363d;
-    border-radius: 4px;
+    padding: 0.35rem 0.5rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
     background: transparent;
-    color: #8b949e;
+    color: var(--text-secondary);
     font-size: 0.7rem;
+    font-family: inherit;
     cursor: pointer;
-    transition: border-color 0.15s;
+    transition: all 0.15s;
   }
 
   .preset-btn:hover {
-    border-color: #58a6ff;
-    color: #58a6ff;
+    border-color: var(--accent);
+    color: var(--accent);
   }
 
   .fields {
     display: flex;
     flex-direction: column;
-    gap: 0.4rem;
+    gap: 0.45rem;
   }
 
   .field-row {
@@ -274,25 +273,26 @@
   }
 
   .field-row label {
-    color: #8b949e;
+    color: var(--text-secondary);
     font-size: 0.78rem;
   }
 
   .field-row input[type="number"] {
     width: 80px;
-    background: #0d1117;
-    border: 1px solid #30363d;
-    color: #c9d1d9;
-    padding: 0.25rem 0.4rem;
-    border-radius: 4px;
-    font-size: 0.8rem;
+    background: var(--bg-inset);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    padding: 0.3rem 0.45rem;
+    border-radius: var(--radius-xs);
+    font-size: 0.78rem;
+    font-family: var(--font-mono);
     font-variant-numeric: tabular-nums;
     text-align: right;
   }
 
   .field-row input[type="number"]:focus {
     outline: none;
-    border-color: #58a6ff;
+    border-color: var(--accent);
   }
 
   .field-row input:disabled {
@@ -308,27 +308,29 @@
     width: 16px;
     height: 16px;
     cursor: pointer;
-    accent-color: #58a6ff;
+    accent-color: var(--accent);
   }
 
   .save-btn {
-    padding: 0.4rem 1rem;
-    border: 1px solid #30363d;
-    border-radius: 4px;
+    padding: 0.45rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xs);
     background: transparent;
-    color: #8b949e;
-    font-size: 0.8rem;
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    font-weight: 500;
+    font-family: inherit;
     cursor: pointer;
     transition: all 0.15s;
   }
 
   .save-btn.dirty {
-    border-color: #3fb950;
-    color: #3fb950;
+    border-color: var(--green);
+    color: var(--green);
   }
 
   .save-btn.dirty:hover:not(:disabled) {
-    background: #3fb950;
+    background: var(--green);
     color: #fff;
   }
 
@@ -339,17 +341,17 @@
 
   .msg {
     font-size: 0.75rem;
-    padding: 0.3rem 0.5rem;
-    border-radius: 4px;
+    padding: 0.35rem 0.5rem;
+    border-radius: var(--radius-xs);
   }
 
   .msg.error {
-    color: #f85149;
-    background: #da363322;
+    color: var(--red);
+    background: var(--red-subtle);
   }
 
   .msg.ok {
-    color: #3fb950;
-    background: #23863622;
+    color: var(--green);
+    background: var(--green-subtle);
   }
 </style>

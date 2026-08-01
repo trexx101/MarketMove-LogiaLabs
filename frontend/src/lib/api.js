@@ -157,6 +157,17 @@ export async function setMode(mode, authToken) {
 }
 
 /**
+ * Fetch current live quote (price, change, pct change) for QQQ from Yahoo Finance.
+ * Polled every 30s by the chart component.
+ * @returns {Promise<{symbol:string, price:number, prev_close:number, change:number, change_pct:number, timestamp:number}>}
+ */
+export async function fetchQuote() {
+  const res = await fetch(`${API_BASE}/quote`);
+  if (!res.ok) throw new Error(`quote: ${res.status}`);
+  return res.json();
+}
+
+/**
  * Fetch current strategy configuration (Phase 3).
  * @returns {Promise<object>} StrategyConfigResponse
  */

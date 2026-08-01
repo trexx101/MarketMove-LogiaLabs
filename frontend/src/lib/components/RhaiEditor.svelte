@@ -65,9 +65,9 @@ fn should_exit(ctx) {
 
 <style>
   .rhai-editor {
-    background: #0d1117;
-    border: 1px solid #30363d;
-    border-radius: 8px;
+    background: var(--bg-inset);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
     overflow: hidden;
   }
 
@@ -76,21 +76,21 @@ fn should_exit(ctx) {
     justify-content: space-between;
     align-items: center;
     padding: 0.5rem 0.75rem;
-    background: #161b22;
-    border-bottom: 1px solid #30363d;
+    background: var(--bg-surface);
+    border-bottom: 1px solid var(--border);
   }
 
   .editor-label {
-    font-size: 0.8rem;
-    color: #8b949e;
-    font-weight: 500;
+    font-size: 0.68rem;
+    color: var(--text-secondary);
+    font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.06em;
   }
 
   .editor-hint {
     font-size: 0.7rem;
-    color: #484f58;
+    color: var(--text-muted);
   }
 
   .editor-body {
@@ -102,8 +102,8 @@ fn should_exit(ctx) {
   .line-numbers {
     flex-shrink: 0;
     padding: 0.75rem 0;
-    background: #0d1117;
-    border-right: 1px solid #21262d;
+    background: var(--bg-inset);
+    border-right: 1px solid var(--border);
     text-align: right;
     user-select: none;
     overflow: hidden;
@@ -112,10 +112,10 @@ fn should_exit(ctx) {
   .line-num {
     display: block;
     padding: 0 0.75rem;
-    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    font-family: var(--font-mono);
     font-size: 0.8rem;
     line-height: 1.6;
-    color: #484f58;
+    color: var(--text-muted);
   }
 
   .editor-textarea {
@@ -123,8 +123,8 @@ fn should_exit(ctx) {
     padding: 0.75rem;
     background: transparent;
     border: none;
-    color: #c9d1d9;
-    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
     font-size: 0.8rem;
     line-height: 1.6;
     resize: vertical;
@@ -135,20 +135,6 @@ fn should_exit(ctx) {
   }
 
   .editor-textarea::placeholder {
-    color: #484f58;
-  }
-
-  .editor-textarea::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
-  }
-
-  .editor-textarea::-webkit-scrollbar-track {
-    background: #0d1117;
-  }
-
-  .editor-textarea::-webkit-scrollbar-thumb {
-    background: #30363d;
-    border-radius: 4px;
+    color: var(--text-muted);
   }
 </style>

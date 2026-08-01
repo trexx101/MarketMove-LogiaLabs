@@ -43,8 +43,8 @@
     const ch = h - padT - padB;
 
     if (equityCurve.length < 2) {
-      ctx.fillStyle = '#8b949e';
-      ctx.font = '12px sans-serif';
+      ctx.fillStyle = '#5c5e6e';
+      ctx.font = '12px Inter, sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText('No equity curve data', w / 2, h / 2);
       return;
@@ -64,12 +64,12 @@
 
     // Grid lines
     ctx.font = '10px monospace';
-    ctx.fillStyle = '#484f58';
+    ctx.fillStyle = '#5c5e6e';
     ctx.textAlign = 'right';
     for (let i = 0; i <= 4; i++) {
       const y = padT + (ch / 4) * i;
       const val = maxV - (range / 4) * i;
-      ctx.strokeStyle = '#21262d';
+      ctx.strokeStyle = '#1c1d27';
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(padL, y);
@@ -113,14 +113,14 @@
 
     // Draw benchmark first (behind)
     if (benchmarkCurve && benchmarkCurve.length > 1) {
-      drawLine(benchmarkCurve, '#8b949e', '#8b949e11', 1.5);
+      drawLine(benchmarkCurve, '#5c5e6e', 'rgba(92,94,110,0.07)', 1.5);
     }
 
     // Draw strategy equity curve
     const lastVal = equityCurve[equityCurve.length - 1][1];
     const firstVal = equityCurve[0][1];
-    const color = lastVal >= firstVal ? '#3fb950' : '#f85149';
-    const fillColor = lastVal >= firstVal ? '#3fb95015' : '#f8514915';
+    const color = lastVal >= firstVal ? '#149e61' : '#e5484d';
+    const fillColor = lastVal >= firstVal ? 'rgba(20,158,97,0.1)' : 'rgba(229,72,77,0.1)';
     drawLine(equityCurve, color, fillColor, 2.5);
 
     // Legend
@@ -131,15 +131,15 @@
     // Strategy legend
     ctx.fillStyle = color;
     ctx.fillRect(legendX, legendY, 12, 12);
-    ctx.fillStyle = '#c9d1d9';
-    ctx.font = '11px sans-serif';
+    ctx.fillStyle = '#ececf1';
+    ctx.font = '11px Inter, sans-serif';
     ctx.fillText(label, legendX + 18, legendY + 10);
 
     // Benchmark legend
     if (benchmarkCurve && benchmarkCurve.length > 1) {
-      ctx.fillStyle = '#8b949e';
+      ctx.fillStyle = '#5c5e6e';
       ctx.fillRect(legendX + 120, legendY, 12, 12);
-      ctx.fillStyle = '#c9d1d9';
+      ctx.fillStyle = '#ececf1';
       ctx.fillText(benchmarkLabel, legendX + 138, legendY + 10);
     }
   }
@@ -153,9 +153,9 @@
   .chart-container {
     width: 100%;
     height: 250px;
-    background: #0d1117;
-    border: 1px solid #30363d;
-    border-radius: 8px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
     overflow: hidden;
   }
   canvas {

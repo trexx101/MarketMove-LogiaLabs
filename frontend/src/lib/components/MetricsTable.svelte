@@ -74,28 +74,29 @@
 
 <style>
   .metrics-table {
-    background: #161b22;
-    border: 1px solid #30363d;
-    border-radius: 8px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
     padding: 0;
     overflow: hidden;
   }
 
   .table-header {
     padding: 0.6rem 0.75rem;
-    font-size: 0.7rem;
+    font-size: 0.68rem;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: #8b949e;
-    border-bottom: 1px solid #30363d;
-    background: #0d1117;
+    letter-spacing: 0.06em;
+    color: var(--text-secondary);
+    font-weight: 600;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-inset);
   }
 
   .empty-state {
     padding: 1.5rem;
     text-align: center;
-    color: #484f58;
-    font-size: 0.85rem;
+    color: var(--text-muted);
+    font-size: 0.82rem;
   }
 
   table {
@@ -104,7 +105,7 @@
   }
 
   tr {
-    border-bottom: 1px solid #21262d;
+    border-bottom: 1px solid var(--border);
   }
 
   tr:last-child {
@@ -113,20 +114,20 @@
 
   .metric-label {
     padding: 0.5rem 0.75rem;
-    font-size: 0.82rem;
-    color: #8b949e;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
   }
 
   .metric-value {
     padding: 0.5rem 0.75rem;
-    font-size: 0.85rem;
+    font-size: 0.82rem;
     font-variant-numeric: tabular-nums;
-    font-family: monospace;
+    font-family: var(--font-mono);
     text-align: right;
-    color: #c9d1d9;
+    color: var(--text-primary);
   }
 
-  .metric-value.pos { color: #3fb950; }
-  .metric-value.neg { color: #f85149; }
-  .metric-value.neutral { color: #c9d1d9; }
+  .metric-value.pos { color: var(--green); }
+  .metric-value.neg { color: var(--red); }
+  .metric-value.neutral { color: var(--text-primary); }
 </style>

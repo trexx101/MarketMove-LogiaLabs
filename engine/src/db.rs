@@ -1271,8 +1271,9 @@ fn find_closest_close(
     best.map(|(_, c)| c)
 }
 
-/// Fetch recent equity candles for a symbol, **oldest-first** (ascending ts),
-/// which is the order required for chart rendering.
+/// Fetch the most recent `limit` equity candles for a symbol,
+/// **newest-first** (descending ts). Callers that need ascending order
+/// (e.g. chart rendering) should `.reverse()` the result.
 pub async fn fetch_recent_equity_candles(
     pool: &DbPool,
     symbol: &str,
@@ -1282,7 +1283,7 @@ pub async fn fetch_recent_equity_candles(
         r#"SELECT symbol, ts, open, high, low, close, volume, source
            FROM equity_candles
            WHERE symbol = ?1
-           ORDER BY ts ASC
+           ORDER BY ts DESC
            LIMIT ?2"#,
     )
     .bind(symbol)
