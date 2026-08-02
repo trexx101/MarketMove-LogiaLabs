@@ -70,6 +70,18 @@
   }
 </script>
 
+<!--
+  Layout B — TradingView-Lite
+  ┌────────────────────────────┬──────────────┐
+  │                            │   STATUS     │
+  │         CHART (hero)       ├──────────────┤
+  │                            │   TRADES     │
+  ├────────────────────────────┴──────────────┤
+  │              PnL EQUITY CURVE             │
+  ├────────────┬──────────────┬───────────────┤
+  │  FEATURES  │   HEALTH     │   STRATEGY    │
+  └────────────┴──────────────┴───────────────┘
+-->
 <div class="dashboard">
   <div class="dash-header">
     <h1>Dashboard</h1>
@@ -77,33 +89,33 @@
   </div>
 
   <div class="grid">
-    <div class="grid-item chart-area">
+    <section class="chart-area">
       <CandlestickChart bind:this={chartComponent} />
-    </div>
+    </section>
 
-    <div class="grid-item pnl-area">
-      <PnLEquityCurve />
-    </div>
-
-    <div class="grid-item status-area">
+    <aside class="rail-top">
       <StatusPanel />
-    </div>
+    </aside>
 
-    <div class="grid-item strategy-area">
-      <StrategyConfigPanel />
-    </div>
-
-    <div class="grid-item feature-area">
-      <FeatureInspector />
-    </div>
-
-    <div class="grid-item health-area">
-      <ModelHealth />
-    </div>
-
-    <div class="grid-item trade-area">
+    <aside class="rail-bot">
       <TradeHistory />
-    </div>
+    </aside>
+
+    <section class="pnl-area">
+      <PnLEquityCurve />
+    </section>
+
+    <section class="meta-features">
+      <FeatureInspector />
+    </section>
+
+    <section class="meta-health">
+      <ModelHealth />
+    </section>
+
+    <section class="meta-strategy">
+      <StrategyConfigPanel />
+    </section>
   </div>
 </div>
 
@@ -131,39 +143,68 @@
     color: var(--text-secondary);
   }
 
+  /* 12-col grid: chart 8 cols, right rail 4 cols */
   .grid {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(12, 1fr);
+    grid-auto-rows: min-content;
     gap: 1rem;
   }
 
-  .chart-area { grid-column: 1 / 3; }   /* spans 2 cols, 2/3 width */
-  .pnl-area { grid-column: 3 / 4; }     /* row 1 col 3 */
-  .status-area { grid-column: 1 / 2; }  /* row 2 col 1 */
-  .strategy-area { grid-column: 1 / 2; } /* row 3 col 1 */
-  .feature-area { grid-column: 2 / 4; } /* row 2 cols 2-3 */
-  .trade-area { grid-column: 2 / 4; }   /* row 3 cols 2-3 */
-  .health-area { grid-column: 1 / 4; }  /* row 4, full width */
+  .chart-area  { grid-column: 1 / 9;  grid-row: 1; }
+  .rail-top    { grid-column: 9 / 13; grid-row: 1; min-height: 280px; }
+  .rail-bot    { grid-column: 9 / 13; grid-row: 2; min-height: 320px; }
 
-  @media (max-width: 1024px) {
-    .grid {
-      grid-template-columns: repeat(2, 1fr);
-    }
-    .chart-area { grid-column: 1 / 3; }
-    .pnl-area { grid-column: 1 / 2; }
-    .status-area { grid-column: 2 / 3; }
-    .strategy-area { grid-column: 1 / 2; }
-    .feature-area { grid-column: 2 / 3; }
-    .health-area { grid-column: 1 / 2; }
-    .trade-area { grid-column: 1 / 3; }
+  .pnl-area    { grid-column: 1 / 13; grid-row: 3; }
+
+  .meta-features  { grid-column: 1 / 5;  grid-row: 4; }
+  .meta-health    { grid-column: 5 / 9;  grid-row: 4; }
+  .meta-strategy  { grid-column: 9 / 13; grid-row: 4; }
+
+  /* Make every panel container a flex shell so children fill cleanly */
+  .grid > section,
+  .grid > aside {
+    display: flex;
+    flex-direction: column;
+    min-width: 0; /* let children shrink instead of overflowing */
   }
 
+  .grid > section > :global(*),
+  .grid > aside > :global(*) {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  /* Wide screens: chart can stretch higher; tighten rail heights */
+  @media (min-width: 1600px) {
+    .rail-top { min-height: 320px; }
+    .rail-bot { min-height: 380px; }
+  }
+
+  /* Tablets: chart full-width, rail collapses to 2 columns */
+  @media (max-width: 1100px) {
+    .chart-area  { grid-column: 1 / 13; grid-row: 1; }
+    .rail-top    { grid-column: 1 / 7;  grid-row: 2; min-height: 240px; }
+    .rail-bot    { grid-column: 7 / 13; grid-row: 2; min-height: 240px; }
+    .pnl-area    { grid-column: 1 / 13; grid-row: 3; }
+    .meta-features { grid-column: 1 / 7;  grid-row: 4; }
+    .meta-health   { grid-column: 7 / 13; grid-row: 4; }
+    .meta-strategy { grid-column: 1 / 13; grid-row: 5; }
+  }
+
+  /* Phones: single column stack */
   @media (max-width: 640px) {
-    .grid {
-      grid-template-columns: 1fr;
-    }
-    .grid-item {
-      grid-column: 1 / 2 !important;
+    .grid { grid-template-columns: 1fr; }
+    .chart-area,
+    .rail-top,
+    .rail-bot,
+    .pnl-area,
+    .meta-features,
+    .meta-health,
+    .meta-strategy {
+      grid-column: 1 / -1;
+      grid-row: auto;
+      min-height: 0;
     }
   }
 </style>
