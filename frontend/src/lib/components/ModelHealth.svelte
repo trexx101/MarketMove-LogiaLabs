@@ -16,6 +16,7 @@
 
   $: staleness = $status?.staleness_secs ?? 0;
   $: stale = staleness > 120;
+  $: stalenessHours = (staleness / 3600).toFixed(staleness < 3600 ? 1 : 0);
   $: dirAcc1d = accuracyData?.directional_1h;
   $: dirAcc5d = accuracyData?.directional_4h;
   $: dirAcc21d = accuracyData?.directional_24h;
@@ -45,7 +46,7 @@
 
   <div class="row">
     <span class="label">Data Staleness</span>
-    <span class="status {stale ? 'warn' : 'ok'}">{staleness}s</span>
+    <span class="status {stale ? 'warn' : 'ok'}">{stalenessHours}h</span>
   </div>
 
   <div class="divider"></div>

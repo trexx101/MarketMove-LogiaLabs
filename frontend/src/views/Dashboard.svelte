@@ -93,12 +93,8 @@
       <CandlestickChart bind:this={chartComponent} />
     </section>
 
-    <aside class="rail-top">
+    <aside class="rail">
       <StatusPanel />
-    </aside>
-
-    <aside class="rail-bot">
-      <TradeHistory />
     </aside>
 
     <section class="pnl-area">
@@ -115,6 +111,10 @@
 
     <section class="meta-strategy">
       <StrategyConfigPanel />
+    </section>
+
+    <section class="trade-area">
+      <TradeHistory />
     </section>
   </div>
 </div>
@@ -152,14 +152,16 @@
   }
 
   .chart-area  { grid-column: 1 / 9;  grid-row: 1; }
-  .rail-top    { grid-column: 9 / 13; grid-row: 1; min-height: 280px; }
-  .rail-bot    { grid-column: 9 / 13; grid-row: 2; min-height: 320px; }
+  .rail        { grid-column: 9 / 13; grid-row: 1; min-height: 420px; }
 
-  .pnl-area    { grid-column: 1 / 13; grid-row: 3; }
+  .pnl-area    { grid-column: 1 / 13; grid-row: 2; }
 
-  .meta-features  { grid-column: 1 / 5;  grid-row: 4; }
-  .meta-health    { grid-column: 5 / 9;  grid-row: 4; }
-  .meta-strategy  { grid-column: 9 / 13; grid-row: 4; }
+  .meta-features  { grid-column: 1 / 5;  grid-row: 3; }
+  .meta-health    { grid-column: 5 / 9;  grid-row: 3; }
+  .meta-strategy  { grid-column: 9 / 13; grid-row: 3; }
+
+  /* Horizontal trade band at the absolute bottom */
+  .trade-area { grid-column: 1 / 13; grid-row: 4; }
 
   /* Make every panel container a flex shell so children fill cleanly */
   .grid > section,
@@ -175,33 +177,32 @@
     min-height: 0;
   }
 
-  /* Wide screens: chart can stretch higher; tighten rail heights */
+  /* Wide screens: StatusPanel rail stretches with the chart */
   @media (min-width: 1600px) {
-    .rail-top { min-height: 320px; }
-    .rail-bot { min-height: 380px; }
+    .rail { min-height: 480px; }
   }
 
-  /* Tablets: chart full-width, rail collapses to 2 columns */
+  /* Tablets: chart full-width, StatusPanel below it */
   @media (max-width: 1100px) {
     .chart-area  { grid-column: 1 / 13; grid-row: 1; }
-    .rail-top    { grid-column: 1 / 7;  grid-row: 2; min-height: 240px; }
-    .rail-bot    { grid-column: 7 / 13; grid-row: 2; min-height: 240px; }
+    .rail        { grid-column: 1 / 13; grid-row: 2; min-height: 0; }
     .pnl-area    { grid-column: 1 / 13; grid-row: 3; }
     .meta-features { grid-column: 1 / 7;  grid-row: 4; }
     .meta-health   { grid-column: 7 / 13; grid-row: 4; }
     .meta-strategy { grid-column: 1 / 13; grid-row: 5; }
+    .trade-area    { grid-column: 1 / 13; grid-row: 6; }
   }
 
   /* Phones: single column stack */
   @media (max-width: 640px) {
     .grid { grid-template-columns: 1fr; }
     .chart-area,
-    .rail-top,
-    .rail-bot,
+    .rail,
     .pnl-area,
     .meta-features,
     .meta-health,
-    .meta-strategy {
+    .meta-strategy,
+    .trade-area {
       grid-column: 1 / -1;
       grid-row: auto;
       min-height: 0;

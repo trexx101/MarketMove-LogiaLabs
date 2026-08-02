@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { status, wsConnected } from '../stores.js';
+  import { status } from '../stores.js';
   import { fetchMode, setMode } from '../api.js';
 
   $: s = $status;
@@ -10,7 +10,6 @@
   $: entryPrice = s?.entry_price;
   $: realizedPnl = s?.realized_pnl;
   $: unrealizedPnl = s?.unrealized_pnl;
-  $: staleness = s?.staleness_secs ?? 0;
   $: lastClose = s?.last_close;
   $: pred1d = s?.pred_1d;
   $: pred5d = s?.pred_5d;
@@ -85,8 +84,6 @@
     if (secs < 86400) return `${Math.round(secs / 3600)}h`;
     return `${Math.round(secs / 86400)}d`;
   }
-
-  $: stale = staleness > 120;
 </script>
 
 <div class="card">
@@ -151,19 +148,6 @@
   <div class="row">
     <span class="label">Unrealized</span>
     <span class="value mono {pnlColor(unrealizedPnl)}">{fmt(unrealizedPnl)}</span>
-  </div>
-
-  <div class="row {stale ? 'stale' : ''}">
-    <span class="label">Staleness</span>
-    <span class="value mono">{staleness}s</span>
-  </div>
-
-  <div class="row">
-    <span class="label">WebSocket</span>
-    <span class="ws-indicator {$wsConnected ? 'on' : 'off'}">
-      <span class="ws-dot"></span>
-      {$wsConnected ? 'Live' : 'Off'}
-    </span>
   </div>
 </div>
 
@@ -306,26 +290,6 @@
   .pos-long { background: var(--green-subtle); color: var(--green); }
   .pos-short { background: var(--red-subtle); color: var(--red); }
   .pos-flat { background: var(--bg-surface-hover); color: var(--text-secondary); }
-
-  .stale .value { color: var(--red); }
-
-  .ws-indicator {
-    display: flex;
-    align-items: center;
-    gap: 0.35rem;
-    font-size: 0.75rem;
-    font-weight: 500;
-  }
-
-  .ws-dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-  }
-  .ws-indicator.on { color: var(--green); }
-  .ws-indicator.on .ws-dot { background: var(--green); box-shadow: 0 0 5px var(--green); }
-  .ws-indicator.off { color: var(--red); }
-  .ws-indicator.off .ws-dot { background: var(--red); }
 
   .icon-btn {
     background: transparent;
