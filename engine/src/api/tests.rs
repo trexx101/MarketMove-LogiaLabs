@@ -170,7 +170,12 @@ async fn chart_computes_rolling_sma() {
         .unwrap();
     }
 
-    let Json(resp) = chart::handle_chart(test_state(pool)).await.unwrap();
+    let query = axum::extract::Query(
+        [("symbol".to_string(), "QQQ".to_string())]
+            .into_iter()
+            .collect::<std::collections::HashMap<_, _>>(),
+    );
+    let Json(resp) = chart::handle_chart(test_state(pool), query).await.unwrap();
     let expected_sma_points = closes.len().saturating_sub(TEST_SMA_WINDOW - 1);
     assert_eq!(resp.candles.len(), closes.len());
     assert_eq!(resp.sma.len(), expected_sma_points);

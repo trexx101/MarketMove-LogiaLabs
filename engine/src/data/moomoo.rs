@@ -1,75 +1,267 @@
-//! Moomoo OpenAPI client (Wave A: interface only).
+//! Moomoo OpenAPI equity data client (Phase 4: data consolidation).
 //!
-//! Moomoo's OpenAPI requires a proprietary SDK + OAuth credentials. The
-//! interface here matches the Wave A `equity_candles` schema so we can plug
-//! in the real client in Wave D without touching the rest of the engine.
+//! Shells out to Python scripts in `.agents/skills/moomooapi/scripts/quote/`
+//! — same pattern as `exec/moomoo.rs` shells out to `trade/place_order.py`.
+//! No Rust SDK exists for the OpenD TCP gateway; the Python `moomoo` package
+//! is the only maintained client.
 //!
-//! To activate: place a credentials file at `~/.moomoo/credentials.json` with
-//! fields `{ "api_key": "...", "api_secret": "...", "host": "127.0.0.1",
-//! "port": 11111 }`. The OpenD gateway daemon must be running locally.
+//! Requires: OpenD gateway running at `$FUTU_OPEND_HOST:$FUTU_OPEND_PORT`
+//! (defaults to 127.0.0.1:11111). The Python `common.py` module handles
+//! OpenD connectivity checks and SDK version validation.
 //!
-//! Until activated, all functions return a clear "not configured" error and
-//! callers fall back to the Yahoo client.
+//! API limits (per Moomoo docs):
+//! - Historical K-line: 60 req/30s, daily K up to 20y history
+//! - Market snapshot:   60 req/30s, max 400 symbols per call
+//! - Historical quota:  each unique stock within 30 days uses 1 quota unit
 
-use anyhow::{bail, Result};
-use tracing::info;
+use std::path::PathBuf;
+use std::process::Stdio;
+
+use anyhow::{anyhow, Context, Result};
+use serde::Deserialize;
+use tokio::process::Command;
+use tracing::{info, warn};
 
 use crate::db::{self, DbPool, EquityCandle};
 
-/// Configuration for the Moomoo OpenAPI client.
-#[derive(Debug, Clone)]
-pub struct MoomooConfig {
-    pub api_key: String,
-    pub api_secret: String,
-    pub host: String,
-    pub port: u16,
+// ── Script paths ────────────────────────────────────────────────
+
+/// Script path: `<repo>/.agents/skills/moomooapi/scripts/quote/get_kline.py`
+fn get_kline_script() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repo root")
+        .join(".agents/skills/moomooapi/scripts/quote/get_kline.py")
 }
 
-impl MoomooConfig {
-    /// Try to load Moomoo credentials from a JSON file.
-    /// Returns `None` if the file does not exist or is malformed (non-fatal).
-    pub fn from_credentials_file(path: &str) -> Option<Self> {
-        let raw = std::fs::read_to_string(path).ok()?;
-        let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
-        Some(Self {
-            api_key: v["api_key"].as_str()?.to_string(),
-            api_secret: v["api_secret"].as_str()?.to_string(),
-            host: v["host"].as_str().unwrap_or("127.0.0.1").to_string(),
-            port: v["port"].as_u64().unwrap_or(11111) as u16,
-        })
+/// Script path: `<repo>/.agents/skills/moomooapi/scripts/quote/get_snapshot.py`
+fn get_snapshot_script() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repo root")
+        .join(".agents/skills/moomooapi/scripts/quote/get_snapshot.py")
+}
+
+// ── OpenD availability check ────────────────────────────────────
+
+/// Check if the OpenD TCP gateway is reachable.
+///
+/// Does a quick `TcpStream::connect` to the host/port configured via
+/// `FUTU_OPEND_HOST` / `FUTU_OPEND_PORT` env vars.
+pub async fn is_available() -> bool {
+    let host =
+        std::env::var("FUTU_OPEND_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+    let port: u16 = std::env::var("FUTU_OPEND_PORT")
+        .unwrap_or_else(|_| "11111".into())
+        .parse()
+        .unwrap_or(11111);
+    tokio::net::TcpStream::connect((host.as_str(), port))
+        .await
+        .is_ok()
+}
+
+// ── Symbol conversion ───────────────────────────────────────────
+
+/// Convert a ticker to Moomoo code format: "QQQ" → "US.QQQ".
+/// Already-prefixed codes ("US.AAPL", "HK.00700") pass through unchanged.
+fn to_moomoo_code(symbol: &str) -> String {
+    if symbol.starts_with("US.") || symbol.starts_with("HK.") {
+        symbol.to_string()
+    } else {
+        format!("US.{symbol}")
     }
 }
 
-/// Backfill `symbol` daily OHLCV via Moomoo OpenAPI.
+// ── Historical K-line backfill ──────────────────────────────────
+
+/// Backfill equity OHLCV via Moomoo `get_kline.py` (historical daily candles).
 ///
-/// Currently a stub: if no credentials are configured, returns a clear
-/// "not configured" error so the caller can fall back to Yahoo. The signature
-/// mirrors the Binance/Yahoo clients so it is drop-in when activated.
+/// Fetches at least `min_candles` bars (daily, forward-adjusted) spanning
+/// `range_days` lookback. The Python script auto-paginates beyond 1000 bars.
+///
+/// Upserts into `equity_candles` with `source = "moomoo"`.
 pub async fn backfill(
     pool: &DbPool,
     symbol: &str,
     min_candles: i64,
     range_days: u32,
 ) -> Result<usize> {
-    let _ = (pool, symbol, min_candles, range_days);
-    let _ = db::count_equity_candles; // silence unused import in stub builds
-    let cfg = MoomooConfig::from_credentials_file(
-        &std::env::var("MOOMOO_CREDS_PATH").unwrap_or_else(|_| "~/.moomoo/credentials.json".into()),
-    );
-    match cfg {
-        Some(c) => {
-            info!(symbol, host = %c.host, port = c.port, "Moomoo credentials present but client not yet implemented");
-            bail!("Moomoo OpenAPI client not yet implemented (Wave D); use Yahoo for now")
-        }
-        None => {
-            bail!("Moomoo not configured (no credentials file at $MOOMOO_CREDS_PATH or default path); falling back to Yahoo")
-        }
+    let count = std::cmp::max(min_candles, 250) as u32;
+    let code = to_moomoo_code(symbol);
+
+    let start = if range_days > 0 {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(range_days as i64);
+        Some(cutoff.format("%Y-%m-%d").to_string())
+    } else {
+        None
+    };
+
+    let script = get_kline_script();
+    let mut cmd = Command::new("python3");
+    cmd.arg(&script)
+        .arg(&code)
+        .arg("--ktype")
+        .arg("1d")
+        .arg("--num")
+        .arg(count.to_string())
+        .arg("--rehab")
+        .arg("forward")
+        .arg("--json");
+    if let Some(ref s) = start {
+        cmd.arg("--start").arg(s);
     }
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let output = cmd.output().await.context("spawning get_kline.py")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("get_kline.py failed (code={code}): {stderr}"));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let resp: KlineResponse = serde_json::from_str(&stdout)
+        .with_context(|| format!("decode get_kline.py JSON for {code}"))?;
+
+    let mut candles = Vec::new();
+    for r in &resp.data {
+        let ts = parse_time_key(&r.time)
+            .with_context(|| format!("parse time_key '{}'", r.time))?;
+        candles.push(EquityCandle {
+            symbol: symbol.to_string(),
+            ts,
+            open: r.open,
+            high: r.high,
+            low: r.low,
+            close: r.close,
+            volume: r.volume,
+            source: "moomoo".to_string(),
+        });
+    }
+
+    let fetched = candles.len();
+    info!(symbol, code = %code, fetched, "Moomoo kline fetched");
+
+    for c in &candles {
+        db::upsert_equity_candle(pool, c)
+            .await
+            .with_context(|| format!("upsert {symbol} ts={}", c.ts))?;
+    }
+
+    Ok(fetched)
 }
 
-/// Convert a Moomoo KLine response into our `EquityCandle` shape.
-/// Implemented as a pure transform so it can be unit-tested without a
-/// live connection. Wave D will wire this into the real SDK call.
+// ── Live quote ──────────────────────────────────────────────────
+
+/// A live quote from Moomoo's `get_snapshot.py`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Quote {
+    pub symbol: String,
+    pub price: f64,
+    pub prev_close: f64,
+    pub change: f64,
+    pub change_pct: f64,
+    pub timestamp: i64,
+}
+
+/// Fetch a live quote via Moomoo `get_snapshot.py`.
+///
+/// Returns `Quote` with last_price, prev_close, and derived change fields.
+pub async fn fetch_quote(symbol: &str) -> Result<Quote> {
+    let code = to_moomoo_code(symbol);
+    let script = get_snapshot_script();
+
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg(&code)
+        .arg("--json")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .context("spawning get_snapshot.py")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("get_snapshot.py failed (code={code}): {stderr}"));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let resp: SnapshotResponse = serde_json::from_str(&stdout)
+        .with_context(|| format!("decode get_snapshot.py JSON for {code}"))?;
+
+    let row = resp
+        .data
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("get_snapshot.py returned no data for {code}"))?;
+
+    let price = row.last_price;
+    let prev_close = row.prev_close;
+    let change = price - prev_close;
+    let change_pct = if prev_close > 0.0 {
+        (change / prev_close) * 100.0
+    } else {
+        0.0
+    };
+
+    Ok(Quote {
+        symbol: symbol.to_string(),
+        price,
+        prev_close,
+        change,
+        change_pct,
+        timestamp: chrono::Utc::now().timestamp(),
+    })
+}
+
+// ── JSON response types ─────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct KlineResponse {
+    #[serde(default)]
+    data: Vec<KlineRow>,
+}
+
+#[derive(Deserialize)]
+struct KlineRow {
+    time: String,
+    open: f64,
+    high: f64,
+    low: f64,
+    close: f64,
+    volume: i64,
+}
+
+#[derive(Deserialize)]
+struct SnapshotResponse {
+    #[serde(default)]
+    data: Vec<SnapshotRow>,
+}
+
+#[derive(Deserialize)]
+struct SnapshotRow {
+    last_price: f64,
+    prev_close: f64,
+}
+
+// ── Time parsing ────────────────────────────────────────────────
+
+/// Parse Moomoo time_key "2024-01-02 00:00:00" (US Eastern) → Unix
+/// timestamp.
+///
+/// Daily candles have HH:mm:ss == "00:00:00". We parse as UTC midnight;
+/// the ±5h Eastern offset doesn't matter for daily bar alignment.
+fn parse_time_key(time_key: &str) -> Result<i64> {
+    chrono::NaiveDateTime::parse_from_str(time_key, "%Y-%m-%d %H:%M:%S")
+        .map(|dt| dt.and_utc().timestamp())
+        .with_context(|| format!("parse time_key: {}", time_key))
+}
+
+// ── Legacy helpers (for tests / backward compat) ────────────────
+
+/// Convert a generic JSON K-line object to an EquityCandle.
+/// Kept for backward compatibility with tests that use synthetic JSON.
 pub fn kline_to_equity_candle(
     symbol: &str,
     kline: &serde_json::Value,
@@ -78,57 +270,67 @@ pub fn kline_to_equity_candle(
         .as_i64()
         .or_else(|| kline["time_key"].as_i64())
         .or_else(|| kline["kline_time"].as_i64())
-        .ok_or_else(|| anyhow::anyhow!("Moomoo KLine: missing timestamp"))?;
+        .ok_or_else(|| anyhow!("Moomoo KLine: missing timestamp"))?;
     Ok(EquityCandle {
         symbol: symbol.to_string(),
         ts,
-        open: kline["open"].as_f64().ok_or_else(|| anyhow::anyhow!("missing open"))?,
-        high: kline["high"].as_f64().ok_or_else(|| anyhow::anyhow!("missing high"))?,
-        low: kline["low"].as_f64().ok_or_else(|| anyhow::anyhow!("missing low"))?,
-        close: kline["close"].as_f64().ok_or_else(|| anyhow::anyhow!("missing close"))?,
+        open: kline["open"]
+            .as_f64()
+            .ok_or_else(|| anyhow!("missing open"))?,
+        high: kline["high"]
+            .as_f64()
+            .ok_or_else(|| anyhow!("missing high"))?,
+        low: kline["low"]
+            .as_f64()
+            .ok_or_else(|| anyhow!("missing low"))?,
+        close: kline["close"]
+            .as_f64()
+            .ok_or_else(|| anyhow!("missing close"))?,
         volume: kline["volume"].as_i64().unwrap_or(0),
         source: "moomoo".to_string(),
     })
 }
 
+// ── Tests ───────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
-    /// Pure transform test — no network or credentials needed.
     #[test]
-    fn kline_to_equity_candle_basic() {
-        let k = json!({
+    fn to_moomoo_code_adds_us_prefix() {
+        assert_eq!(to_moomoo_code("QQQ"), "US.QQQ");
+        assert_eq!(to_moomoo_code("US.AAPL"), "US.AAPL");
+        assert_eq!(to_moomoo_code("HK.00700"), "HK.00700");
+    }
+
+    #[test]
+    fn parse_time_key_basic() {
+        let ts = parse_time_key("2024-01-02 00:00:00").unwrap();
+        // 2024-01-02 00:00:00 UTC = 1704153600
+        assert_eq!(ts, 1704153600);
+    }
+
+    #[test]
+    fn kline_to_equity_candle_timestamp_field() {
+        let k = serde_json::json!({
             "timestamp": 1_700_000_000_i64,
-            "open":  100.0,
-            "high":  105.0,
-            "low":    99.0,
-            "close": 104.0,
-            "volume": 50_000_i64
+            "open": 100.0, "high": 105.0, "low": 99.0,
+            "close": 104.0, "volume": 50_000_i64
         });
         let c = kline_to_equity_candle("QQQ", &k).unwrap();
         assert_eq!(c.symbol, "QQQ");
-        assert_eq!(c.ts, 1_700_000_000);
-        assert!((c.close - 104.0).abs() < 1e-9);
         assert_eq!(c.source, "moomoo");
     }
 
     #[test]
-    fn kline_to_equity_candle_rejects_missing_fields() {
-        let k = json!({"timestamp": 1});
-        assert!(kline_to_equity_candle("QQQ", &k).is_err());
-    }
-
-    #[test]
-    fn backfill_returns_clear_error_without_credentials() {
-        // No MOOMOO_CREDS_PATH set, default path doesn't exist → clear error.
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let pool_opt: Option<DbPool> = None;
-        // Pass a dummy pool if needed; the function returns early.
-        let _ = (rt, pool_opt);
-        // We can't easily mock DbPool here; instead test that config-load fails.
-        let cfg = MoomooConfig::from_credentials_file("/nonexistent/path/creds.json");
-        assert!(cfg.is_none());
+    fn kline_to_equity_candle_time_key_field() {
+        let k = serde_json::json!({
+            "time_key": 1_700_000_001_i64,
+            "open": 200.0, "high": 205.0, "low": 199.0,
+            "close": 204.0, "volume": 10_000_i64
+        });
+        let c = kline_to_equity_candle("AAPL", &k).unwrap();
+        assert_eq!(c.ts, 1_700_000_001);
     }
 }

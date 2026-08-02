@@ -1,7 +1,7 @@
 use axum::{extract::State, response::Json};
 use serde::Serialize;
 
-use crate::data::yahoo;
+use crate::data::{moomoo, yahoo};
 
 use super::{internal_error, ApiResult, AppState};
 
@@ -15,17 +15,41 @@ pub(crate) struct QuoteResponse {
     pub timestamp: i64,
 }
 
+/// GET /api/quote — Moomoo first, Yahoo fallback.
 pub(crate) async fn handle_quote(State(state): State<AppState>) -> ApiResult<QuoteResponse> {
-    let quote = yahoo::fetch_quote(&state.symbol)
+    let symbol = &state.symbol;
+
+    // Try Moomoo first, then fall back to Yahoo.
+    let moomoo_ok = moomoo::is_available().await;
+    if moomoo_ok {
+        match moomoo::fetch_quote(symbol).await {
+            Ok(q) => {
+                return Ok(Json(QuoteResponse {
+                    symbol: q.symbol,
+                    price: q.price,
+                    prev_close: q.prev_close,
+                    change: q.change,
+                    change_pct: q.change_pct,
+                    timestamp: q.timestamp,
+                }));
+            }
+            Err(e) => {
+                tracing::warn!(symbol, error = %e, "Moomoo quote failed — trying Yahoo");
+            }
+        }
+    }
+
+    // Fallback: Yahoo
+    let q = yahoo::fetch_quote(symbol)
         .await
         .map_err(|e| internal_error("fetch_quote", e))?;
 
     Ok(Json(QuoteResponse {
-        symbol: quote.symbol,
-        price: quote.price,
-        prev_close: quote.prev_close,
-        change: quote.change,
-        change_pct: quote.change_pct,
-        timestamp: quote.timestamp,
+        symbol: q.symbol,
+        price: q.price,
+        prev_close: q.prev_close,
+        change: q.change,
+        change_pct: q.change_pct,
+        timestamp: q.timestamp,
     }))
 }

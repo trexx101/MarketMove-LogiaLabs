@@ -1,53 +1,85 @@
+pub mod cboe;
 pub mod fred;
 pub mod moomoo;
+pub mod sentiment;
 pub mod yahoo;
 
 use anyhow::{Context, Result};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::db::DbPool;
 
-/// Symbols pulled from Yahoo Finance for the equities engine.
+/// Symbols pulled from Yahoo Finance / Moomoo for the equities engine.
 /// QQQ (the trade target) + key constituents + cross-asset ETFs.
 pub const EQUITY_SYMBOLS: &[&str] = &[
     "QQQ", "AAPL", "MSFT", "NVDA", "GOOG", "AMZN", "META", "TSLA", "TLT", "GLD", "UUP",
 ];
 
-/// Macro series sourced from FRED (stored in `equity_candles` with `$` prefixes).
+/// Macro series (stored in `equity_candles` with `$` prefixes).
+/// $VIX → CBOE (free, no auth). $UST10Y/$DXY → FRED JSON API.
 pub const MACRO_SYMBOLS: &[&str] = &["$VIX", "$UST10Y", "$DXY"];
 
 /// Backfill everything the Wave A engine needs: equity OHLCV + macro series.
+///
+/// **Data source routing (priority order):**
+/// 1. Equities: Moomoo OpenD → Yahoo Finance (fallback)
+/// 2. VIX:      CBOE CSV → Yahoo ^VIX (fallback)
+/// 3. Macro:    FRED JSON API v2 (DGS10, DTWEXBGS)
 ///
 /// Idempotent — each symbol respects its own min-candles gate in the clients,
 /// so re-running just tops up missing history. Errors from one symbol are
 /// logged and skipped (best-effort) so a single outage doesn't abort the rest.
 ///
-/// FRED is the primary macro source; Yahoo Finance `^VIX` is used as fallback
-/// for $VIX when FRED returns 0 rows (e.g. unreachable from VPS).
-///
 /// `stale_threshold_secs` controls the freshness gate passed to the Yahoo
-/// client. Startup uses 3 days (conservative — just needs enough history).
-/// Daily top-up uses 18h (daily bars close at 16:00 ET; anything older than
-/// 18h means yesterday's bar was missed).
+/// client (used as fallback). Startup uses 3 days; daily top-up uses 18h.
 pub async fn backfill_equities(pool: &DbPool, stale_threshold_secs: i64) -> Result<()> {
-    // Yahoo equity OHLCV — 5y of daily history is plenty for features + retrains.
-    let n_eq = yahoo::backfill_many(pool, EQUITY_SYMBOLS, 250, "5y", stale_threshold_secs).await?;
-    info!(rows = n_eq, "equity OHLCV backfill complete");
-
-    // FRED macro series — ~5y lookback cap.
-    let n_macro = fred::backfill_all_default_macros(pool, 5 * 365).await?;
-    info!(rows = n_macro, "macro series backfill complete");
-
-    // FRED fallback: if $VIX is empty (FRED unreachable), pull from Yahoo ^VIX.
-    // The VIX feature degrades to 0.0 without this, so it's worth the extra call.
-    let vix_count = crate::db::count_equity_candles(pool, "$VIX").await?;
-    if vix_count <= 1 {
-        info!(count = vix_count, "FRED $VIX missing/empty — fetching ^VIX from Yahoo as fallback");
-        match yahoo::backfill(pool, "^VIX", 1, "2y", stale_threshold_secs).await {
-            Ok(n) if n > 0 => info!(rows = n, "Yahoo ^VIX fallback loaded — $VIX macro features active"),
-            Ok(_) => debug!("Yahoo ^VIX returned 0 new rows (already up to date)"),
-            Err(e) => tracing::warn!(error = %e, "Yahoo ^VIX fallback failed — VIX features will be 0.0"),
+    // ── 1. Equity OHLCV: Moomoo first, Yahoo fallback ──────────
+    let moomoo_ok = moomoo::is_available().await;
+    if moomoo_ok {
+        info!("Moomoo OpenD reachable — using as primary equity source");
+        for s in EQUITY_SYMBOLS {
+            match moomoo::backfill(pool, s, 250, 5 * 365).await {
+                Ok(n) => info!(symbol = s, rows = n, "Moomoo backfill complete"),
+                Err(e) => {
+                    warn!(symbol = s, error = %e, "Moomoo backfill failed — trying Yahoo fallback");
+                    match yahoo::backfill(pool, s, 250, "5y", stale_threshold_secs).await {
+                        Ok(n) => info!(symbol = s, rows = n, "Yahoo fallback complete"),
+                        Err(e2) => warn!(symbol = s, error = %e2, "Yahoo fallback also failed"),
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
+    } else {
+        info!("Moomoo OpenD not reachable — using Yahoo for equities");
+        let n_eq = yahoo::backfill_many(
+            pool, EQUITY_SYMBOLS, 250, "5y", stale_threshold_secs,
+        )
+        .await?;
+        info!(rows = n_eq, "equity OHLCV backfill complete (Yahoo)");
+    }
+
+    // ── 2. VIX: CBOE (free, no auth, no rate limits) ──────────
+    match cboe::backfill_vix(pool, 5 * 365).await {
+        Ok(n) => info!(rows = n, "CBOE VIX backfill complete"),
+        Err(e) => {
+            warn!(error = %e, "CBOE VIX failed — trying Yahoo ^VIX fallback");
+            let vix_count = crate::db::count_equity_candles(pool, "$VIX").await?;
+            if vix_count <= 1 {
+                match yahoo::backfill(pool, "^VIX", 1, "2y", stale_threshold_secs).await {
+                    Ok(n) if n > 0 => info!(rows = n, "Yahoo ^VIX fallback loaded"),
+                    Ok(_) => debug!("Yahoo ^VIX returned 0 new rows"),
+                    Err(e2) => warn!(error = %e2, "Yahoo ^VIX fallback failed"),
+                }
+            }
+        }
+    }
+
+    // ── 3. Macro: FRED JSON API (DGS10, DTWEXBGS) ─────────────
+    let n_macro = fred::backfill_all_default_macros(pool, 5 * 365).await;
+    match n_macro {
+        Ok(n) => info!(rows = n, "macro series backfill complete (FRED JSON API)"),
+        Err(e) => warn!(error = %e, "FRED macro backfill failed"),
     }
 
     Ok(())

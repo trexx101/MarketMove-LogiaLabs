@@ -30,7 +30,9 @@ workspace root.
 | `MOOMOO_CREDS_PATH` | no | `~/.moomoo/credentials.json` | Moomoo OpenAPI credentials JSON. |
 | `MOOMOO_SECURITY_FIRM` | no | unset | Moomoo security firm (e.g. `FUTUSECURITIES`). |
 | `MOOMOO_ACC_ID` | no | unset | Account ID override (else the first available is picked). |
-| `FRED_API_KEY` | no | empty | FRED API key (optional; higher rate limit). |
+| `FRED_API_KEY` | no | empty | FRED API key (free — get at https://fred.stlouisfed.org/apikey). Required for treasury yields + DXY via JSON API v2. |
+| `FUTU_OPEND_HOST` | no | `127.0.0.1` | Moomoo OpenD gateway host. Use `host.docker.internal` inside Docker. |
+| `FUTU_OPEND_PORT` | no | `11111` | Moomoo OpenD TCP port. |
 | `TOTP_SECRET` | no | empty | Base32 TOTP secret for `/api/mode`. Empty → engine mints a fresh one and logs an `otpauth://` URL. |
 
 ## Inference (Python)
@@ -64,8 +66,13 @@ workspace root.
   when `LIVE_EXECUTOR=paper` (the default). To wire the Moomoo executor
   you must also set `LIVE_EXECUTOR=moomoo` AND provision Moomoo OpenD
   credentials on the host. See `deploy/README.md#going-live` step 3.
-- FRED macro series is unreachable from many VPS providers (the Akamai
-  edge hangs the SYN). The engine logs `connection timed out` for
-  `$VIX` / `$UST10Y` / `$DXY` and falls back to Yahoo `^VIX` for `$VIX`.
-  The two other series degrade to 0.0 in features. See
-  `engine/src/data/fred.rs` for the rationale.
+- **Data source routing (equities):** Moomoo OpenD first, Yahoo Finance fallback.
+  The engine auto-detects OpenD reachability at startup. Without OpenD it silently
+  falls back to Yahoo for equity OHLCV and live quotes with no degradation.
+- **VIX:** Sourced from CBOE (cdn.cboe.com — free, no auth, no rate limits).
+  Yahoo `^VIX` is the automatic fallback.
+- **Treasury yields + DXY:** FRED JSON API v2 (`api.stlouisfed.org`).
+  Requires `FRED_API_KEY` (free, 120 req/min). Fails gracefully to 0.0 without key.
+- **Market sentiment:** Phase 1 stub (always 0.5 neutral). Phase 2 wires Finnhub
+  `news_sentiment` (free tier 60 req/min). The `sentiment_cache` DB table is
+  ready now — the feature pipeline reads it regardless.

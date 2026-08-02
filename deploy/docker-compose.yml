@@ -109,6 +109,9 @@ services:
       PARITY_MARKER_PATH: /app/data/parity_verified.json
       PARITY_MAX_AGE_SECS: ${PARITY_MAX_AGE_SECS:-604800}
       RUST_LOG: ${RUST_LOG:-info}
+      FRED_API_KEY: 40c2d3ff0753ace706d75a9e8355ab63
+      FUTU_OPEND_HOST: ${FUTU_OPEND_HOST:-127.0.0.1}
+      FUTU_OPEND_PORT: ${FUTU_OPEND_PORT:-11111}
     networks:
       - mmn
     depends_on:

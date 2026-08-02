@@ -137,13 +137,13 @@
     gap: 1rem;
   }
 
-  .chart-area { grid-column: 1 / 2; }
-  .pnl-area { grid-column: 2 / 3; }
-  .status-area { grid-column: 3 / 4; }
-  .strategy-area { grid-column: 1 / 2; }
-  .feature-area { grid-column: 2 / 4; }
-  .health-area { grid-column: 1 / 2; }
-  .trade-area { grid-column: 2 / 4; }
+  .chart-area { grid-column: 1 / 3; }   /* spans 2 cols, 2/3 width */
+  .pnl-area { grid-column: 3 / 4; }     /* row 1 col 3 */
+  .status-area { grid-column: 1 / 2; }  /* row 2 col 1 */
+  .strategy-area { grid-column: 1 / 2; } /* row 3 col 1 */
+  .feature-area { grid-column: 2 / 4; } /* row 2 cols 2-3 */
+  .trade-area { grid-column: 2 / 4; }   /* row 3 cols 2-3 */
+  .health-area { grid-column: 1 / 4; }  /* row 4, full width */
 
   @media (max-width: 1024px) {
     .grid {

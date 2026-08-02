@@ -114,6 +114,16 @@ CREATE TABLE IF NOT EXISTS equity_ingest_state (
     PRIMARY KEY (source, symbol)
 );
 
+-- Sentiment cache (Phase 2: Finnhub). Stores daily aggregate sentiment for
+-- each equity symbol. Stub returns neutral 0.5 until Finnhub is wired.
+CREATE TABLE IF NOT EXISTS sentiment_cache (
+    symbol       TEXT    NOT NULL,
+    date         TEXT    NOT NULL,  -- YYYY-MM-DD
+    score        REAL    NOT NULL DEFAULT 0.5,  -- [-1, 1] — neg → pos
+    source       TEXT    NOT NULL DEFAULT 'stub',
+    PRIMARY KEY (symbol, date)
+);
+
 -- Control Room revamp: strategy configs, mode switches, advisor log, backtests.
 CREATE TABLE IF NOT EXISTS strategy_configs (
     id            TEXT    PRIMARY KEY,

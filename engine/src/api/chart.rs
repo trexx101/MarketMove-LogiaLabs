@@ -118,32 +118,9 @@ pub(crate) async fn handle_chart(
     let stale = candles.is_empty()
         || now_ts.saturating_sub(latest_ts) > 172_800; // 48 h
 
-    // Fetch live quote — this is the single most important price to get right.
+    // Fetch live quote — Moomoo first, Yahoo fallback.
     // It anchors the live-price dashed line and the prediction projections.
-    let live_quote = match crate::data::yahoo::fetch_quote(&state.symbol).await {
-        Ok(q) => {
-            tracing::debug!(
-                symbol = %state.symbol,
-                price = q.price,
-                change_pct = q.change_pct,
-                "live quote fetched"
-            );
-            Some(LiveQuote {
-                price: q.price,
-                prev_close: q.prev_close,
-                change: q.change,
-                change_pct: q.change_pct,
-            })
-        }
-        Err(e) => {
-            tracing::warn!(
-                symbol = %state.symbol,
-                error = %e,
-                "live quote fetch failed — chart will not show live price"
-            );
-            None
-        }
-    };
+    let live_quote = fetch_live_quote(&state.symbol).await;
 
     if candles.is_empty() && live_quote.is_none() {
         return Err((
@@ -194,5 +171,44 @@ fn equity_candle_to_dto(c: &db::EquityCandle) -> CandleDto {
         close: c.close,
         volume: c.volume as f64,
         vwap: c.close,
+    }
+}
+
+/// Fetch a live quote: Moomoo first, Yahoo fallback.
+async fn fetch_live_quote(symbol: &str) -> Option<LiveQuote> {
+    use crate::data::{moomoo, yahoo};
+
+    let moomoo_ok = moomoo::is_available().await;
+    if moomoo_ok {
+        match moomoo::fetch_quote(symbol).await {
+            Ok(q) => {
+                tracing::debug!(symbol, price = q.price, "Moomoo live quote");
+                return Some(LiveQuote {
+                    price: q.price,
+                    prev_close: q.prev_close,
+                    change: q.change,
+                    change_pct: q.change_pct,
+                });
+            }
+            Err(e) => {
+                tracing::warn!(symbol, error = %e, "Moomoo quote failed — trying Yahoo");
+            }
+        }
+    }
+
+    match yahoo::fetch_quote(symbol).await {
+        Ok(q) => {
+            tracing::debug!(symbol, price = q.price, "Yahoo live quote");
+            Some(LiveQuote {
+                price: q.price,
+                prev_close: q.prev_close,
+                change: q.change,
+                change_pct: q.change_pct,
+            })
+        }
+        Err(e) => {
+            tracing::warn!(symbol, error = %e, "Yahoo quote also failed");
+            None
+        }
     }
 }

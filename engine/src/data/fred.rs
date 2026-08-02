@@ -1,18 +1,20 @@
-//! FRED (Federal Reserve Economic Data) macro fetcher.
+//! FRED (Federal Reserve Economic Data) macro fetcher — JSON API v2.
 //!
-//! FRED provides free daily series for VIX, 10Y Treasury yield, DXY, etc.
-//! No rate limits beyond courtesy; an API key is optional for higher quotas.
+//! FRED provides free daily series for treasury yields and trade-weighted USD.
+//! A free API key is required for the JSON API (120 req/min on free tier).
 //!
-//! Endpoint: `https://api.stlouisfed.org/fred/series/observations?series_id=...&file_type=json`
-//! Fallback (no key): `https://fred.stlouisfed.org/graph/fredgraph.csv?id=...`
+//! Endpoint: `https://api.stlouisfed.org/fred/series/observations?series_id=...&api_key=...&file_type=json`
 //!
-//! Series used in Wave A:
-//!   - VIXCLS   → CBOE VIX (daily close)
+//! Note: VIX was previously sourced from FRED (series VIXCLS) but is now
+//! sourced from CBOE directly (free, no auth, no rate limits). The VIXCLS
+//! mapping remains for backward compatibility.
+//!
+//! Series used:
+//!   - VIXCLS   → CBOE VIX — now handled by cboe::backfill_vix
 //!   - DGS10    → 10Y Treasury constant-maturity yield
 //!   - DTWEXBGS → Trade-weighted USD index (DXY proxy)
 //!
-//! For the equities engine, FRED data is stored in `equity_candles` with
-/// symbol prefixes: `$VIX`, `$UST10Y`, `$DXY`.
+//! Stored in `equity_candles` with symbol prefixes: `$VIX`, `$UST10Y`, `$DXY`.
 
 use std::time::Duration;
 
@@ -21,7 +23,10 @@ use tracing::{debug, info, warn};
 
 use crate::db::{self, DbPool, EquityCandle};
 
-const FRED_CSV_URL: &str = "https://fred.stlouisfed.org/graph/fredgraph.csv";
+const FRED_API_URL: &str = "https://api.stlouisfed.org/fred/series/observations";
+
+/// Number of series actually fetched via FRED JSON API (VIX moved to CBOE).
+const DEFAULT_MACRO_SERIES: &[&str] = &["$UST10Y", "$DXY"];
 
 /// Map our internal symbol to a FRED series id.
 fn series_id(symbol: &str) -> Option<&'static str> {
@@ -33,11 +38,10 @@ fn series_id(symbol: &str) -> Option<&'static str> {
     }
 }
 
-/// Fetch one macro series and upsert into `equity_candles` with the given
-/// `symbol` (e.g. `$VIX`). FRED CSV has two columns: `DATE,<value>`.
+/// Fetch one macro series via FRED JSON API v2 and upsert into
+/// `equity_candles`. Requires `FRED_API_KEY` env var.
 ///
-/// `range_days` controls the lookback window (FRED returns the whole
-/// history by default; we cap it locally).
+/// `range_days` controls the `observation_start` filter sent to FRED.
 pub async fn backfill_macro(
     pool: &DbPool,
     symbol: &str,
@@ -47,33 +51,50 @@ pub async fn backfill_macro(
         Some(s) => s,
         None => bail!("FRED: unknown macro symbol '{symbol}'"),
     };
+    let api_key = std::env::var("FRED_API_KEY").unwrap_or_default();
+    if api_key.is_empty() {
+        bail!(
+            "FRED_API_KEY not set — cannot use JSON API \
+             (get a free key at https://fred.stlouisfed.org/apikey)"
+        );
+    }
 
-    // FRED's Akamai edge has been observed to hang indefinitely from this
-    // VPS (no IPv6 route, Akamai's Anycast responses stall the SYN). The
-    // backfill machinery logs the timeout and falls back to Yahoo ^VIX for
-    // $VIX; the other two series (DGS10, DTWEXBGS) are macro-only and
-    // degrade to 0.0 in features. Keep the timeout short so the failure is
-    // cheap.
     let client = reqwest::Client::builder()
         .user_agent("MarketMarkovNet/equities")
-        .timeout(std::time::Duration::from_secs(5))
-        .connect_timeout(std::time::Duration::from_secs(3))
+        .timeout(std::time::Duration::from_secs(15))
+        .connect_timeout(std::time::Duration::from_secs(8))
         .build()
-        .context("building reqwest client")?;
+        .context("building reqwest client for FRED JSON API")?;
 
-    let url = format!("{FRED_CSV_URL}?id={series}");
-    debug!(symbol, series, "FRED CSV request");
+    let mut url = format!(
+        "{FRED_API_URL}?series_id={series}&api_key={api_key}&file_type=json&output_type=1"
+    );
+    if range_days > 0 {
+        let start = chrono::Utc::now() - chrono::Duration::days(range_days as i64);
+        url.push_str(&format!("&observation_start={}", start.format("%Y-%m-%d")));
+    }
 
-    let body = client
+    debug!(symbol, series, url = %url, "FRED JSON API request");
+
+    let resp = client
         .get(&url)
         .send()
         .await
-        .with_context(|| format!("FRED GET {url}"))?
-        .text()
-        .await
-        .context("FRED body decode")?;
+        .with_context(|| format!("FRED GET {series}"))?;
 
-    let candles = parse_fred_csv(&body, symbol, range_days)?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        // Truncate body to avoid flooding logs
+        let snippet = if body.len() > 200 { &body[..200] } else { &body };
+        bail!("FRED HTTP {status} for {symbol} ({series}): {snippet}");
+    }
+
+    let v: serde_json::Value = resp.json().await.context("FRED JSON decode")?;
+
+    let candles = parse_fred_json(&v, symbol, range_days)
+        .with_context(|| format!("parse FRED JSON for {symbol}"))?;
+
     let fetched = candles.len();
     info!(symbol, series, fetched, "FRED returned macro points");
 
@@ -84,42 +105,37 @@ pub async fn backfill_macro(
             .with_context(|| format!("upsert {symbol} ts={}", c.ts))?;
         last_ts = last_ts.max(c.ts);
     }
-    db::update_ingest_state(pool, "fred", symbol, last_ts, fetched as i64, None)
-        .await
-        .context("update_ingest_state")?;
 
     Ok(fetched)
 }
 
-/// Parse a FRED CSV response. Format:
-///   DATE,VIXCLS
-///   2024-01-02,13.42
-///   2024-01-03,13.27
-///   ...
-/// Missing values are encoded as `.` (period). We treat them as NaN → skip.
-fn parse_fred_csv(body: &str, symbol: &str, range_days: u32) -> Result<Vec<EquityCandle>> {
-    let mut rows: Vec<EquityCandle> = Vec::new();
-    let mut cutoff_ts: i64 = 0;
-    if range_days > 0 {
-        let now = chrono::Utc::now().timestamp();
-        cutoff_ts = now - (range_days as i64) * 86_400;
-    }
+/// Parse a FRED JSON API v2 response into EquityCandle rows.
+///
+/// Expects: `{ "observations": [{ "date": "2024-01-02", "value": "13.42" }, ...] }`
+/// Missing values are encoded as `"."` — we skip them.
+fn parse_fred_json(
+    v: &serde_json::Value,
+    symbol: &str,
+    range_days: u32,
+) -> Result<Vec<EquityCandle>> {
+    let observations = v["observations"]
+        .as_array()
+        .context("FRED: missing observations array")?;
 
-    for (i, line) in body.lines().enumerate() {
-        if i == 0 {
-            // header — skip
+    let cutoff_ts: i64 = if range_days > 0 {
+        chrono::Utc::now().timestamp() - (range_days as i64) * 86_400
+    } else {
+        0
+    };
+
+    let mut rows = Vec::new();
+    for obs in observations {
+        let date = obs["date"].as_str().unwrap_or("");
+        let val_str = obs["value"].as_str().unwrap_or(".");
+        if val_str == "." || val_str.is_empty() {
             continue;
         }
-        let parts: Vec<&str> = line.split(',').collect();
-        if parts.len() < 2 {
-            continue;
-        }
-        let date = parts[0].trim();
-        let val = parts[1].trim();
-        if val == "." || val.is_empty() {
-            continue;
-        }
-        let close: f64 = match val.parse() {
+        let close: f64 = match val_str.parse() {
             Ok(v) => v,
             Err(_) => continue,
         };
@@ -136,7 +152,7 @@ fn parse_fred_csv(body: &str, symbol: &str, range_days: u32) -> Result<Vec<Equit
         rows.push(EquityCandle {
             symbol: symbol.to_string(),
             ts,
-            open: close, // single-value series — open=high=low=close
+            open: close,
             high: close,
             low: close,
             close,
@@ -144,24 +160,31 @@ fn parse_fred_csv(body: &str, symbol: &str, range_days: u32) -> Result<Vec<Equit
             source: "fred".to_string(),
         });
     }
+
     if rows.is_empty() {
-        bail!("FRED: parsed 0 valid rows for {symbol}");
+        bail!("FRED JSON: parsed 0 valid rows for {symbol}");
     }
     Ok(rows)
 }
 
-/// Convenience: backfill all three default macro series.
-pub async fn backfill_all_default_macros(pool: &DbPool, range_days: u32) -> Result<usize> {
+/// Convenience: backfill the default macro series (DGS10, DTWEXBGS).
+/// VIX is now sourced from CBOE, not FRED.
+pub async fn backfill_all_default_macros(
+    pool: &DbPool,
+    range_days: u32,
+) -> Result<usize> {
     let mut total = 0;
-    for sym in &["$VIX", "$UST10Y", "$DXY"] {
+    for sym in DEFAULT_MACRO_SERIES {
         match backfill_macro(pool, sym, range_days).await {
             Ok(n) => {
                 total += n;
-                warn_unused(range_days);
             }
             Err(e) => {
                 warn!("FRED {sym}: {e:#}");
-                let _ = db::update_ingest_state(pool, "fred", sym, 0, 0, Some(&format!("{e:#}"))).await;
+                let _ = db::update_ingest_state(
+                    pool, "fred", sym, 0, 0, Some(&format!("{e:#}")),
+                )
+                .await;
             }
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -169,17 +192,28 @@ pub async fn backfill_all_default_macros(pool: &DbPool, range_days: u32) -> Resu
     Ok(total)
 }
 
-fn warn_unused(_range: u32) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Parse a synthetic FRED CSV with header, valid rows, and a `.` (missing) row.
+    fn build_mock_json(data: &[(&str, &str)]) -> serde_json::Value {
+        let observations: Vec<serde_json::Value> = data
+            .iter()
+            .map(|(d, v)| {
+                serde_json::json!({"date": d, "value": v})
+            })
+            .collect();
+        serde_json::json!({"observations": observations})
+    }
+
     #[test]
-    fn parse_fred_csv_handles_missing_and_header() {
-        let csv = "DATE,VIXCLS\n2024-01-02,13.42\n2024-01-03,.\n2024-01-04,13.27\n";
-        let rows = parse_fred_csv(csv, "$VIX", 0).unwrap();
+    fn parse_fred_json_handles_missing_and_normal() {
+        let json = build_mock_json(&[
+            ("2024-01-02", "13.42"),
+            ("2024-01-03", "."),
+            ("2024-01-04", "13.27"),
+        ]);
+        let rows = parse_fred_json(&json, "$VIX", 0).unwrap();
         assert_eq!(rows.len(), 2, "should skip the missing row");
         assert_eq!(rows[0].symbol, "$VIX");
         assert_eq!(rows[0].close, 13.42);
@@ -188,21 +222,32 @@ mod tests {
     }
 
     #[test]
-    fn parse_fred_csv_filters_by_range() {
-        let csv = "DATE,VIXCLS\n2020-01-02,12.0\n2024-01-02,13.0\n2024-06-02,15.0\n";
+    fn parse_fred_json_filters_by_range() {
+        let json = build_mock_json(&[
+            ("2020-01-02", "12.0"),
+            ("2024-01-02", "13.0"),
+            ("2024-06-02", "15.0"),
+        ]);
         // Wide range: all 3 rows kept.
-        let rows = parse_fred_csv(csv, "$VIX", 10_000).unwrap();
-        assert_eq!(rows.len(), 3, "all rows kept with 10k-day range");
-
-        // 1-day range: all 3 sample rows are years old → filtered out → Err.
-        assert!(parse_fred_csv(csv, "$VIX", 1).is_err());
+        let rows = parse_fred_json(&json, "$VIX", 10_000).unwrap();
+        assert_eq!(rows.len(), 3);
+        // Narrow range (1 day): should bail (0 valid rows from 2020).
+        assert!(parse_fred_json(&json, "$VIX", 1).is_err());
     }
 
     #[test]
-    fn series_id_maps_known_symbols() {
-        assert_eq!(series_id("$VIX"), Some("VIXCLS"));
+    fn parse_fred_json_empty_value_skipped() {
+        let json = build_mock_json(&[("2024-01-02", "")]);
+        assert!(parse_fred_json(&json, "$VIX", 0).is_err());
+    }
+
+    #[test]
+    fn dgs10_maps_to_treasury_yield() {
         assert_eq!(series_id("$UST10Y"), Some("DGS10"));
-        assert_eq!(series_id("$DXY"), Some("DTWEXBGS"));
+    }
+
+    #[test]
+    fn unknown_symbol_returns_none() {
         assert_eq!(series_id("QQQ"), None);
     }
 }

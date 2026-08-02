@@ -288,6 +288,8 @@
     }
 
     // ── Live price line ────────────────────────────────────────────────────
+    // Dashed horizontal line only — price text is shown in the DOM badge above
+    // to avoid triplicating it with the badge + top-left canvas text.
     if (livePrice != null) {
       const liveY = yScale(livePrice);
       ctx.setLineDash([4, 3]);
@@ -298,21 +300,6 @@
       ctx.lineTo(w - padR, liveY);
       ctx.stroke();
       ctx.setLineDash([]);
-
-      // Badge
-      const badge = `${livePrice.toFixed(2)}`;
-      const bw = ctx.measureText(badge).width + 8;
-      const bx = w - padR - bw - 2;
-      const by = liveY - 10;
-      ctx.fillStyle = '#7132f5';
-      ctx.beginPath();
-      ctx.roundRect(bx, by, bw, 16, 3);
-      ctx.fill();
-      ctx.fillStyle = '#ffffff';
-      ctx.font = 'bold 10px monospace';
-      ctx.textAlign = 'left';
-      ctx.fillText(badge, bx + 4, by + 11);
-      ctx.textAlign = 'left';
     }
 
     // ── Prediction cones (from live price or last close) ───────────────────
@@ -360,16 +347,6 @@
         ctx.fill();
       }
       ctx.setLineDash([]);
-    }
-
-    // ── Header overlay: live price badge ───────────────────────────────────
-    if (livePrice != null) {
-      ctx.font = '11px Inter, sans-serif';
-      ctx.fillStyle = '#ececf1';
-      ctx.textAlign = 'left';
-      ctx.fillText('QQQ', padL, 12);
-      ctx.font = 'bold 12px Inter, sans-serif';
-      ctx.fillText(livePrice.toFixed(2), padL + 32, 12);
     }
   }
 </script>

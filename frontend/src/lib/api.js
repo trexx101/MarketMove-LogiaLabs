@@ -22,10 +22,13 @@ export async function fetchPredictions() {
 
 /**
  * Fetch chart data (candles + SMA).
+ * Default 90 daily candles (~6 months) so prediction cones have room to render.
+ * Pass a different limit (10-1500) to widen/narrow the window.
+ * @param {number} [limit=90] Number of candles to fetch
  * @returns {Promise<object>} ChartResponse
  */
-export async function fetchChart() {
-  const res = await fetch(`${API_BASE}/chart`);
+export async function fetchChart(limit = 90) {
+  const res = await fetch(`${API_BASE}/chart?limit=${limit}`);
   if (!res.ok) throw new Error(`chart: ${res.status}`);
   return res.json();
 }
