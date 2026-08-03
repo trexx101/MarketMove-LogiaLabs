@@ -1,3 +1,4 @@
+pub mod advisor;
 pub mod api;
 pub mod bridge;
 pub mod config;

@@ -1,3 +1,4 @@
+mod advisor;
 mod api;
 mod bridge;
 mod config;
@@ -134,6 +135,13 @@ async fn main() {
         process::exit(1);
     }
 
+    // Seed sentiment cache (Phase 4 — Finnhub). Runs at startup so the
+    // advisor has sentiment data available from day one. Falls back to
+    // stub if FINNHUB_API_KEY is missing.
+    if let Err(e) = data::sentiment::seed_sentiment_cache(&pool, data::EQUITY_SYMBOLS).await {
+        eprintln!("sentiment seed warning: {:#}", e);
+    }
+
     // Warn if the primary symbol's latest candle is significantly behind.
     // A weekend gap is expected (no trading); anything beyond ~3 calendar days
     // at startup indicates a prior data-fetch failure.
@@ -198,6 +206,29 @@ async fn main() {
     let llm_cfg = features::llm::LlmRegimeConfig::from_env();
     features::llm::spawn_regime_cache_task(llm_cfg).await;
 
+    // Phase 4: Advisor — daily pre-market briefing task.
+    let advisor_cfg = advisor::AdvisorConfig::from_env(&cfg);
+    let advisor_state = if advisor_cfg.is_enabled() {
+        let state = std::sync::Arc::new(advisor::AdvisorState::new(advisor_cfg, tx.clone()));
+        let briefing_pool = pool.clone();
+        let briefing_symbol = cfg.symbol.clone();
+        let briefing_state = state.clone();
+        let notify = state.notify.clone();
+        tokio::spawn(async move {
+            advisor::briefing::run_briefing_loop(
+                briefing_state,
+                briefing_pool,
+                briefing_symbol,
+                notify,
+            ).await;
+        });
+        info!("advisor background task started");
+        Some(state)
+    } else {
+        info!("advisor disabled — no OPENROUTER_API_KEY or config");
+        None
+    };
+
     // Spawn the hourly actuals-computation task. Runs every hour with a 5-min
     // initial delay so it doesn't race the first scheduler tick. Follows the
     // same pattern as the retention task in engine/src/data/mod.rs.
@@ -220,7 +251,7 @@ async fn main() {
     // so the API endpoint can verify submitted codes.
     let mut cfg_for_api = cfg.clone();
     cfg_for_api.totp_secret = totp_secret.clone();
-    let app = api::router(pool.clone(), &cfg_for_api, tx);
+    let app = api::router(pool.clone(), &cfg_for_api, tx, advisor_state);
     let bind_addr = format!("0.0.0.0:{}", cfg.http_port);
     match tokio::net::TcpListener::bind(&bind_addr).await {
         Ok(listener) => {

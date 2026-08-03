@@ -2,6 +2,7 @@
   import Dashboard from './views/Dashboard.svelte';
   import Ledger from './views/Ledger.svelte';
   import StrategyLab from './views/StrategyLab.svelte';
+  import Advisor from './views/Advisor.svelte';
   import { status } from './lib/stores.js';
 
   let currentView = 'dashboard';
@@ -34,7 +35,7 @@
   <nav class="sidebar" class:open={sidebarOpen}>
     <div class="logo">
       <span class="logo-mark">M</span>
-      <span class="logo-text">MarketMoves</span>
+      <span class="logo-text">MM - By LogiaLabs</span>
     </div>
     <ul>
       <li>
@@ -96,10 +97,7 @@
     {:else if currentView === 'ledger'}
       <Ledger />
     {:else if currentView === 'advisor'}
-      <div class="placeholder">
-        <h1>AI Advisor</h1>
-        <p>Coming in Phase 4.</p>
-      </div>
+      <Advisor />
     {/if}
   </main>
 </div>

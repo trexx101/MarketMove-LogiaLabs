@@ -47,6 +47,7 @@ fn test_state(pool: db::DbPool) -> State<AppState> {
         totp_secret: String::new(),
         zmq_endpoint: "tcp://127.0.0.1:5555".to_string(),
         norm_stats_path: String::new(),
+        advisor: None,
     })
 }
 
@@ -253,6 +254,7 @@ async fn router_serves_static_files_and_api() {
             parity_max_age_secs: 7 * 24 * 60 * 60,
             moomoo_creds_path: "~/.moomoo/credentials.json".to_string(),
             fred_api_key: "".to_string(),
+            finnhub_api_key: "".to_string(),
             live_executor: "paper".to_string(),
             moomoo_trd_env: "SIMULATE".to_string(),
             totp_secret: String::new(),
@@ -260,7 +262,7 @@ async fn router_serves_static_files_and_api() {
 
         let app = {
             let (tx, _rx) = tokio::sync::broadcast::channel(64);
-            router(pool, &config, tx)
+            router(pool, &config, tx, None)
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

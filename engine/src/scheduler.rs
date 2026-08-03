@@ -270,8 +270,6 @@ impl EquityScheduler {
             sma,
         ).await?;
 
-        db::save_position(&self.pool, new_pos.as_i64()).await?;
-
         if new_pos != current_pos {
             // Phase 3.4: read the current trading mode + executor at the start
             // of the trade. The runtime mode-toggle can swap either between
@@ -296,6 +294,9 @@ impl EquityScheduler {
                                     "equity trade executed"
                                 );
                             }
+
+                            // Commit position only after trade record succeeds.
+                            db::save_position(&self.pool, new_pos.as_i64()).await?;
 
                             // Publish PnL tick after trade execution.
                             if let Some(tx) = &self.tx {
@@ -336,6 +337,9 @@ impl EquityScheduler {
                                     "equity LIVE trade executed"
                                 );
                             }
+
+                            // Commit position only after trade record succeeds.
+                            db::save_position(&self.pool, new_pos.as_i64()).await?;
                             if let Some(tx) = &self.tx {
                                 let _ = tx.send(TelemetryEvent::PnlTick {
                                     realized_pnl: total_pnl,

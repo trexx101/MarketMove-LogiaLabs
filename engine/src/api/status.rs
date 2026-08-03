@@ -1,12 +1,33 @@
 use axum::{extract::State, response::Json};
 use serde::Serialize;
 
-use crate::{db, features::equities_v2, market_hours::MarketState, strategy};
+use crate::api::{internal_error, ApiResult};
+use crate::db::{self, DbPool};
+use crate::strategy;
+use crate::api::AppState;
 
-use super::{internal_error, ts_to_rfc3339, ApiResult, AppState};
+#[derive(Debug, Serialize)]
+pub struct StatusResponse {
+    pub mode: String,
+    pub symbol: String,
+    pub position: String,
+    pub entry_price: f64,
+    pub realized_pnl: f64,
+    pub unrealized_pnl: f64,
+    pub last_candle_ts: Option<String>,
+    pub last_close: f64,
+    pub pred_1d: Option<f64>,
+    pub pred_5d: Option<f64>,
+    pub pred_21d: Option<f64>,
+    pub pred_1h_approx: Option<f64>,
+    pub pred_5h_approx: Option<f64>,
+    pub staleness_secs: u64,
+    pub sma_200: Option<f64>,
+    pub strategy: StrategySnapshot,
+}
 
-#[derive(Serialize)]
-pub(crate) struct StrategyInfo {
+#[derive(Debug, Serialize)]
+pub struct StrategySnapshot {
     pub entry_threshold: f64,
     pub exit_threshold: f64,
     pub sma_window: usize,
@@ -16,32 +37,15 @@ pub(crate) struct StrategyInfo {
     pub short_exit_threshold: f64,
 }
 
-#[derive(Serialize)]
-pub(crate) struct StatusResponse {
-    pub mode: String,
-    pub symbol: String,
-    pub position: String,
-    pub entry_price: Option<f64>,
-    pub realized_pnl: f64,
-    pub unrealized_pnl: Option<f64>,
-    pub last_candle_ts: Option<String>,
-    pub last_close: Option<f64>,
-    pub pred_1d: Option<f64>,
-    pub pred_5d: Option<f64>,
-    pub pred_21d: Option<f64>,
-    pub pred_1h_approx: Option<f64>,
-    pub pred_5h_approx: Option<f64>,
-    pub staleness_secs: u64,
-    pub sma_200: Option<f64>,
-    pub strategy: StrategyInfo,
-}
-
-pub(crate) async fn handle_market_state() -> Json<MarketState> {
-    Json(crate::market_hours::market_state(chrono::Utc::now().timestamp()))
-}
-
-pub(crate) async fn handle_status(State(state): State<AppState>) -> ApiResult<StatusResponse> {
+pub(crate) async fn handle_status(
+    State(state): State<AppState>,
+) -> ApiResult<StatusResponse> {
     let pool = &state.pool;
+
+    let mode = {
+        let mode_lock = state.trading_mode.read().await;
+        format!("{:?}", *mode_lock).to_lowercase()
+    };
 
     let position_raw = db::load_position(pool)
         .await
@@ -57,21 +61,49 @@ pub(crate) async fn handle_status(State(state): State<AppState>) -> ApiResult<St
         .map_err(|e| internal_error("fetch_latest_equity_candle", e))?;
 
     let (entry_price, unrealized_pnl) = match position {
-        strategy::Position::Flat => (None, None),
-        strategy::Position::Long | strategy::Position::Short => {
-            let entry = db::fetch_entry_trade_price(pool)
+        strategy::Position::Flat => (0.0, 0.0),
+        strategy::Position::Long => {
+            let entry = db::fetch_equity_entry_trade_price(pool, &state.symbol)
                 .await
-                .map_err(|e| internal_error("fetch_entry_trade_price", e))?;
-            let last_close = candle.as_ref().map(|c| c.close);
-            let unrealized = match (entry, last_close) {
-                (Some(ep), Some(lc)) => match position {
-                    strategy::Position::Long => Some((lc - ep) * 1.0),
-                    strategy::Position::Short => Some((ep - lc) * 1.0),
-                    strategy::Position::Flat => None,
-                },
-                _ => None,
+                .map_err(|e| internal_error("fetch_equity_entry_trade_price", e))?;
+            let last_close = candle.as_ref().map(|c| c.close).unwrap_or(0.0);
+            let unrealized = match entry {
+                Some(ep) => (last_close - ep) * 1.0,
+                None => 0.0,
             };
-            (entry, unrealized)
+            (entry.unwrap_or(0.0), unrealized)
+        }
+        strategy::Position::Short => {
+            // Short via inverse ETF (PSQ). The paper executor records PSQ entry
+            // at its actual market price, but exits use the QQQ close passed by
+            // the scheduler. We scale QQQ close into PSQ price space using the
+            // PSQ/QQQ ratio observed at entry time.
+            let psq_entry = db::fetch_equity_entry_trade_price(pool, &state.short_symbol)
+                .await
+                .map_err(|e| internal_error("fetch_equity_entry_trade_price(psq)", e))?;
+            let entry_ts = db::fetch_equity_entry_trade_ts(pool, &state.short_symbol)
+                .await
+                .map_err(|e| internal_error("fetch_equity_entry_trade_ts", e))?;
+            let last_close = candle.as_ref().map(|c| c.close).unwrap_or(0.0);
+            let unrealized = match (psq_entry, entry_ts) {
+                (Some(psq_ep), Some(ets)) => {
+                    let qqq_at_entry = db::fetch_equity_close_at_ts(pool, &state.symbol, ets)
+                        .await
+                        .map_err(|e| internal_error("fetch_equity_close_at_ts", e))?;
+                    match qqq_at_entry {
+                        Some(qqq_ep) if qqq_ep > 0.0 => {
+                            // PSQ is an inverse ETF (~-1x QQQ daily), so
+                            // PSQ_return ≈ -(QQQ_return).
+                            // PnL ≈ PSQ_entry * (QQQ_current / QQQ_entry - 1).
+                            // Positive when QQQ rose (short loses), negative when QQQ fell (short wins).
+                            psq_ep * (last_close / qqq_ep - 1.0)
+                        }
+                        _ => 0.0,
+                    }
+                }
+                _ => 0.0,
+            };
+            (psq_entry.unwrap_or(0.0), unrealized)
         }
     };
 
@@ -87,52 +119,69 @@ pub(crate) async fn handle_status(State(state): State<AppState>) -> ApiResult<St
             let now = chrono::Utc::now().timestamp();
             now.saturating_sub(ts).max(0) as u64
         }
-        None => u64::MAX,
+        None => 0,
     };
 
-    let sma_200 = {
-        let closes: Option<Vec<f64>> = if candle.is_some() {
-            db::fetch_equity_candles_desc(&state.pool, &state.symbol, 200)
-                .await
-                .map(|rows| rows.into_iter().map(|c| c.close).collect())
-                .ok()
-        } else {
-            None
-        };
-        closes
-            .and_then(|c| equities_v2::rolling_sma(&c, 200).into_iter().last())
-            .filter(|&v| v.is_finite())
+    // SMA for regime display
+    let (_sma, sma_valid) = {
+        let params = state.strategy_params.read().await;
+        let closes = candle.as_ref()
+            .map(|_| vec![candle.as_ref().unwrap().close])
+            .unwrap_or_default();
+        strategy::compute_sma(&closes, params.sma_window)
     };
 
-    // Phase 3.4: trading mode lives behind an Arc<RwLock<_>> for the runtime
-    // toggle. Read briefly to render the current value.
-    let mode = *state.trading_mode.read().await;
-    let sp = state.strategy_params.read().await;
+    // Fetch closes for proper SMA
+    let sma_window = state.strategy_params.read().await.sma_window;
+    let chart_data = db::fetch_equity_candles_asc(pool, &state.symbol, sma_window as i64)
+        .await
+        .map_err(|e| internal_error("fetch_equity_candles_asc", e))?;
+    let closes: Vec<f64> = chart_data.iter().map(|c| c.close).collect();
+    let (sma, sma_valid) = strategy::compute_sma(&closes, sma_window);
+
+    let strategy_snapshot = {
+        let params = state.strategy_params.read().await;
+        StrategySnapshot {
+            entry_threshold: params.entry_threshold,
+            exit_threshold: params.exit_threshold,
+            sma_window: params.sma_window,
+            pred_5d_filter: params.pred_5d_filter,
+            enable_shorting: params.enable_shorting,
+            short_entry_threshold: params.short_entry_threshold,
+            short_exit_threshold: params.short_exit_threshold,
+        }
+    };
+
+    // Approximate shorter-horizon predictions.
+    let (pred_1h_approx, pred_5h_approx) = match &latest_pred {
+        Some(p) => (
+            Some(p.pred_1d / 24.0),
+            Some(p.pred_5d / 24.0 * 5.0),
+        ),
+        None => (None, None),
+    };
 
     Ok(Json(StatusResponse {
-        mode: mode.to_string(),
-        symbol: state.symbol.clone(),
+        mode,
         position: position.to_string(),
+        symbol: state.symbol.clone(),
         entry_price,
-        realized_pnl,
         unrealized_pnl,
-        last_candle_ts: candle.as_ref().map(|c| ts_to_rfc3339(c.ts)),
-        last_close: candle.as_ref().map(|c| c.close),
+        realized_pnl,
+        last_candle_ts: candle.as_ref().map(|c| crate::api::ts_to_rfc3339(c.ts)),
+        last_close: candle.as_ref().map(|c| c.close).unwrap_or(0.0),
         pred_1d: latest_pred.as_ref().map(|p| p.pred_1d),
         pred_5d: latest_pred.as_ref().map(|p| p.pred_5d),
         pred_21d: latest_pred.as_ref().map(|p| p.pred_21d),
-        pred_1h_approx: latest_pred.as_ref().map(|p| p.pred_1d / 6.5),
-        pred_5h_approx: latest_pred.as_ref().map(|p| p.pred_1d * (5.0 / 6.5)),
+        pred_1h_approx,
+        pred_5h_approx,
         staleness_secs,
-        sma_200,
-        strategy: StrategyInfo {
-            entry_threshold: sp.entry_threshold,
-            exit_threshold: sp.exit_threshold,
-            sma_window: sp.sma_window,
-            pred_5d_filter: sp.pred_5d_filter,
-            enable_shorting: sp.enable_shorting,
-            short_entry_threshold: sp.short_entry_threshold,
-            short_exit_threshold: sp.short_exit_threshold,
-        },
+        sma_200: if sma_valid { Some(sma) } else { None },
+        strategy: strategy_snapshot,
     }))
+}
+
+/// Return the current market state (open / pre-market / closed / weekend).
+pub(crate) async fn handle_market_state() -> Json<crate::market_hours::MarketState> {
+    Json(crate::market_hours::market_state(chrono::Utc::now().timestamp()))
 }

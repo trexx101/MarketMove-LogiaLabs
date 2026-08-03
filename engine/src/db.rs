@@ -121,6 +121,8 @@ CREATE TABLE IF NOT EXISTS sentiment_cache (
     date         TEXT    NOT NULL,  -- YYYY-MM-DD
     score        REAL    NOT NULL DEFAULT 0.5,  -- [-1, 1] — neg → pos
     source       TEXT    NOT NULL DEFAULT 'stub',
+    buzz         INTEGER NOT NULL DEFAULT 0,     -- articles in last week
+    weekly_avg   REAL    NOT NULL DEFAULT 0.0,   -- Finnhub weeklyAverage
     PRIMARY KEY (symbol, date)
 );
 
@@ -135,6 +137,33 @@ CREATE TABLE IF NOT EXISTS strategy_configs (
     created_at    INTEGER NOT NULL,
     updated_at    INTEGER NOT NULL
 );
+
+-- Phase 4: Advisor briefing log. One row per successful or attempted briefing.
+CREATE TABLE IF NOT EXISTS advisor_briefing_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           INTEGER NOT NULL,
+    for_date     TEXT    NOT NULL,
+    model_used   TEXT    NOT NULL,
+    context_hash TEXT    NOT NULL,
+    context_json TEXT    NOT NULL,
+    briefing_json TEXT   NOT NULL,
+    parse_status TEXT    NOT NULL,
+    latency_ms   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS advisor_briefing_log_date_idx
+    ON advisor_briefing_log (for_date DESC);
+
+-- Phase 4: Advisor chat log. Multi-turn history source for conversational chat.
+CREATE TABLE IF NOT EXISTS advisor_chat_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           INTEGER NOT NULL,
+    question     TEXT    NOT NULL,
+    response     TEXT    NOT NULL,
+    model_used   TEXT    NOT NULL,
+    latency_ms   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS advisor_chat_log_ts_idx
+    ON advisor_chat_log (ts DESC);
 
 CREATE TABLE IF NOT EXISTS mode_switches (
     id                    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -254,6 +283,7 @@ pub async fn open(database_url: &str) -> Result<DbPool> {
     }
 
     migrate_predictions(&pool).await?;
+    migrate_sentiment_cache(&pool).await?;
 
     info!("database ready at {database_url}");
     Ok(pool)
@@ -305,6 +335,61 @@ pub async fn migrate_candles(pool: &DbPool) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Add `buzz` and `weekly_avg` columns to sentiment_cache if they don't exist
+/// (Phase 4 migration). Follows the same pattern as migrate_candles.
+pub async fn migrate_sentiment_cache(pool: &DbPool) -> Result<()> {
+    let rows = sqlx::query("PRAGMA table_info(sentiment_cache)")
+        .fetch_all(pool)
+        .await
+        .context("PRAGMA table_info(sentiment_cache)")?;
+    let existing: Vec<String> = rows.iter().map(|r| r.get::<String, _>(1)).collect();
+
+    for (col, col_type, default) in &[
+        ("buzz", "INTEGER", "0"),
+        ("weekly_avg", "REAL", "0.0"),
+    ] {
+        if !existing.iter().any(|name| name == col) {
+            let sql = format!(
+                "ALTER TABLE sentiment_cache ADD COLUMN {col} {col_type} NOT NULL DEFAULT {default}"
+            );
+            sqlx::query(&sql)
+                .execute(pool)
+                .await
+                .with_context(|| format!("adding column sentiment_cache.{col}"))?;
+            info!("migrated sentiment_cache: added column {col}");
+        }
+    }
+
+    // Fix: if weekly_avg was previously created as INTEGER, recreate it as REAL.
+    let col_info: Vec<(String, String)> = rows
+        .iter()
+        .map(|r| (r.get::<String, _>(1), r.get::<String, _>(2)))
+        .collect();
+    if let Some(t) = col_info.iter().find(|(name, _)| name == "weekly_avg") {
+        if t.1.to_uppercase() != "REAL" {
+            info!("sentiment_cache.weekly_avg has wrong type ({}) — recreating as REAL", t.1);
+            sqlx::query("ALTER TABLE sentiment_cache RENAME COLUMN weekly_avg TO weekly_avg_old")
+                .execute(pool)
+                .await
+                .context("rename weekly_avg")?;
+            sqlx::query("ALTER TABLE sentiment_cache ADD COLUMN weekly_avg REAL NOT NULL DEFAULT 0.0")
+                .execute(pool)
+                .await
+                .context("add weekly_avg REAL")?;
+            sqlx::query("UPDATE sentiment_cache SET weekly_avg = CAST(weekly_avg_old AS REAL)")
+                .execute(pool)
+                .await
+                .context("copy weekly_avg data")?;
+            sqlx::query("ALTER TABLE sentiment_cache DROP COLUMN weekly_avg_old")
+                .execute(pool)
+                .await
+                .context("drop weekly_avg_old")?;
+            info!("migrated sentiment_cache: weekly_avg type fixed to REAL");
+        }
+    }
     Ok(())
 }
 
@@ -695,6 +780,38 @@ pub async fn fetch_recent_equity_trades(
         .collect())
 }
 
+/// Return recent equity trades across ALL symbols (QQQ + PSQ).
+/// Used when the frontend requests trades without a symbol filter.
+pub async fn fetch_recent_all_equity_trades(
+    pool: &DbPool,
+    limit: usize,
+) -> Result<Vec<TradeRow>> {
+    let rows = sqlx::query(
+        "SELECT id, candle_ts, side, qty, price, fee, realized_pnl, created_at
+         FROM equity_trades
+         ORDER BY id DESC
+         LIMIT ?1",
+    )
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await
+    .context("fetch_recent_all_equity_trades")?;
+
+    Ok(rows
+        .iter()
+        .map(|row| TradeRow {
+            id: row.get(0),
+            candle_ts: row.get(1),
+            side: row.get(2),
+            qty: row.get(3),
+            price: row.get(4),
+            fee: row.get(5),
+            realized_pnl: row.get(6),
+            created_at: row.get(7),
+        })
+        .collect())
+}
+
 /// Return the most recent candle, or `None` if the table is empty.
 pub async fn fetch_latest_candle(pool: &DbPool) -> Result<Option<Candle>> {
     let row = sqlx::query(
@@ -727,6 +844,54 @@ pub async fn fetch_entry_trade_price(pool: &DbPool) -> Result<Option<f64>> {
         .fetch_optional(pool)
         .await
         .context("fetch_entry_trade_price")?;
+    Ok(row.map(|r| r.get(0)))
+}
+
+/// Fetch the price of the most recent equity trade for a given symbol.
+/// Used to compute entry_price for open positions (Long=QQQ, Short=PSQ).
+pub async fn fetch_equity_entry_trade_price(
+    pool: &DbPool,
+    symbol: &str,
+) -> Result<Option<f64>> {
+    let row = sqlx::query(
+        "SELECT price FROM equity_trades WHERE symbol = ?1 ORDER BY id DESC LIMIT 1",
+    )
+    .bind(symbol)
+    .fetch_optional(pool)
+    .await
+    .context("fetch_equity_entry_trade_price")?;
+    Ok(row.map(|r| r.get(0)))
+}
+
+/// Fetch the candle timestamp of the most recent equity trade for a given symbol.
+pub async fn fetch_equity_entry_trade_ts(
+    pool: &DbPool,
+    symbol: &str,
+) -> Result<Option<i64>> {
+    let row = sqlx::query(
+        "SELECT candle_ts FROM equity_trades WHERE symbol = ?1 ORDER BY id DESC LIMIT 1",
+    )
+    .bind(symbol)
+    .fetch_optional(pool)
+    .await
+    .context("fetch_equity_entry_trade_ts")?;
+    Ok(row.map(|r| r.get(0)))
+}
+
+/// Fetch the close price for a specific candle timestamp and symbol.
+pub async fn fetch_equity_close_at_ts(
+    pool: &DbPool,
+    symbol: &str,
+    candle_ts: i64,
+) -> Result<Option<f64>> {
+    let row = sqlx::query(
+        "SELECT close FROM equity_candles WHERE symbol = ?1 AND ts = ?2 LIMIT 1",
+    )
+    .bind(symbol)
+    .bind(candle_ts)
+    .fetch_optional(pool)
+    .await
+    .context("fetch_equity_close_at_ts")?;
     Ok(row.map(|r| r.get(0)))
 }
 
@@ -1730,4 +1895,88 @@ pub fn parity_marker_age_secs(marker_path: &str) -> Option<i64> {
     let marker = crate::parity::read_marker(path).ok().flatten()?;
     let now = chrono::Utc::now().timestamp();
     Some((now - marker.verified_at).max(0))
+}
+
+// ── Phase 4: Advisor DB helpers ─────────────────────────────────────
+
+/// Insert a briefing attempt into the log.
+pub async fn insert_advisor_briefing_log(
+    pool: &DbPool,
+    for_date: &str,
+    model_used: &str,
+    context_hash: &str,
+    context_json: &str,
+    briefing_json: &str,
+    parse_status: &str,
+    latency_ms: i64,
+) -> Result<i64> {
+    let ts = chrono::Utc::now().timestamp();
+    let row = sqlx::query(
+        "INSERT INTO advisor_briefing_log \
+         (ts, for_date, model_used, context_hash, context_json, briefing_json, parse_status, latency_ms) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+    )
+    .bind(ts)
+    .bind(for_date)
+    .bind(model_used)
+    .bind(context_hash)
+    .bind(context_json)
+    .bind(briefing_json)
+    .bind(parse_status)
+    .bind(latency_ms)
+    .execute(pool)
+    .await
+    .context("insert_advisor_briefing_log")?;
+    Ok(row.last_insert_rowid())
+}
+
+/// Insert a chat interaction into the log.
+pub async fn insert_advisor_chat_log(
+    pool: &DbPool,
+    question: &str,
+    response: &str,
+    model_used: &str,
+    latency_ms: i64,
+) -> Result<i64> {
+    let ts = chrono::Utc::now().timestamp();
+    let row = sqlx::query(
+        "INSERT INTO advisor_chat_log (ts, question, response, model_used, latency_ms) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )
+    .bind(ts)
+    .bind(question)
+    .bind(response)
+    .bind(model_used)
+    .bind(latency_ms)
+    .execute(pool)
+    .await
+    .context("insert_advisor_chat_log")?;
+    Ok(row.last_insert_rowid())
+}
+
+/// Fetch the most recent N chat turns (question, response) pairs, oldest first.
+pub async fn fetch_recent_chat_turns(
+    pool: &DbPool,
+    limit: usize,
+) -> Result<Vec<(String, String)>> {
+    let rows = sqlx::query(
+        "SELECT question, response FROM advisor_chat_log \
+         ORDER BY id DESC LIMIT ?1",
+    )
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await
+    .context("fetch_recent_chat_turns")?;
+
+    // Reverse so oldest is first (chronological order for the prompt).
+    let mut turns: Vec<(String, String)> = rows
+        .iter()
+        .map(|r| {
+            let q: String = r.get(0);
+            let a: String = r.get(1);
+            (q, a)
+        })
+        .collect();
+    turns.reverse();
+    Ok(turns)
 }

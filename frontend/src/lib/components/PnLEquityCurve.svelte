@@ -1,6 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { status } from '../stores.js';
+  import { fetchEquityTrades } from '../api.js';
 
   let canvas;
   let container;
@@ -17,7 +18,27 @@
     }
   }
 
-  onMount(() => {
+  onMount(async () => {
+    // Load historical cumulative PnL from trades.
+    try {
+      const td = await fetchEquityTrades('*', 200);
+      if (td.trades && td.trades.length > 0) {
+        const sorted = [...td.trades].reverse();
+        let cum = 0;
+        const points = [];
+        for (const t of sorted) {
+          cum += (t.realized_pnl || 0);
+          points.push({ ts: t.ts, pnl: cum });
+        }
+        if (points.length > 0) {
+          pnlHistory = points;
+          draw();
+        }
+      }
+    } catch (e) {
+      console.error('Failed to load PnL history:', e);
+    }
+
     draw();
     resizeObserver = new ResizeObserver(() => draw());
     if (container) resizeObserver.observe(container);

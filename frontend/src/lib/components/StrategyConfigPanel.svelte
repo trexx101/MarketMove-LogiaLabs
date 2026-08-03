@@ -28,18 +28,22 @@
   function markDirty() {
     dirty = true;
     success = '';
+    console.log('[StrategyConfig] markDirty — pred_5d_filter=', config.pred_5d_filter);
   }
 
   async function handleSave() {
     saving = true;
     error = '';
     success = '';
+    console.log('[StrategyConfig] handleSave — body:', JSON.stringify(config));
     try {
       config = await saveStrategyConfig(config);
+      console.log('[StrategyConfig] handleSave — response:', JSON.stringify(config));
       dirty = false;
       success = 'Saved';
       setTimeout(() => (success = ''), 3000);
     } catch (e) {
+      console.error('[StrategyConfig] handleSave FAILED:', e);
       error = e.message;
     } finally {
       saving = false;

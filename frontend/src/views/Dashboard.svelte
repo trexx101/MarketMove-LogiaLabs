@@ -1,8 +1,8 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { fetchStatus, fetchPredictions, fetchChart, fetchAccuracy } from '../lib/api.js';
+  import { fetchStatus, fetchPredictions, fetchChart, fetchAccuracy, fetchEquityTrades } from '../lib/api.js';
   import { connectWebSocket, disconnectWebSocket } from '../lib/websocket.js';
-  import { status, predictions, chartData, accuracy } from '../lib/stores.js';
+  import { status, predictions, chartData, accuracy, trades } from '../lib/stores.js';
 
   import StatusPanel from '../lib/components/StatusPanel.svelte';
   import CandlestickChart from '../lib/components/CandlestickChart.svelte';
@@ -42,6 +42,20 @@
       if (a) accuracy.set(a);
     } catch (e) {
       console.error('Failed to fetch accuracy:', e);
+    }
+
+    try {
+      const td = await fetchEquityTrades('*', 200);
+      trades.set((td.trades || []).map(t => ({
+        time: t.ts,
+        side: t.side,
+        qty: t.qty,
+        price: t.price,
+        fee: t.fee,
+        realized_pnl: t.realized_pnl,
+      })));
+    } catch (e) {
+      console.error('Failed to fetch trades:', e);
     }
 
     connectWebSocket();

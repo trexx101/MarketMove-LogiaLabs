@@ -66,6 +66,9 @@ pub struct Config {
     pub moomoo_creds_path: String,
     /// FRED API key (optional; higher rate limit). Empty → anonymous CSV fallback.
     pub fred_api_key: String,
+    /// Finnhub API key for sentiment + calendar (free tier: 60 req/min).
+    /// Empty → sentiment falls back to stub 0.5, calendar is omitted.
+    pub finnhub_api_key: String,
     /// Live executor kind. When TRADING_MODE=live, the engine picks an executor
     /// based on this value. Phase 3.3 supports `paper` (fallback) and `moomoo`.
     /// Default: `paper` (safe fallback; explicit opt-in required for moomoo).
@@ -221,6 +224,7 @@ impl Config {
             return Err(anyhow!("MOOMOO_CREDS_PATH must not be empty"));
         }
         let fred_api_key = env_or("FRED_API_KEY", "");
+        let finnhub_api_key = env_or("FINNHUB_API_KEY", "");
 
         // Phase 3.3: live executor selection. Defaults to "paper" so that
         // upgrading to TRADING_MODE=live without explicitly setting
@@ -284,6 +288,7 @@ impl Config {
             parity_max_age_secs,
             moomoo_creds_path,
             fred_api_key,
+            finnhub_api_key,
             live_executor,
             moomoo_trd_env,
             totp_secret,
@@ -384,6 +389,7 @@ mod tests {
             "PARITY_MAX_AGE_SECS",
             "MOOMOO_CREDS_PATH",
             "FRED_API_KEY",
+            "FINNHUB_API_KEY",
             "LIVE_EXECUTOR",
             "MOOMOO_TRD_ENV",
             "TOTP_SECRET",
