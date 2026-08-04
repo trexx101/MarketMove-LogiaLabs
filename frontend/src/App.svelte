@@ -3,6 +3,7 @@
   import Ledger from './views/Ledger.svelte';
   import StrategyLab from './views/StrategyLab.svelte';
   import Advisor from './views/Advisor.svelte';
+  import Events from './views/Events.svelte';
   import { status } from './lib/stores.js';
 
   let currentView = 'dashboard';
@@ -75,6 +76,14 @@
           Advisor
         </button>
       </li>
+      <li>
+        <button class="nav-btn" class:active={currentView === 'events'} on:click={() => nav('events')}>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path d="M2 3h12M2 6h12M2 9h12M2 12h12" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+          </svg>
+          Events
+        </button>
+      </li>
     </ul>
     <div class="sidebar-footer">
       <div class="mode-badge mode-{mode.toLowerCase()}">
@@ -98,6 +107,8 @@
       <Ledger />
     {:else if currentView === 'advisor'}
       <Advisor />
+    {:else if currentView === 'events'}
+      <Events />
     {/if}
   </main>
 </div>

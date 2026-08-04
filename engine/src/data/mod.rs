@@ -163,21 +163,42 @@ pub async fn run_equities_ingestion(pool: DbPool) -> Result<()> {
     });
 
     // --- 2. Daily retention prune (keep 5y of daily bars) ---
-    let retention_pool = pool.clone();
-    tokio::spawn(async move {
-        let start =
-            tokio::time::Instant::now() + std::time::Duration::from_secs(300);
-        let mut interval =
-            tokio::time::interval_at(start, std::time::Duration::from_secs(24 * 3_600));
-        loop {
-            interval.tick().await;
-            match prune_equity_history(&retention_pool).await {
-                Ok(n) if n > 0 => info!(pruned = n, "equity retention: removed old rows"),
-                Ok(_) => {}
-                Err(e) => tracing::warn!("equity retention prune error: {e:#}"),
+        let retention_pool = pool.clone();
+        tokio::spawn(async move {
+            let start =
+                tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+            let mut interval =
+                tokio::time::interval_at(start, std::time::Duration::from_secs(24 * 3600));
+            loop {
+                interval.tick().await;
+                match prune_equity_history(&retention_pool).await {
+                    Ok(n) if n > 0 => info!(pruned = n, "equity retention: removed old rows"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("equity retention prune error: {e:#}"),
+                }
             }
-        }
-    });
+        });
+
+        // --- 3. Daily event archival (keep retention_days of active events) ---
+        let archive_pool = pool.clone();
+        let events_retention_days = std::env::var("EVENTS_RETENTION_DAYS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(60);
+        tokio::spawn(async move {
+            let start =
+                tokio::time::Instant::now() + std::time::Duration::from_secs(600);
+            let mut interval =
+                tokio::time::interval_at(start, std::time::Duration::from_secs(24 * 3600));
+            loop {
+                interval.tick().await;
+                match crate::archive::archive_old_events(&archive_pool, events_retention_days).await {
+                    Ok(n) if n > 0 => info!(archived = n, "event archival complete"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "event archival failed"),
+                }
+            }
+        });
 
     // Block the process on an inert future so the supervisor owns the main thread.
     // A Ctrl-C / process kill is the intended shutdown.

@@ -150,6 +150,12 @@ pub async fn handle_set_mode(
     .await
     .map_err(|e| internal_error("insert_mode_switch", e))?;
 
+    // Emit event for the unified log.
+    state
+        .event_logger
+        .emit(crate::event::EngineEvent::mode_changed(previous, target, &authorized_by))
+        .await;
+
     // 4. Broadcast to control-room clients.
     let _ = state.tx.send(TelemetryEvent::ModeChange {
         mode: target.to_string(),

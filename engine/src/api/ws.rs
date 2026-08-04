@@ -83,6 +83,17 @@ pub enum TelemetryEvent {
         /// The parsed briefing struct. Serialized inline.
         briefing: crate::advisor::AdvisorBriefing,
     },
+    /// Unified engine event for the Events page. Persisted to `engine_events`
+    /// and broadcast for real-time display.
+    EngineEvent {
+        ts: i64,
+        category: String,
+        severity: String,
+        mode: String,
+        source: String,
+        message: String,
+        payload: serde_json::Value,
+    },
 }
 
 /// Sender half of the telemetry broadcast channel.

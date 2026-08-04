@@ -194,6 +194,22 @@ CREATE TABLE IF NOT EXISTS backtest_results (
     timestamp         INTEGER NOT NULL,
     FOREIGN KEY(strategy_id) REFERENCES strategy_configs(id) ON DELETE CASCADE
 );
+
+-- Event log: unified append-only record of trades, data fetch failures,
+-- strategy changes, mode switches, alerts, and advisor actions.
+-- Archived to /app/data/events_archive/ after retention period.
+CREATE TABLE IF NOT EXISTS engine_events (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           INTEGER NOT NULL,
+    category     TEXT    NOT NULL,  -- trade | data | system | strategy | alert | advisor
+    severity     TEXT    NOT NULL,  -- info | warn | error
+    mode         TEXT    NOT NULL,  -- paper | live
+    source       TEXT    NOT NULL,  -- scheduler, data::yahoo, exec::paper, api::mode, etc.
+    message      TEXT    NOT NULL,
+    payload_json TEXT    NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS engine_events_ts_idx ON engine_events (ts DESC);
+CREATE INDEX IF NOT EXISTS engine_events_category_ts_idx ON engine_events (category, ts DESC);
 "#;
 
 /// A single OHLCV + VWAP candle as stored in the database.
@@ -838,23 +854,15 @@ pub async fn fetch_latest_candle(pool: &DbPool) -> Result<Option<Candle>> {
     }))
 }
 
-/// Return the price of the most recent trade (the entry price when position is open).
-pub async fn fetch_entry_trade_price(pool: &DbPool) -> Result<Option<f64>> {
-    let row = sqlx::query("SELECT price FROM trades ORDER BY id DESC LIMIT 1")
-        .fetch_optional(pool)
-        .await
-        .context("fetch_entry_trade_price")?;
-    Ok(row.map(|r| r.get(0)))
-}
-
-/// Fetch the price of the most recent equity trade for a given symbol.
+/// Fetch the price of the most recent entry (buy) trade for a given symbol.
 /// Used to compute entry_price for open positions (Long=QQQ, Short=PSQ).
+/// Filters on side='buy' so partial closes don't shadow the entry.
 pub async fn fetch_equity_entry_trade_price(
     pool: &DbPool,
     symbol: &str,
 ) -> Result<Option<f64>> {
     let row = sqlx::query(
-        "SELECT price FROM equity_trades WHERE symbol = ?1 ORDER BY id DESC LIMIT 1",
+        "SELECT price FROM equity_trades WHERE symbol = ?1 AND side = 'buy' ORDER BY id DESC LIMIT 1",
     )
     .bind(symbol)
     .fetch_optional(pool)
@@ -878,14 +886,15 @@ pub async fn fetch_equity_entry_trade_ts(
     Ok(row.map(|r| r.get(0)))
 }
 
-/// Fetch the close price for a specific candle timestamp and symbol.
+/// Fetch the close price at or before a given timestamp for a symbol.
+/// Uses floor match (ts <= ?2) so a slight timestamp mismatch doesn't return None.
 pub async fn fetch_equity_close_at_ts(
     pool: &DbPool,
     symbol: &str,
     candle_ts: i64,
 ) -> Result<Option<f64>> {
     let row = sqlx::query(
-        "SELECT close FROM equity_candles WHERE symbol = ?1 AND ts = ?2 LIMIT 1",
+        "SELECT close FROM equity_candles WHERE symbol = ?1 AND ts <= ?2 ORDER BY ts DESC LIMIT 1",
     )
     .bind(symbol)
     .bind(candle_ts)

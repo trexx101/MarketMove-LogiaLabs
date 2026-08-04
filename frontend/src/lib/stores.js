@@ -15,6 +15,9 @@ export const features = writable(null);
 /** Trade fills from WS TradeFill events — prepended, capped at 50 */
 export const trades = writable([]);
 
+/** Unified event log — prepended from WS, capped at 100 */
+export const events = writable([]);
+
 /** Accuracy / model health from /api/accuracy (may 503) */
 export const accuracy = writable(null);
 

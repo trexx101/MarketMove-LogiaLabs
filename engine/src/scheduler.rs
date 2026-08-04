@@ -44,6 +44,8 @@ pub struct EquityScheduler {
     /// lock between cycles.
     executor: Arc<RwLock<ExecutorKind>>,
     tx: Option<TelemetrySender>,
+    /// Event logger for unified event persistence.
+    event_logger: Option<std::sync::Arc<crate::event::EventLogger>>,
 }
 
 impl EquityScheduler {
@@ -57,6 +59,7 @@ impl EquityScheduler {
         trading_mode: Arc<RwLock<TradingMode>>,
         executor: Arc<RwLock<ExecutorKind>>,
         tx: Option<TelemetrySender>,
+        event_logger: Option<std::sync::Arc<crate::event::EventLogger>>,
     ) -> Result<Self> {
         let bridge = ZmqBridge::connect(zmq_endpoint).await?;
         Ok(Self {
@@ -70,6 +73,7 @@ impl EquityScheduler {
             trading_mode,
             executor,
             tx,
+            event_logger,
         })
     }
 
@@ -203,6 +207,15 @@ impl EquityScheduler {
             "equity prediction persisted"
         );
 
+        // Emit unified event.
+        if let Some(logger) = &self.event_logger {
+            logger
+                .emit(crate::event::EngineEvent::prediction_persisted(
+                    pred.pred_1d, pred.pred_5d, pred.pred_21d, regime,
+                ))
+                .await;
+        }
+
         // Publish telemetry event for any connected control-room clients.
         if let Some(tx) = &self.tx {
             let _ = tx.send(TelemetryEvent::PredictionUpdate {
@@ -293,6 +306,23 @@ impl EquityScheduler {
                                     pnl = fill.realized_pnl,
                                     "equity trade executed"
                                 );
+                                // Emit unified event.
+                                if let Some(logger) = &self.event_logger {
+                                    let side_str = match fill.side {
+                                        crate::exec::TradeSide::Buy => "buy",
+                                        crate::exec::TradeSide::Sell => "sell",
+                                    };
+                                    logger
+                                        .emit(crate::event::EngineEvent::trade_fill(
+                                            side_str,
+                                            &fill.symbol,
+                                            fill.qty,
+                                            fill.price,
+                                            fill.fee,
+                                            fill.realized_pnl,
+                                        ))
+                                        .await;
+                                }
                             }
 
                             // Commit position only after trade record succeeds.
@@ -336,6 +366,23 @@ impl EquityScheduler {
                                     pnl = fill.realized_pnl,
                                     "equity LIVE trade executed"
                                 );
+                                // Emit unified event.
+                                if let Some(logger) = &self.event_logger {
+                                    let side_str = match fill.side {
+                                        crate::exec::TradeSide::Buy => "buy",
+                                        crate::exec::TradeSide::Sell => "sell",
+                                    };
+                                    logger
+                                        .emit(crate::event::EngineEvent::trade_fill(
+                                            side_str,
+                                            &fill.symbol,
+                                            fill.qty,
+                                            fill.price,
+                                            fill.fee,
+                                            fill.realized_pnl,
+                                        ))
+                                        .await;
+                                }
                             }
 
                             // Commit position only after trade record succeeds.
@@ -466,6 +513,7 @@ mod tests {
             trading_mode: Arc::new(RwLock::new(TradingMode::Paper)),
             executor: Arc::new(RwLock::new(executor)),
             tx: None,
+            event_logger: None,
         }
     }
 

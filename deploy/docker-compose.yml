@@ -115,6 +115,7 @@ services:
       ADVISOR_API_BASE: https://openrouter.ai/api/v1/chat/completions
       ADVISOR_MODEL: google/gemini-2.5-flash-lite
       ADVISOR_FALLBACK_MODEL: google/gemini-2.5-flash-lite
+      EVENTS_RETENTION_DAYS: ${EVENTS_RETENTION_DAYS:-60}
       FUTU_OPEND_HOST: ${FUTU_OPEND_HOST:-127.0.0.1}
       FUTU_OPEND_PORT: ${FUTU_OPEND_PORT:-11111}
     networks:

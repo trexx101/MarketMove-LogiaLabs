@@ -4,7 +4,9 @@ mod bridge;
 mod config;
 mod data;
 mod db;
+mod event;
 mod exec;
+mod archive;
 mod features;
 mod normalize;
 mod market_hours;
@@ -126,6 +128,22 @@ async fn main() {
     // entry to use. Initial value mirrors Config::trading_mode.
     let trading_mode = std::sync::Arc::new(tokio::sync::RwLock::new(cfg.trading_mode));
 
+    // Event logger — wraps DB + telemetry sender + mode ref for unified
+    // event persistence and broadcast.
+    let event_logger = std::sync::Arc::new(crate::event::EventLogger::new(
+        pool.clone(),
+        Some(tx.clone()),
+        trading_mode.clone(),
+    ));
+
+    // Emit engine-started event.
+    event_logger
+        .emit(crate::event::EngineEvent::engine_started(
+            cfg.trading_mode,
+            &cfg.symbol,
+        ))
+        .await;
+
     // Run the equities REST backfill synchronously BEFORE spawning the
     // ingestion supervisor. This seeds QQQ + constituents + macro history so
     // downstream features have enough lookback. Idempotent: re-runs top up
@@ -179,6 +197,7 @@ async fn main() {
     let scheduler_trading_mode = trading_mode.clone();
     let scheduler_executor = executor.clone();
     let scheduler_strategy_params = strategy_params.clone();
+    let scheduler_event_logger = event_logger.clone();
     tokio::spawn(async move {
         match scheduler::EquityScheduler::new(
             scheduler_pool,
@@ -190,6 +209,7 @@ async fn main() {
             scheduler_trading_mode,
             scheduler_executor,
             Some(scheduler_tx),
+            Some(scheduler_event_logger),
         ).await {
             Ok(mut sched) => {
                 if let Err(e) = sched.run().await {
@@ -251,7 +271,7 @@ async fn main() {
     // so the API endpoint can verify submitted codes.
     let mut cfg_for_api = cfg.clone();
     cfg_for_api.totp_secret = totp_secret.clone();
-    let app = api::router(pool.clone(), &cfg_for_api, tx, advisor_state);
+    let app = api::router(pool.clone(), &cfg_for_api, tx, advisor_state, event_logger);
     let bind_addr = format!("0.0.0.0:{}", cfg.http_port);
     match tokio::net::TcpListener::bind(&bind_addr).await {
         Ok(listener) => {

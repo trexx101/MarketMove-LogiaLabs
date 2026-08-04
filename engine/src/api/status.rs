@@ -119,29 +119,21 @@ pub(crate) async fn handle_status(
             let now = chrono::Utc::now().timestamp();
             now.saturating_sub(ts).max(0) as u64
         }
-        None => 0,
+        None => u64::MAX,
     };
 
-    // SMA for regime display
-    let (_sma, sma_valid) = {
+    // Single read of strategy_params for SMA + snapshot.
+    let (sma, sma_valid, strategy_snapshot) = {
         let params = state.strategy_params.read().await;
-        let closes = candle.as_ref()
-            .map(|_| vec![candle.as_ref().unwrap().close])
-            .unwrap_or_default();
-        strategy::compute_sma(&closes, params.sma_window)
-    };
+        let sma_window = params.sma_window;
 
-    // Fetch closes for proper SMA
-    let sma_window = state.strategy_params.read().await.sma_window;
-    let chart_data = db::fetch_equity_candles_asc(pool, &state.symbol, sma_window as i64)
-        .await
-        .map_err(|e| internal_error("fetch_equity_candles_asc", e))?;
-    let closes: Vec<f64> = chart_data.iter().map(|c| c.close).collect();
-    let (sma, sma_valid) = strategy::compute_sma(&closes, sma_window);
+        let chart_data = db::fetch_equity_candles_asc(pool, &state.symbol, sma_window as i64)
+            .await
+            .map_err(|e| internal_error("fetch_equity_candles_asc", e))?;
+        let closes: Vec<f64> = chart_data.iter().map(|c| c.close).collect();
+        let (sma, sma_valid) = strategy::compute_sma(&closes, sma_window);
 
-    let strategy_snapshot = {
-        let params = state.strategy_params.read().await;
-        StrategySnapshot {
+        let snapshot = StrategySnapshot {
             entry_threshold: params.entry_threshold,
             exit_threshold: params.exit_threshold,
             sma_window: params.sma_window,
@@ -149,14 +141,15 @@ pub(crate) async fn handle_status(
             enable_shorting: params.enable_shorting,
             short_entry_threshold: params.short_entry_threshold,
             short_exit_threshold: params.short_exit_threshold,
-        }
+        };
+        (sma, sma_valid, snapshot)
     };
 
-    // Approximate shorter-horizon predictions.
+    // Approximate shorter-horizon predictions (6.5 trading hours/day).
     let (pred_1h_approx, pred_5h_approx) = match &latest_pred {
         Some(p) => (
-            Some(p.pred_1d / 24.0),
-            Some(p.pred_5d / 24.0 * 5.0),
+            Some(p.pred_1d / 6.5),
+            Some(p.pred_1d * (5.0 / 6.5)),
         ),
         None => (None, None),
     };

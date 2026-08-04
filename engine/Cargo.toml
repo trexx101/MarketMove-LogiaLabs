@@ -31,6 +31,8 @@ mime_guess = { workspace = true }
 rhai = { workspace = true }
 uuid = { workspace = true }
 totp-rs = { workspace = true }
+strum = { workspace = true }
+flate2 = { workspace = true }
 async-trait = "0.1"
 
 [[bin]]

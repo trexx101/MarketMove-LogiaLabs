@@ -20,6 +20,14 @@ async fn test_pool() -> db::DbPool {
 
 fn test_state(pool: db::DbPool) -> State<AppState> {
     let (tx, _rx) = tokio::sync::broadcast::channel(64);
+    let trading_mode = std::sync::Arc::new(tokio::sync::RwLock::new(
+        crate::config::TradingMode::Paper,
+    ));
+    let event_logger = std::sync::Arc::new(crate::event::EventLogger::new(
+        pool.clone(),
+        Some(tx.clone()),
+        trading_mode.clone(),
+    ));
     let strategy_params = std::sync::Arc::new(tokio::sync::RwLock::new(
         strategy::EquityStrategyParams {
             entry_threshold: 0.005,
@@ -33,12 +41,12 @@ fn test_state(pool: db::DbPool) -> State<AppState> {
     ));
     State(AppState {
         pool,
-        trading_mode: std::sync::Arc::new(tokio::sync::RwLock::new(
-            crate::config::TradingMode::Paper,
-        )),
+        trading_mode,
         strategy_params,
         symbol: "BTC/USD".to_string(),
+        short_symbol: "PSQ".to_string(),
         tx,
+        event_logger,
         parity_marker_path: std::env::temp_dir()
             .join("parity_marker_test_default.json")
             .to_string_lossy()
@@ -60,8 +68,8 @@ async fn status_returns_empty_state() {
     assert_eq!(status.symbol, "BTC/USD");
     assert_eq!(status.position, "flat");
     assert_eq!(status.realized_pnl, 0.0);
-    assert!(status.entry_price.is_none());
-    assert!(status.unrealized_pnl.is_none());
+    assert_eq!(status.entry_price, 0.0);
+    assert_eq!(status.unrealized_pnl, 0.0);
     assert!(status.last_candle_ts.is_none());
     assert!(status.pred_1d.is_none());
     assert_eq!(status.staleness_secs, u64::MAX);
@@ -192,7 +200,7 @@ async fn status_reports_unrealized_pnl_for_open_position() {
     db::save_position(&pool, strategy::Position::Long.as_i64())
         .await
         .unwrap();
-    db::insert_trade(&pool, 1_000_000, "buy", 1.0, 100.0, 0.0, 0.0)
+    db::insert_equity_trade(&pool, "BTC/USD", 1_000_000, "buy", 1.0, 100.0, 0.0, 0.0)
         .await
         .unwrap();
     db::upsert_equity_candle(
@@ -213,8 +221,8 @@ async fn status_reports_unrealized_pnl_for_open_position() {
 
     let Json(status) = status::handle_status(test_state(pool)).await.unwrap();
     assert_eq!(status.position, "long");
-    assert!((status.entry_price.unwrap() - 100.0).abs() < 1e-9);
-    assert!((status.unrealized_pnl.unwrap() - 10.0).abs() < 1e-9);
+    assert!((status.entry_price - 100.0).abs() < 1e-9);
+    assert!((status.unrealized_pnl - 10.0).abs() < 1e-9);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -262,7 +270,15 @@ async fn router_serves_static_files_and_api() {
 
         let app = {
             let (tx, _rx) = tokio::sync::broadcast::channel(64);
-            router(pool, &config, tx, None)
+            let trading_mode = std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::config::TradingMode::Paper,
+            ));
+            let event_logger = std::sync::Arc::new(crate::event::EventLogger::new(
+                pool.clone(),
+                Some(tx.clone()),
+                trading_mode.clone(),
+            ));
+            router(pool, &config, tx, None, event_logger)
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();

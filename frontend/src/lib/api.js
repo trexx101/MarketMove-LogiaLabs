@@ -80,6 +80,24 @@ export async function fetchEquityTrades(symbol = 'QQQ', limit = 500) {
 }
 
 /**
+ * Fetch historical engine events.
+ * @param {number} [limit=100]
+ * @param {string} [category] optional filter
+ * @param {number} [since] timestamp filter
+ * @param {string} [mode] 'paper' | 'live' filter
+ * @returns {Promise<object[]>}
+ */
+export async function fetchEvents(limit = 100, category = null, since = null, mode = null) {
+  let url = `${API_BASE}/events?limit=${limit}`;
+  if (category) url += `&category=${encodeURIComponent(category)}`;
+  if (since) url += `&since=${since}`;
+  if (mode) url += `&mode=${mode}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`events: ${res.status}`);
+  return res.json();
+}
+
+/**
  * Fetch current market state.
  * @returns {Promise<object>} MarketStateResponse
  */

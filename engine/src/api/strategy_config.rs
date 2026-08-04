@@ -63,6 +63,9 @@ pub async fn handle_put(
 ) -> Result<Json<StrategyConfigResponse>, (StatusCode, String)> {
     let mut sp = state.strategy_params.write().await;
 
+    // Capture old params for event emission.
+    let old = sp.clone();
+
     // Validate and apply each field that was provided.
     if let Some(v) = update.entry_threshold {
         if v <= 0.0 {
@@ -148,6 +151,23 @@ pub async fn handle_put(
         short_entry_threshold: response.short_entry_threshold,
         short_exit_threshold: response.short_exit_threshold,
     });
+
+    // Emit event for the unified log.
+    state
+        .event_logger
+        .emit(crate::event::EngineEvent::strategy_config_changed(
+            &old,
+            &crate::strategy::EquityStrategyParams {
+                entry_threshold: response.entry_threshold,
+                exit_threshold: response.exit_threshold,
+                sma_window: response.sma_window,
+                pred_5d_filter: response.pred_5d_filter,
+                enable_shorting: response.enable_shorting,
+                short_entry_threshold: response.short_entry_threshold,
+                short_exit_threshold: response.short_exit_threshold,
+            },
+        ))
+        .await;
 
     info!(
         entry_threshold = response.entry_threshold,

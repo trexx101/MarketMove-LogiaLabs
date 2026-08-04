@@ -94,15 +94,27 @@ fn build_app(
 ) -> axum::Router {
     let (tx, _rx) = tokio::sync::broadcast::channel(64);
     let trading_mode = Arc::new(RwLock::new(cfg.trading_mode));
+    let event_logger = Arc::new(engine::event::EventLogger::new(
+        pool.clone(),
+        Some(tx.clone()),
+        trading_mode.clone(),
+    ));
     let state = AppState {
         pool,
         trading_mode,
+        strategy_params: Arc::new(RwLock::new(
+            engine::strategy::EquityStrategyParams::default(),
+        )),
         symbol: cfg.symbol.clone(),
-        sma_window: cfg.sma_window,
+        short_symbol: cfg.short_symbol.clone(),
         tx,
+        event_logger,
         parity_marker_path: cfg.parity_marker_path.clone(),
         parity_max_age_secs: cfg.parity_max_age_secs,
         totp_secret: cfg.totp_secret.clone(),
+        zmq_endpoint: cfg.zmq_endpoint.clone(),
+        norm_stats_path: cfg.norm_stats_path.clone(),
+        advisor: None,
     };
     // Bypass the public `router()` constructor since it does its own
     // AppState construction; we want a fully-wired AppState so the test
@@ -259,15 +271,27 @@ async fn post_mode_live_to_paper_does_not_require_parity() {
 
     let (tx, _rx) = tokio::sync::broadcast::channel(64);
     let trading_mode = Arc::new(RwLock::new(cfg.trading_mode));
+    let event_logger = Arc::new(engine::event::EventLogger::new(
+        pool.clone(),
+        Some(tx.clone()),
+        trading_mode.clone(),
+    ));
     let state = AppState {
         pool: pool.clone(),
         trading_mode,
+        strategy_params: Arc::new(RwLock::new(
+            engine::strategy::EquityStrategyParams::default(),
+        )),
         symbol: cfg.symbol.clone(),
-        sma_window: cfg.sma_window,
+        short_symbol: cfg.short_symbol.clone(),
         tx,
+        event_logger,
         parity_marker_path: cfg.parity_marker_path.clone(),
         parity_max_age_secs: cfg.parity_max_age_secs,
         totp_secret: cfg.totp_secret.clone(),
+        zmq_endpoint: cfg.zmq_endpoint.clone(),
+        norm_stats_path: cfg.norm_stats_path.clone(),
+        advisor: None,
     };
     let app = axum::Router::new()
         .route("/api/mode", axum::routing::get(engine::api::mode::handle_get_mode))
