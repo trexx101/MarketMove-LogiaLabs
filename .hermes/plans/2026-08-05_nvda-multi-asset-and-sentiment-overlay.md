@@ -56,7 +56,7 @@ Expected: max diff for `drawdown_from_50d_high` < 1e-9 after regeneration.
 - QQQ must be retrained to keep parity.
 - The retrained model must redeploy before NVDA training starts.
 
-**Decision needed:** retrain QQQ as part of 1A (clean), or only fix going forward and let the harness tolerate the divergence (fast, dirty)?
+| **Decision (locked 2026-08-05):** Fix going forward only. Deployed QQQ model keeps running on the `close`-based feature; harness tolerates the divergence. QQQ retrain deferred until it shows measurable degradation or until we re-baseline the notebook anyway.
 
 ### 1B. Feature clipping is missing in Rust
 
@@ -104,7 +104,7 @@ Implication: the notebook's IC numbers are computed against z-score-blended pred
 - **Option A (reconcile to notebook):** carry a rolling prediction history buffer in inference, replicate the z-score blend per-horizon over the last N (e.g. 60) predictions. Matches notebook exactly.
 - **Option B (re-baseline to flat blend):** re-run the notebook walk-forward using the flat 0.5/0.5 raw blend (just delete the z-score standardization), get new IC numbers, accept those as ground truth. Simpler, fewer moving parts.
 
-**Decision needed:** Option A (reconcile) or Option B (re-baseline)?
+| **Decision (locked 2026-08-05):** Option A — reconcile inference to notebook's z-score blend. Inference will carry a rolling prediction history buffer (default 60 predictions, per-horizon) and replicate the notebook's per-fold within-batch z-score standardization. This means notebook IC numbers are the ground truth — no re-baseline needed.
 
 This blocks NVDA training because we don't know which blend to train against.
 
@@ -330,12 +330,18 @@ If Option 3 doesn't show value after 2-4 weeks → delete the overlay, revert `f
 
 ## Open Questions for Inah
 
+**Status: ALL LOCKED 2026-08-05.**
+
 Before kicking off execution, decisions on these four:
 
 1. **Parity 1A (drawdown fix):** Retrain QQQ as part of the fix (clean, deploy-able artifact stays honest), or only fix going forward for NVDA and let the harness tolerate the divergence (fast, dirty)?
+   **→ DECIDED: Fix going forward only.** Deployed QQQ model keeps running on the `close`-based feature; harness tolerates the divergence. QQQ retrain deferred.
 2. **Parity 1C (blend):** Reconcile inference to notebook's z-score blend (Option A — carry rolling prediction history buffer), or re-baseline the notebook to the flat 0.5/0.5 raw blend (Option B — delete the z-score standardization, accept smaller numbers as new ground truth)?
+   **→ DECIDED: Option A — reconcile inference.** Rolling prediction history buffer in inference (default 60, per-horizon). Notebook IC numbers stay ground truth.
 3. **NVDD drift:** Accept the daily-reset structural drift on overnight holds, or restrict NVDD to intraday-only (requires market-hours-aware exit logic, adds complexity)?
+   **→ DECIDED: Accept NVDD daily-reset drift as documented behavior.** Drift is bounded (∝ |NVDA overnight gap| × funding). No intraday-only restriction.
 4. **Overlay thresholds:** Calibrate from a 2-week paper run first, or ship -0.5 / -0.8 / 5-article as-is and tune live based on observed forced-exit frequency?
+   **→ DECIDED: Ship as-is.** A/B testable + reversible via `StrategyConfig` UI. Live forced-exit frequency is the calibration signal.
 
 ---
 
@@ -397,4 +403,227 @@ After each track lands:
 
 ---
 
-**Plan complete. Awaiting answers to the 4 open questions before execution.**
+**Plan originally locked 2026-08-05. Amended 2026-08-05 to add multi-model registry architecture (see §8 below).**
+
+---
+
+## §8. Architectural Pivot — Multi-Model Registry (amended 2026-08-05)
+
+After the 4 decisions in §0–§7 were locked, an architectural review surfaced
+that **the unit of meaning is the model, not the symbol.** The trading engine
+must therefore be keyed by *model* (primary + inverse + budget + thresholds)
+rather than by a single hardcoded `Config::symbol`.
+
+### §8.1 Locked UI decisions
+
+1. **Active model via dropdown** in the dashboard header. Single selection
+   drives `StatusPanel`, `CandlestickChart`, `FeatureInspector`, `ModelHealth`,
+   `PnLEquityCurve`, and `TradeHistory`. Existing 12-col grid layout stays.
+2. **The Events tab is the cross-model surface.** No new "alert strip"
+   component — the existing `Events.svelte` view becomes model-agnostic and
+   shows every event from every model with `model_id` and `pair` chips.
+   Click an event row → switch active dropdown to that model.
+3. **Per-model budget** on `StatusPanel`: `$5,000 budget / $2,400 used
+   (3 open positions)`. Derived from `budget_usd` minus sum of
+   (entry × qty) for that model's open positions.
+4. **Per-model strategy params** (entry/exit/short thresholds) move from
+   `Config` to a row in the new `trading_models` registry. `PUT
+   /api/strategy-config` takes a `model_id` parameter.
+
+### §8.2 New `trading_models` table
+
+```sql
+CREATE TABLE IF NOT EXISTS trading_models (
+  model_id        TEXT PRIMARY KEY,        -- uuid, NOT the ticker
+  primary_symbol  TEXT NOT NULL,           -- e.g. 'NVDA'
+  inverse_symbol  TEXT NOT NULL,           -- e.g. 'NVDD'
+  model_path      TEXT NOT NULL,           -- path to .pt file
+  norm_stats_path TEXT NOT NULL,           -- path to norm_stats json
+  budget_usd      REAL NOT NULL DEFAULT 5000.0,
+  enabled         INTEGER NOT NULL DEFAULT 1,
+  deployed_at     INTEGER NOT NULL,         -- ts of registry insert
+  last_wf_ic      REAL,                     -- last walk-forward mean IC
+  last_wf_at      INTEGER,                  -- last walk-forward date
+  notes           TEXT
+);
+```
+
+Migration follows the existing `migrate_sentiment_cache` pattern. No `drizzle
+push` equivalent — ordered migrations via `PRAGMA user_version`.
+
+### §8.3 Engine bootstrap behavior
+
+At startup, `main.rs` queries `SELECT * FROM trading_models WHERE enabled = 1`
+and spawns one `EquityScheduler` + one `PaperExecutor::new_for_symbol` per
+row. If the registry is empty, fall back to `Config::symbol` / `Config::
+short_symbol` so a fresh DB still produces paper trades on the default
+symbol (preserves Wave A behavior).
+
+### §8.4 Telemetry event enrichment
+
+Every `TelemetryEvent` variant gains two new fields:
+
+- `model_id: String` — the row's `model_id`
+- `pair: String` — display label, e.g. `"NVDA/NVDD"`
+
+`TradeFill` already has `symbol`; `model_id` is additive.
+
+### §8.5 Events persistence migration
+
+```sql
+ALTER TABLE engine_events ADD COLUMN model_id TEXT;
+ALTER TABLE engine_events ADD COLUMN pair TEXT;
+```
+
+Existing rows get `model_id = NULL` / `pair = NULL`. `Events.svelte` renders
+those as `(legacy)` so historical events stay visible.
+
+### §8.6 New API endpoints
+
+| Method | Path | Body | Returns |
+|---|---|---|---|
+| `GET` | `/api/models` | — | `Vec<TradingModel>` |
+| `POST` | `/api/models` | `{primary_symbol, inverse_symbol, model_path, norm_stats_path, budget_usd?, notes?}` | `TradingModel` (with new `model_id`) |
+| `PUT` | `/api/models/{id}/enabled` | `{enabled: bool}` | `TradingModel` |
+
+Validation on `POST`: `model_path` and `norm_stats_path` must exist on disk;
+refuse otherwise.
+
+### §8.7 Modified API endpoint
+
+`PUT /api/strategy-config` body shape changes from flat params to:
+
+```json
+{
+  "model_id": "<uuid>",
+  "entry_threshold": 0.003,
+  "exit_threshold": -0.001,
+  "sma_window": 200,
+  "pred_5d_filter": true,
+  "enable_shorting": false,
+  "short_entry_threshold": -0.004,
+  "short_exit_threshold": 0.001
+}
+```
+
+Backend storage becomes `Arc<RwLock<HashMap<String, EquityStrategyParams>>>`
+keyed by `model_id`. Each scheduler reads its own slice at cycle start.
+
+### §8.8 Frontend store refactor
+
+`stores.js` becomes:
+
+- `models` — `Writable<TradingModel[]>` (registry)
+- `activeModelId` — `Writable<string>` (drives the dropdown)
+- `statusByModel` — `Writable<Map<string, StatusSlice>>`
+- `predictionsByModel` — `Writable<Map<string, PredictionsSlice>>`
+- `featuresByModel` — `Writable<Map<string, FeaturesSlice>>`
+- `tradesByModel` — `Writable<Map<string, TradeSlice[]>>`
+- `chartDataByModel` — `Writable<Map<string, ChartSlice>>`
+- Legacy `status` / `predictions` / `features` / `trades` / `chartData` —
+  derived stores that mirror the slice for the active model, so existing
+  components (`StatusPanel`, etc.) read from them unchanged.
+
+`websocket.js` handlers route each event by `msg.model_id` into the per-model
+map. The legacy stores are updated reactively from the active model's slice.
+
+### §8.9 PnL aggregation rule
+
+- Active model's `StatusPanel` shows per-model Realized + Unrealized PnL.
+- Bottom row of `StatusPanel`: portfolio totals = sum across all enabled
+  models of `budget_usd` and `realized_pnl`, plus count of open positions.
+- `PnLEquityCurve` renders one line per enabled model (semi-transparent) plus
+  the portfolio-total line on top (bold).
+
+### §8.10 Sentiment overlay
+
+- Defaults: `enable_sentiment_overlay = false`, `sentiment_min_articles = 15`.
+- Per-model application in the strategy layer — one model's bad sentiment
+  doesn't affect another's positions.
+- New "Sentiment" row on `StatusPanel`: score + article count when overlay
+  enabled and minimum article threshold met; `—` otherwise.
+
+### §8.11 Implementation order (15 steps)
+
+| # | File(s) | Approx LOC | Notes |
+|---|---|---|---|
+| 1 | `engine/src/db.rs` (`trading_models` migration + loader/CRUD) | 150 | Migration + `load_enabled_models`, `register_model`, `update_model_enabled` |
+| 2 | `engine/src/main.rs` (bootstrap loop) | 80 | Spawn one scheduler + executor per enabled row |
+| 3 | `engine/src/api/ws.rs` (`TelemetryEvent` enrichment) | 60 | Add `model_id`, `pair` fields |
+| 4 | `engine/src/db.rs` (`engine_events` migration) | 40 | Add `model_id`, `pair` columns |
+| 5 | `engine/src/api/models.rs` (new file) | 120 | GET/POST/PUT endpoints |
+| 6 | `engine/src/api/strategy_config.rs` + `AppState` | 50 | `HashMap<String, EquityStrategyParams>` keyed by model_id |
+| 7 | `frontend/src/lib/stores.js` | 80 | `models`, `activeModelId`, per-model maps, derived legacy stores |
+| 8 | `frontend/src/lib/websocket.js` | 40 | Route every event by `msg.model_id` |
+| 9 | `frontend/src/views/Dashboard.svelte` | 30 | Header dropdown |
+| 10 | `frontend/src/lib/components/StatusPanel.svelte` | 40 | Budget row + Portfolio totals row |
+| 11 | `frontend/src/views/Events.svelte` | 25 | `model_id`/`pair` chips, click-to-switch |
+| 12 | `frontend/src/lib/components/PnLEquityCurve.svelte` | 40 | Multi-line per model + portfolio total |
+| 13 | `frontend/src/lib/components/StrategyConfigPanel.svelte` | 25 | Model selector in PUT body |
+| 14 | `frontend/src/lib/api.js` | 40 | New API functions for `/api/models` + modified `/api/strategy-config` |
+| 15 | Build + test cycle | — | `cargo build`, `cargo test --lib`, vite build |
+
+Sentiment overlay logic (Option 3, the 4-strategy fields) is intentionally
+deferred to a follow-up commit after the registry lands. The plan stays
+sequential: registry → sentiment overlay → paper deploy.
+
+### §8.12 Commit staging
+
+Two commits, on `feature/nvda-multi-asset-and-sentiment-overlay`:
+
+1. **Backend batch** (steps 1–6): DB migration, bootstrap loader, telemetry
+   enrichment, API endpoints, AppState update. Includes test updates per
+   the standing AppState construction rule.
+2. **Frontend batch** (steps 7–14): store refactor, websocket routing,
+   Dashboard dropdown, StatusPanel Budget row, Events chips, PnL curve
+   multi-line, StrategyConfigPanel selector, api.js additions.
+
+Per project convention, neither commit is pushed to origin without explicit
+direction.
+
+### §8.13 Bootstrap / cold-start behavior
+
+When `trading_models` is empty at startup:
+
+- If `Config::symbol` is set (default `"QQQ"`, with `Config::short_symbol =
+  "PSQ"`), the engine auto-registers a row named `qqq-bootstrap` with
+  `budget_usd = 5000` and `model_path`/`norm_stats_path` derived from
+  `Config::norm_stats_path`. This preserves Wave A behavior on a fresh DB.
+- If `Config::symbol` is empty, the engine starts in a "no models" mode
+  where the engine serves the dashboard with all-zero metrics and no
+  schedulers run. The user must POST a model via `/api/models` to start
+  trading.
+
+### §8.14 Verification
+
+After backend batch lands:
+
+- `cargo build` clean (no new warnings beyond the pre-existing 23
+  `config::tests` env-var-collision baseline).
+- `cargo test --lib` — same baseline as before the registry work (no new
+  failures introduced).
+- New tests: `db::tests::register_and_load_model`,
+  `api::models::tests::register_validates_paths_exist`.
+- Manual: `curl -X POST http://localhost:9080/api/models -d '{"primary_
+  symbol":"NVDA", ...}'` returns the registered row with a generated uuid.
+
+After frontend batch lands:
+
+- `vite build` clean.
+- Manual: dashboard header dropdown shows both `qqq-bootstrap` and the
+  manually-registered NVDA model. Selecting NVDA → StatusPanel updates
+  with NVDA's slice. Events tab shows entries for both models with the
+  `pair` chip.
+
+### §8.15 Risks
+
+| Risk | Likelihood | Impact | Mitigation |
+|---|---|---|---|
+| Bootstrap row collides with manually-registered model | Low | Medium | Use deterministic uuid prefix `bootstrap-<symbol>` so re-running with same `Config::symbol` is idempotent |
+| `Map<model_id, slice>` partition miss (event arrives before registry loads) | Medium | Medium | WS handlers hold a "pending events" buffer keyed by `model_id` and flush on registry load |
+| Per-model `HashMap<RwLock>` write contention | Low | Low | Each scheduler holds its own entry; reads are via the same `Arc<RwLock<HashMap>>` but contend only on PUT |
+| StatusPanel Portfolio total math off-by-one | Medium | Low | Computed once on the active-model change + on each `TradeFill` event; tested in the dashboard smoke |
+
+---
+
+**Plan amended. Awaiting green-light to start step 1 (db.rs migration + trading_models CRUD).**
