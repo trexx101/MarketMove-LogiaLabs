@@ -12,9 +12,13 @@ use tracing::{debug, info, warn};
 use crate::db::DbPool;
 
 /// Symbols pulled from Yahoo Finance / Moomoo for the equities engine.
-/// QQQ (the trade target) + key constituents + cross-asset ETFs.
+/// QQQ (the trade target) + its inverse (PSQ) + key constituents +
+/// cross-asset ETFs. NVDA + NVDD (DailyNVDA Bear ETF, the short leg for
+/// the NVDA model) are included so both model pairs have data.
 pub const EQUITY_SYMBOLS: &[&str] = &[
-    "QQQ", "AAPL", "MSFT", "NVDA", "GOOG", "AMZN", "META", "TSLA", "TLT", "GLD", "UUP",
+    "QQQ", "PSQ",
+    "NVDA", "NVDD",
+    "AAPL", "MSFT", "GOOG", "AMZN", "META", "TSLA", "TLT", "GLD", "UUP",
 ];
 
 /// Macro series (stored in `equity_candles` with `$` prefixes).
