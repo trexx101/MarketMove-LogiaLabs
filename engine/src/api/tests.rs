@@ -332,3 +332,95 @@ async fn router_serves_static_files_and_api() {
     std::env::set_current_dir(original_cwd).unwrap();
     result
 }
+
+// ---------------------------------------------------------------------------
+// §8 Models API tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn list_models_returns_empty_when_registry_empty() {
+    let pool = test_pool().await;
+    let Json(models) = models::handle_list_models(test_state(pool)).await.unwrap();
+    assert!(models.is_empty(), "fresh registry should have no models");
+}
+
+#[tokio::test]
+async fn register_then_list_model() {
+    let pool = test_pool().await;
+    let state = test_state(pool.clone());
+
+    let body = models::RegisterModelBody {
+        model_id: "qqq-v1".to_string(),
+        primary_symbol: "QQQ".to_string(),
+        inverse_symbol: "PSQ".to_string(),
+        model_path: "models/qqq_v1.txt".to_string(),
+        norm_stats_path: "models/norm_stats_qqq.json".to_string(),
+        budget_usd: 10_000.0,
+        notes: Some("test model".to_string()),
+    };
+    let (status, Json(model)) =
+        models::handle_register_model(state, axum::Json(body)).await.unwrap();
+    assert_eq!(status, axum::http::StatusCode::CREATED);
+    assert_eq!(model.model_id, "qqq-v1");
+    assert_eq!(model.primary_symbol, "QQQ");
+    assert_eq!(model.inverse_symbol, "PSQ");
+    assert!(model.enabled);
+
+    // List should now contain 1 model.
+    let Json(models) = models::handle_list_models(test_state(pool)).await.unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].model_id, "qqq-v1");
+}
+
+#[tokio::test]
+async fn set_enabled_toggles_flag() {
+    let pool = test_pool().await;
+    let state = test_state(pool.clone());
+
+    let body = models::RegisterModelBody {
+        model_id: "nvda-v1".to_string(),
+        primary_symbol: "NVDA".to_string(),
+        inverse_symbol: "NVDD".to_string(),
+        model_path: "models/nvda_v1.txt".to_string(),
+        norm_stats_path: "models/norm_stats_nvda.json".to_string(),
+        budget_usd: 5_000.0,
+        notes: None,
+    };
+    models::handle_register_model(state, axum::Json(body))
+        .await
+        .unwrap();
+
+    // Disable it.
+    let Json(model) = models::handle_set_enabled(
+        test_state(pool.clone()),
+        axum::extract::Path("nvda-v1".to_string()),
+        axum::Json(models::SetEnabledBody { enabled: false }),
+    )
+    .await
+    .unwrap();
+    assert!(!model.enabled);
+
+    // Re-enable.
+    let Json(model) = models::handle_set_enabled(
+        test_state(pool.clone()),
+        axum::extract::Path("nvda-v1".to_string()),
+        axum::Json(models::SetEnabledBody { enabled: true }),
+    )
+    .await
+    .unwrap();
+    assert!(model.enabled);
+}
+
+#[tokio::test]
+async fn set_enabled_returns_404_for_unknown_model() {
+    let pool = test_pool().await;
+    let result = models::handle_set_enabled(
+        test_state(pool),
+        axum::extract::Path("nonexistent".to_string()),
+        axum::Json(models::SetEnabledBody { enabled: true }),
+    )
+    .await;
+    assert!(result.is_err());
+    let (status, _msg) = result.unwrap_err();
+    assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+}

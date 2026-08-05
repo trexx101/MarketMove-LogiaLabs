@@ -108,6 +108,9 @@ pub fn router(
         .route("/api/sentiment/history", get(advisor::handle_sentiment_history))
         .route("/api/events", get(events::handle_events))
         .route("/api/events/archive", get(events::handle_archives))
+        .route("/api/models", get(models::handle_list_models))
+        .route("/api/models", post(models::handle_register_model))
+        .route("/api/models/:id/enabled", put(models::handle_set_enabled))
         .layer(cors)
         .with_state(state)
         .fallback_service(
@@ -142,6 +145,7 @@ mod quote;
 mod strategy_config;
 mod advisor;
 mod events;
+mod models;
 
 #[cfg(test)]
 mod tests;
