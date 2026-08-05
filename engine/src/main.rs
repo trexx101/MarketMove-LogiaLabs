@@ -188,6 +188,15 @@ async fn main() {
         );
     }
 
+    // Per-model strategy params map (§8.6). Populated in the per-model
+    // loop below, then handed to the API router so PUT /api/strategy-config
+    // ?model_id=X can target a specific model's running scheduler.
+    let strategy_params_by_model: std::sync::Arc<
+        tokio::sync::RwLock<
+            std::collections::HashMap<String, std::sync::Arc<tokio::sync::RwLock<strategy::EquityStrategyParams>>>,
+        >,
+    > = std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+
     // Spawn one daily equities scheduler per resolved model. Each model
     // gets its own norm_stats file, its own paper executor (configured
     // for that primary+short pair), and its own strategy_params handle
@@ -248,6 +257,12 @@ async fn main() {
                 pred_5d_filter: cfg.pred_5d_filter,
             },
         ));
+        // §8.6: register this model's params in the shared map so the
+        // API can target it via PUT /api/strategy-config?model_id=X.
+        strategy_params_by_model
+            .write()
+            .await
+            .insert(model.model_id.clone(), model_strategy_params.clone());
         let model_trading_mode = trading_mode.clone();
         let model_strategy_params_clone = model_strategy_params.clone();
         let model_event_logger = event_logger.clone();
@@ -335,7 +350,7 @@ async fn main() {
     // so the API endpoint can verify submitted codes.
     let mut cfg_for_api = cfg.clone();
     cfg_for_api.totp_secret = totp_secret.clone();
-    let app = api::router(pool.clone(), &cfg_for_api, tx, advisor_state, event_logger);
+    let app = api::router(pool.clone(), &cfg_for_api, tx, advisor_state, event_logger, strategy_params_by_model);
     let bind_addr = format!("0.0.0.0:{}", cfg.http_port);
     match tokio::net::TcpListener::bind(&bind_addr).await {
         Ok(listener) => {

@@ -43,6 +43,9 @@ fn test_state(pool: db::DbPool) -> State<AppState> {
         pool,
         trading_mode,
         strategy_params,
+        strategy_params_by_model: std::sync::Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashMap::new(),
+        )),
         symbol: "BTC/USD".to_string(),
         short_symbol: "PSQ".to_string(),
         tx,
@@ -278,7 +281,7 @@ async fn router_serves_static_files_and_api() {
                 Some(tx.clone()),
                 trading_mode.clone(),
             ));
-            router(pool, &config, tx, None, event_logger)
+            router(pool, &config, tx, None, event_logger, std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())))
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -423,4 +426,153 @@ async fn set_enabled_returns_404_for_unknown_model() {
     assert!(result.is_err());
     let (status, _msg) = result.unwrap_err();
     assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// §8.6 Per-model strategy-config tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn strategy_config_get_without_model_id_uses_default() {
+    let pool = test_pool().await;
+    let state = test_state(pool);
+    let Json(resp) = strategy_config::handle_get(
+        state,
+        axum::extract::Query(strategy_config::ModelIdQuery { model_id: None }),
+    )
+    .await
+    .unwrap();
+    assert!(resp.model_id.is_none(), "no model_id should resolve to default");
+    assert_eq!(resp.entry_threshold, 0.005);
+}
+
+#[tokio::test]
+async fn strategy_config_get_with_unknown_model_id_falls_back_to_default() {
+    let pool = test_pool().await;
+    let state = test_state(pool);
+    let Json(resp) = strategy_config::handle_get(
+        state,
+        axum::extract::Query(strategy_config::ModelIdQuery {
+            model_id: Some("nonexistent".to_string()),
+        }),
+    )
+    .await
+    .unwrap();
+    // Should fall back to default, model_id in response should be None.
+    assert!(resp.model_id.is_none());
+}
+
+#[tokio::test]
+async fn strategy_config_get_with_known_model_id_returns_per_model_params() {
+    let pool = test_pool().await;
+    let state = test_state(pool);
+
+    // Register a model and insert a per-model params entry with a custom threshold.
+    db::register_model(
+        &state.pool,
+        "test-q",
+        "QQQ",
+        "PSQ",
+        "models/q.txt",
+        "models/norm_q.json",
+        10_000.0,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let custom_params = std::sync::Arc::new(tokio::sync::RwLock::new(
+        crate::strategy::EquityStrategyParams {
+            entry_threshold: 0.015,
+            exit_threshold: -0.005,
+            sma_window: 5,
+            enable_shorting: true,
+            short_entry_threshold: -0.008,
+            short_exit_threshold: 0.002,
+            pred_5d_filter: false,
+        },
+    ));
+    state
+        .strategy_params_by_model
+        .write()
+        .await
+        .insert("test-q".to_string(), custom_params);
+
+    let Json(resp) = strategy_config::handle_get(
+        state,
+        axum::extract::Query(strategy_config::ModelIdQuery {
+            model_id: Some("test-q".to_string()),
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(resp.model_id, Some("test-q".to_string()));
+    assert_eq!(resp.entry_threshold, 0.015);
+    assert_eq!(resp.sma_window, 5);
+    assert!(resp.enable_shorting);
+}
+
+#[tokio::test]
+async fn strategy_config_put_with_model_id_updates_per_model_params() {
+    let pool = test_pool().await;
+    let state = test_state(pool.clone());
+
+    db::register_model(
+        &state.pool,
+        "test-nvda",
+        "NVDA",
+        "NVDD",
+        "models/nvda.txt",
+        "models/norm_nvda.json",
+        5_000.0,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Insert default per-model params.
+    let custom_params = std::sync::Arc::new(tokio::sync::RwLock::new(
+        crate::strategy::EquityStrategyParams {
+            entry_threshold: 0.005,
+            exit_threshold: -0.0017,
+            sma_window: 3,
+            enable_shorting: false,
+            short_entry_threshold: -0.004,
+            short_exit_threshold: 0.001,
+            pred_5d_filter: true,
+        },
+    ));
+    state
+        .strategy_params_by_model
+        .write()
+        .await
+        .insert("test-nvda".to_string(), custom_params.clone());
+
+    // PUT to change entry_threshold for this model only.
+    let update = strategy_config::StrategyConfigUpdate {
+        entry_threshold: Some(0.012),
+        exit_threshold: None,
+        sma_window: None,
+        pred_5d_filter: None,
+        enable_shorting: None,
+        short_entry_threshold: None,
+        short_exit_threshold: None,
+    };
+    let Json(resp) = strategy_config::handle_put(
+        state.clone(),
+        axum::extract::Query(strategy_config::ModelIdQuery {
+            model_id: Some("test-nvda".to_string()),
+        }),
+        axum::Json(update),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(resp.model_id, Some("test-nvda".to_string()));
+    assert_eq!(resp.entry_threshold, 0.012);
+
+    // Verify the underlying Arc<RwLock<>> was updated (the one the scheduler holds).
+    let sp = custom_params.read().await;
+    assert_eq!(sp.entry_threshold, 0.012);
 }

@@ -22,7 +22,19 @@ pub struct AppState {
     /// endpoint can flip it while the scheduler is reading it.
     pub trading_mode: std::sync::Arc<tokio::sync::RwLock<crate::config::TradingMode>>,
     /// Shared strategy params — mutable at runtime via /api/strategy-config.
+    ///
+    /// This is the **default** set, used when no `model_id` is supplied to
+    /// the strategy-config endpoint. Per-model overrides live in
+    /// [`strategy_params_by_model`].
     pub strategy_params: std::sync::Arc<tokio::sync::RwLock<EquityStrategyParams>>,
+    /// Per-model strategy params (§8.6). Keyed by `model_id`.
+    ///
+    /// Populated by `main()` during the per-model bootstrap loop. The
+    /// `/api/strategy-config?model_id=X` endpoint reads and writes the
+    /// entry for model X; the running scheduler for that model holds a
+    /// clone of the same `Arc<RwLock<>>` so updates take effect live.
+    pub strategy_params_by_model:
+        std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, std::sync::Arc<tokio::sync::RwLock<EquityStrategyParams>>>>>,
     pub symbol: String,
     /// Short instrument symbol (e.g. "PSQ") used to express short positions.
     pub short_symbol: String,
@@ -49,6 +61,7 @@ pub fn router(
     tx: ws::TelemetrySender,
     advisor: Option<std::sync::Arc<crate::advisor::AdvisorState>>,
     event_logger: std::sync::Arc<crate::event::EventLogger>,
+    strategy_params_by_model: std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, std::sync::Arc<tokio::sync::RwLock<EquityStrategyParams>>>>>,
 ) -> Router {
     let trading_mode = std::sync::Arc::new(tokio::sync::RwLock::new(config.trading_mode));
     let strategy_params = std::sync::Arc::new(tokio::sync::RwLock::new(EquityStrategyParams {
@@ -64,6 +77,7 @@ pub fn router(
         pool,
         trading_mode,
         strategy_params,
+        strategy_params_by_model,
         symbol: config.symbol.clone(),
         short_symbol: config.short_symbol.clone(),
         tx,
@@ -142,10 +156,10 @@ mod equity;
 mod backtest;
 pub mod mode;
 mod quote;
-mod strategy_config;
+pub mod strategy_config;
 mod advisor;
 mod events;
-mod models;
+pub mod models;
 
 #[cfg(test)]
 mod tests;
