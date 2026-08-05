@@ -608,6 +608,68 @@ pub async fn record_walk_forward_result(
     Ok(())
 }
 
+/// Synthetic `TradingModel` from Config defaults for cold-start fallback
+/// (§8 plan amendment 2026-08-05).
+///
+/// Used when `trading_models` is empty so existing single-symbol paper
+/// deployments survive a fresh DB without operator action. The synthetic
+/// `model_id` `"bootstrap-default"` is reserved and must never appear in
+/// user-managed registry rows.
+pub fn bootstrap_default_model(
+    primary_symbol: &str,
+    inverse_symbol: &str,
+    norm_stats_path: &str,
+) -> TradingModel {
+    TradingModel {
+        model_id: "bootstrap-default".to_string(),
+        primary_symbol: primary_symbol.to_string(),
+        inverse_symbol: inverse_symbol.to_string(),
+        model_path: "<bootstrap>".to_string(),
+        norm_stats_path: norm_stats_path.to_string(),
+        budget_usd: 0.0,
+        enabled: true,
+        deployed_at: Utc::now().timestamp(),
+        last_wf_ic: None,
+        last_wf_at: None,
+        notes: Some("bootstrap from Config defaults".to_string()),
+    }
+}
+
+/// Resolve the set of trading models the engine will run at startup
+/// (§8 plan amendment 2026-08-05).
+///
+/// - If the registry has at least one `enabled = 1` row, those rows are
+///   returned in `deployed_at ASC` order.
+/// - If the registry is empty, a single synthetic bootstrap model built
+///   from the supplied `(primary_symbol, inverse_symbol, norm_stats_path)`
+///   is returned.
+///
+/// `loaded_count` returns the number of registry rows that backed the
+/// result (0 for the bootstrap case, >0 when registry rows were used).
+/// Useful for logging the cold-start vs. registry path without exposing
+/// the resolver's internals to callers.
+pub async fn resolve_active_models(
+    pool: &DbPool,
+    primary_symbol: &str,
+    inverse_symbol: &str,
+    norm_stats_path: &str,
+) -> Result<(Vec<TradingModel>, usize)> {
+    let rows = load_enabled_models(pool).await?;
+    if rows.is_empty() {
+        Ok((
+            vec![bootstrap_default_model(
+                primary_symbol,
+                inverse_symbol,
+                norm_stats_path,
+            )],
+            0,
+        ))
+    } else {
+        let n = rows.len();
+        Ok((rows, n))
+    }
+}
+
 /// Insert or update a candle row identified by its open-time unix timestamp.
 pub async fn upsert_candle(pool: &DbPool, c: &Candle) -> Result<()> {
     sqlx::query(
@@ -2174,6 +2236,109 @@ mod tests {
         let model = load_model_by_id(&pool, "u-wf").await.unwrap().unwrap();
         assert!(model.last_wf_ic.is_none());
         assert_eq!(model.last_wf_at, Some(1_700_086_400));
+    }
+
+    #[test]
+    fn bootstrap_default_model_uses_config_values() {
+        let m = bootstrap_default_model("QQQ", "PSQ", "models/norm_stats_qqq_v1.json");
+        assert_eq!(m.model_id, "bootstrap-default");
+        assert_eq!(m.primary_symbol, "QQQ");
+        assert_eq!(m.inverse_symbol, "PSQ");
+        assert_eq!(m.norm_stats_path, "models/norm_stats_qqq_v1.json");
+        assert_eq!(m.pair(), "QQQ/PSQ");
+        assert!(m.is_enabled());
+        assert!((m.budget_usd - 0.0).abs() < 1e-9);
+        assert!(m.last_wf_ic.is_none());
+        assert!(m.last_wf_at.is_none());
+        assert_eq!(
+            m.notes.as_deref(),
+            Some("bootstrap from Config defaults")
+        );
+        assert_eq!(m.model_path, "<bootstrap>");
+        // Sanity: deployed_at is "now-ish" (within 5 seconds of test time).
+        let now = Utc::now().timestamp();
+        assert!((m.deployed_at - now).abs() < 5, "deployed_at drift too large");
+    }
+
+    #[tokio::test]
+    async fn resolve_active_models_falls_back_to_bootstrap_when_empty() {
+        let pool = test_pool().await;
+        let (models, count) = resolve_active_models(
+            &pool,
+            "QQQ",
+            "PSQ",
+            "models/norm_stats_qqq_v1.json",
+        )
+        .await
+        .unwrap();
+        assert_eq!(count, 0, "loaded_count must be 0 for cold-start");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].model_id, "bootstrap-default");
+        assert_eq!(models[0].primary_symbol, "QQQ");
+        assert_eq!(models[0].inverse_symbol, "PSQ");
+        assert!(models[0].is_enabled());
+    }
+
+    #[tokio::test]
+    async fn resolve_active_models_uses_registry_when_present() {
+        let pool = test_pool().await;
+        register_model(
+            &pool,
+            "u-a",
+            "QQQ",
+            "PSQ",
+            "m/qqq.pt",
+            "m/qqq.json",
+            5000.0,
+            None,
+        )
+        .await
+        .unwrap();
+        register_model(
+            &pool,
+            "u-b",
+            "NVDA",
+            "NVDD",
+            "m/nvda.pt",
+            "m/nvda.json",
+            7500.0,
+            None,
+        )
+        .await
+        .unwrap();
+        // Disable u-b so only u-a is enabled.
+        update_model_enabled(&pool, "u-b", false).await.unwrap();
+
+        let (models, count) = resolve_active_models(
+            &pool,
+            "QQQ",
+            "PSQ",
+            "models/norm_stats_qqq_v1.json",
+        )
+        .await
+        .unwrap();
+        assert_eq!(count, 1, "loaded_count must equal enabled rows");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].model_id, "u-a");
+        assert_eq!(models[0].primary_symbol, "QQQ");
+        assert_eq!(models[0].inverse_symbol, "PSQ");
+        assert!(models[0].is_enabled());
+
+        // Re-enable u-b, resolver should now see both.
+        update_model_enabled(&pool, "u-b", true).await.unwrap();
+        let (models, count) = resolve_active_models(
+            &pool,
+            "QQQ",
+            "PSQ",
+            "models/norm_stats_qqq_v1.json",
+        )
+        .await
+        .unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(models.len(), 2);
+        let ids: Vec<&str> = models.iter().map(|m| m.model_id.as_str()).collect();
+        assert!(ids.contains(&"u-a"));
+        assert!(ids.contains(&"u-b"));
     }
 }
 
