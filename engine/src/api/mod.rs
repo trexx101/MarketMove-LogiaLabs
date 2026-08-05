@@ -24,7 +24,11 @@ pub struct AppState {
     /// Shared strategy params — mutable at runtime via /api/strategy-config.
     pub strategy_params: std::sync::Arc<tokio::sync::RwLock<EquityStrategyParams>>,
     pub symbol: String,
+    /// Short instrument symbol (e.g. "PSQ") used to express short positions.
+    pub short_symbol: String,
     pub tx: ws::TelemetrySender,
+    /// Unified event logger for trades, data fetches, system events.
+    pub event_logger: std::sync::Arc<crate::event::EventLogger>,
     /// Path to the parity marker JSON (re-checked at request time by /api/mode).
     pub parity_marker_path: String,
     /// Maximum age in seconds before the parity marker is considered stale.
@@ -35,9 +39,17 @@ pub struct AppState {
     pub zmq_endpoint: String,
     /// Path to the norm stats JSON file for feature normalization.
     pub norm_stats_path: String,
+    /// Phase 4: AI advisor state. None if advisor is disabled.
+    pub advisor: Option<std::sync::Arc<crate::advisor::AdvisorState>>,
 }
 
-pub fn router(pool: db::DbPool, config: &Config, tx: ws::TelemetrySender) -> Router {
+pub fn router(
+    pool: db::DbPool,
+    config: &Config,
+    tx: ws::TelemetrySender,
+    advisor: Option<std::sync::Arc<crate::advisor::AdvisorState>>,
+    event_logger: std::sync::Arc<crate::event::EventLogger>,
+) -> Router {
     let trading_mode = std::sync::Arc::new(tokio::sync::RwLock::new(config.trading_mode));
     let strategy_params = std::sync::Arc::new(tokio::sync::RwLock::new(EquityStrategyParams {
         entry_threshold: config.entry_threshold,
@@ -53,12 +65,15 @@ pub fn router(pool: db::DbPool, config: &Config, tx: ws::TelemetrySender) -> Rou
         trading_mode,
         strategy_params,
         symbol: config.symbol.clone(),
+        short_symbol: config.short_symbol.clone(),
         tx,
+        event_logger,
         parity_marker_path: config.parity_marker_path.clone(),
         parity_max_age_secs: config.parity_max_age_secs,
         totp_secret: config.totp_secret.clone(),
         zmq_endpoint: config.zmq_endpoint.clone(),
         norm_stats_path: config.norm_stats_path.clone(),
+        advisor,
     };
 
     let cors = CorsLayer::new()
@@ -87,6 +102,12 @@ pub fn router(pool: db::DbPool, config: &Config, tx: ws::TelemetrySender) -> Rou
         .route("/api/mode", get(mode::handle_get_mode))
         .route("/api/mode", post(mode::handle_set_mode))
         .route("/api/v1/ws", get(ws::ws_handler))
+        .route("/api/advisor/briefing", get(advisor::handle_get_briefing))
+        .route("/api/advisor/ask", post(advisor::handle_ask))
+        .route("/api/advisor/refresh", post(advisor::handle_refresh))
+        .route("/api/sentiment/history", get(advisor::handle_sentiment_history))
+        .route("/api/events", get(events::handle_events))
+        .route("/api/events/archive", get(events::handle_archives))
         .layer(cors)
         .with_state(state)
         .fallback_service(
@@ -119,6 +140,8 @@ mod backtest;
 pub mod mode;
 mod quote;
 mod strategy_config;
+mod advisor;
+mod events;
 
 #[cfg(test)]
 mod tests;

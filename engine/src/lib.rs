@@ -1,9 +1,12 @@
+pub mod advisor;
 pub mod api;
 pub mod bridge;
 pub mod config;
 pub mod data;
 pub mod db;
+pub mod event;
 pub mod exec;
+pub mod archive;
 pub mod features;
 pub mod market_hours;
 pub mod normalize;

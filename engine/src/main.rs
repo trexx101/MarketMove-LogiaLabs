@@ -1,9 +1,12 @@
+mod advisor;
 mod api;
 mod bridge;
 mod config;
 mod data;
 mod db;
+mod event;
 mod exec;
+mod archive;
 mod features;
 mod normalize;
 mod market_hours;
@@ -125,6 +128,22 @@ async fn main() {
     // entry to use. Initial value mirrors Config::trading_mode.
     let trading_mode = std::sync::Arc::new(tokio::sync::RwLock::new(cfg.trading_mode));
 
+    // Event logger — wraps DB + telemetry sender + mode ref for unified
+    // event persistence and broadcast.
+    let event_logger = std::sync::Arc::new(crate::event::EventLogger::new(
+        pool.clone(),
+        Some(tx.clone()),
+        trading_mode.clone(),
+    ));
+
+    // Emit engine-started event.
+    event_logger
+        .emit(crate::event::EngineEvent::engine_started(
+            cfg.trading_mode,
+            &cfg.symbol,
+        ))
+        .await;
+
     // Run the equities REST backfill synchronously BEFORE spawning the
     // ingestion supervisor. This seeds QQQ + constituents + macro history so
     // downstream features have enough lookback. Idempotent: re-runs top up
@@ -132,6 +151,13 @@ async fn main() {
     if let Err(e) = data::backfill_equities(&pool, 3 * 24 * 3600).await {
         eprintln!("equities backfill fatal error: {:#}", e);
         process::exit(1);
+    }
+
+    // Seed sentiment cache (Phase 4 — Finnhub). Runs at startup so the
+    // advisor has sentiment data available from day one. Falls back to
+    // stub if FINNHUB_API_KEY is missing.
+    if let Err(e) = data::sentiment::seed_sentiment_cache(&pool, data::EQUITY_SYMBOLS).await {
+        eprintln!("sentiment seed warning: {:#}", e);
     }
 
     // Warn if the primary symbol's latest candle is significantly behind.
@@ -171,6 +197,7 @@ async fn main() {
     let scheduler_trading_mode = trading_mode.clone();
     let scheduler_executor = executor.clone();
     let scheduler_strategy_params = strategy_params.clone();
+    let scheduler_event_logger = event_logger.clone();
     tokio::spawn(async move {
         match scheduler::EquityScheduler::new(
             scheduler_pool,
@@ -182,6 +209,7 @@ async fn main() {
             scheduler_trading_mode,
             scheduler_executor,
             Some(scheduler_tx),
+            Some(scheduler_event_logger),
         ).await {
             Ok(mut sched) => {
                 if let Err(e) = sched.run().await {
@@ -197,6 +225,29 @@ async fn main() {
     // (reads 0.5 neutral). Configurable via LLM_MODEL, LLM_API_BASE, LLM_CACHE_TTL.
     let llm_cfg = features::llm::LlmRegimeConfig::from_env();
     features::llm::spawn_regime_cache_task(llm_cfg).await;
+
+    // Phase 4: Advisor — daily pre-market briefing task.
+    let advisor_cfg = advisor::AdvisorConfig::from_env(&cfg);
+    let advisor_state = if advisor_cfg.is_enabled() {
+        let state = std::sync::Arc::new(advisor::AdvisorState::new(advisor_cfg, tx.clone()));
+        let briefing_pool = pool.clone();
+        let briefing_symbol = cfg.symbol.clone();
+        let briefing_state = state.clone();
+        let notify = state.notify.clone();
+        tokio::spawn(async move {
+            advisor::briefing::run_briefing_loop(
+                briefing_state,
+                briefing_pool,
+                briefing_symbol,
+                notify,
+            ).await;
+        });
+        info!("advisor background task started");
+        Some(state)
+    } else {
+        info!("advisor disabled — no OPENROUTER_API_KEY or config");
+        None
+    };
 
     // Spawn the hourly actuals-computation task. Runs every hour with a 5-min
     // initial delay so it doesn't race the first scheduler tick. Follows the
@@ -220,7 +271,7 @@ async fn main() {
     // so the API endpoint can verify submitted codes.
     let mut cfg_for_api = cfg.clone();
     cfg_for_api.totp_secret = totp_secret.clone();
-    let app = api::router(pool.clone(), &cfg_for_api, tx);
+    let app = api::router(pool.clone(), &cfg_for_api, tx, advisor_state, event_logger);
     let bind_addr = format!("0.0.0.0:{}", cfg.http_port);
     match tokio::net::TcpListener::bind(&bind_addr).await {
         Ok(listener) => {

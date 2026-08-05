@@ -513,9 +513,13 @@ pub(crate) async fn handle_equity_trades(
         .clamp(1, 10_000);
 
     // fetch_recent_equity_trades returns newest-first; reverse for chronological.
-    let mut rows = db::fetch_recent_equity_trades(&state.pool, &symbol, limit as usize)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
+    let all_symbols = symbol == "*" || symbol == "ALL";
+    let mut rows = if all_symbols {
+        db::fetch_recent_all_equity_trades(&state.pool, limit as usize).await
+    } else {
+        db::fetch_recent_equity_trades(&state.pool, &symbol, limit as usize).await
+    }
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
     rows.reverse();
 
     let mut cumulative = 0.0_f64;

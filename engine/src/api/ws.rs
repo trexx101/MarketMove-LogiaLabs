@@ -77,6 +77,23 @@ pub enum TelemetryEvent {
         short_entry_threshold: f64,
         short_exit_threshold: f64,
     },
+    /// Advisor briefing generated (Phase 4). Pushed to dashboard on completion.
+    AdvisorBriefing {
+        for_date: String,
+        /// The parsed briefing struct. Serialized inline.
+        briefing: crate::advisor::AdvisorBriefing,
+    },
+    /// Unified engine event for the Events page. Persisted to `engine_events`
+    /// and broadcast for real-time display.
+    EngineEvent {
+        ts: i64,
+        category: String,
+        severity: String,
+        mode: String,
+        source: String,
+        message: String,
+        payload: serde_json::Value,
+    },
 }
 
 /// Sender half of the telemetry broadcast channel.

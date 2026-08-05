@@ -5,6 +5,7 @@ import {
   features,
   trades,
   chartData,
+  events,
 } from './stores.js';
 
 let ws = null;
@@ -107,6 +108,22 @@ function handleMessage(raw) {
     case 'StrategyConfigChange':
       // Strategy params changed — trigger chart refresh
       chartData.set(null);
+      break;
+
+    case 'EngineEvent':
+      events.update((list) => {
+        const entry = {
+          id: msg.id || null,
+          ts: msg.ts,
+          category: msg.category,
+          severity: msg.severity,
+          mode: msg.mode,
+          source: msg.source,
+          message: msg.message,
+          payload: msg.payload,
+        };
+        return [entry, ...list].slice(0, 100);
+      });
       break;
 
     default:
