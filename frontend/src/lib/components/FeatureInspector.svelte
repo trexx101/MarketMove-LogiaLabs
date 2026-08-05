@@ -1,7 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { fetchEquityFeatures } from '../api.js';
-  import { features } from '../stores.js';
+  import { features, activeModelId, models } from '../stores.js';
 
   const FEATURE_DEFS = [
     { key: 'trend_slope',            label: 'trend_slope',  center: 0,   scale: 0.05 },
@@ -16,17 +16,28 @@
 
   let localFeatures = null;
   let error = null;
+  let lastModelId = null;
 
-  onMount(async () => {
+  // §8: reload features when the active model changes.
+  $: if ($activeModelId && $activeModelId !== lastModelId) {
+    lastModelId = $activeModelId;
+    loadFeatures();
+  }
+
+  async function loadFeatures() {
     try {
-      const data = await fetchEquityFeatures('QQQ', 500);
+      const m = $models.find((mm) => mm.model_id === $activeModelId);
+      const sym = m?.primary_symbol || 'QQQ';
+      const data = await fetchEquityFeatures(sym, 500);
       if (data.latest) {
         localFeatures = data.latest;
       }
     } catch (e) {
       error = e.message;
     }
-  });
+  }
+
+  onMount(loadFeatures);
 
   $: if ($features) {
     localFeatures = $features;

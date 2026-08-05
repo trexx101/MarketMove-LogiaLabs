@@ -52,6 +52,15 @@
     };
     return icons[cat] || '📌';
   }
+
+  function modelId(ev) {
+    // §8: model_id is in payload for per-model events, or top-level for EngineEvent
+    return ev.payload?.model_id || ev.model_id || null;
+  }
+
+  function pairLabel(ev) {
+    return ev.payload?.pair || ev.pair || null;
+  }
 </script>
 
 <div class="events-page">
@@ -87,6 +96,9 @@
           <span class="category">{ev.category}</span>
           <span class="severity" style={severityColor(ev.severity)}>{ev.severity}</span>
           <span class="mode badge {ev.mode}">{ev.mode}</span>
+          {#if modelId(ev)}
+            <span class="model-badge" title={pairLabel(ev) || ''}>{modelId(ev)}</span>
+          {/if}
           <span class="message">{ev.message}</span>
           {#if ev.payload && Object.keys(ev.payload).length > 0}
             <details class="payload">
@@ -157,6 +169,15 @@
   .mode.badge.live {
     background: #3a1e1e;
     color: #f38ba8;
+  }
+  .model-badge {
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 0.7rem;
+    font-family: var(--font-mono);
+    background: #1e2a3a;
+    color: #89dceb;
+    white-space: nowrap;
   }
   .payload {
     grid-column: 1 / -1;

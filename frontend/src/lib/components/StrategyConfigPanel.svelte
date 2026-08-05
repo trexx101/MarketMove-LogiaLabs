@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { fetchStrategyConfig, saveStrategyConfig } from '../api.js';
+  import { activeModelId } from '../stores.js';
 
   let config = {
     entry_threshold: 0.001,
@@ -17,13 +18,23 @@
   let error = '';
   let success = '';
 
-  onMount(async () => {
+  // §8.6: reload config when the active model changes.
+  let lastLoadedModel = null;
+  $: if ($activeModelId && $activeModelId !== lastLoadedModel) {
+    lastLoadedModel = $activeModelId;
+    loadConfig();
+  }
+
+  async function loadConfig() {
     try {
-      config = await fetchStrategyConfig();
+      config = await fetchStrategyConfig($activeModelId);
+      dirty = false;
     } catch (e) {
       error = `Failed to load: ${e.message}`;
     }
-  });
+  }
+
+  onMount(loadConfig);
 
   function markDirty() {
     dirty = true;
@@ -35,7 +46,7 @@
     error = '';
     success = '';
     try {
-      config = await saveStrategyConfig(config);
+      config = await saveStrategyConfig(config, $activeModelId);
       dirty = false;
       success = 'Saved';
       setTimeout(() => (success = ''), 3000);

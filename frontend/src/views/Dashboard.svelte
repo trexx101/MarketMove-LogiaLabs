@@ -1,8 +1,8 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { fetchStatus, fetchPredictions, fetchChart, fetchAccuracy, fetchEquityTrades } from '../lib/api.js';
+  import { fetchStatus, fetchPredictions, fetchChart, fetchAccuracy, fetchEquityTrades, fetchModels } from '../lib/api.js';
   import { connectWebSocket, disconnectWebSocket } from '../lib/websocket.js';
-  import { status, predictions, chartData, accuracy, trades } from '../lib/stores.js';
+  import { status, predictions, chartData, accuracy, trades, activeModelId, models, setSlice } from '../lib/stores.js';
 
   import StatusPanel from '../lib/components/StatusPanel.svelte';
   import CandlestickChart from '../lib/components/CandlestickChart.svelte';
@@ -15,38 +15,73 @@
   let chartComponent;
   let statusInterval;
 
+  // §8: Load the model registry, pick the first enabled model as active,
+  // then fetch per-model data into the active model's slice.
   onMount(async () => {
     try {
+      const modelList = await fetchModels();
+      models.set(modelList);
+      // Pick the first enabled model (or first model if none enabled).
+      const first = modelList.find((m) => m.enabled) || modelList[0];
+      if (first) {
+        activeModelId.set(first.model_id);
+        await loadModelData(first.model_id, first.primary_symbol);
+      }
+    } catch (e) {
+      console.error('Failed to fetch models:', e);
+      // Fallback: try the old single-model path with no model_id
+      await loadModelData(null, 'QQQ');
+    }
+
+    connectWebSocket();
+
+    statusInterval = setInterval(async () => {
+      const mid = $activeModelId;
+      if (!mid) return;
+      try {
+        const s = await fetchStatus();
+        setSlice(mid, 'status', s);
+      } catch (e) {
+        // Silent — WS may still be delivering updates
+      }
+    }, 30000);
+  });
+
+  async function loadModelData(modelId, symbol) {
+    // Fetch per-model data into the model's slice.
+    const mid = modelId || 'legacy';
+
+    try {
       const s = await fetchStatus();
-      status.set(s);
+      setSlice(mid, 'status', s);
     } catch (e) {
       console.error('Failed to fetch status:', e);
     }
 
     try {
       const p = await fetchPredictions();
-      predictions.set(p);
+      setSlice(mid, 'predictions', p);
     } catch (e) {
       console.error('Failed to fetch predictions:', e);
     }
 
     try {
       const c = await fetchChart();
-      chartData.set(c);
+      setSlice(mid, 'chartData', c);
     } catch (e) {
       console.error('Failed to fetch chart:', e);
     }
 
     try {
       const a = await fetchAccuracy();
-      if (a) accuracy.set(a);
+      if (a) setSlice(mid, 'accuracy', a);
     } catch (e) {
       console.error('Failed to fetch accuracy:', e);
     }
 
     try {
-      const td = await fetchEquityTrades('*', 200);
-      trades.set((td.trades || []).map(t => ({
+      const td = await fetchEquityTrades(symbol || '*', 200);
+      setSlice(mid, 'trades', (td.trades || []).map((t) => ({
         time: t.ts,
         side: t.side,
         qty: t.qty,
@@ -57,18 +92,17 @@
     } catch (e) {
       console.error('Failed to fetch trades:', e);
     }
+  }
 
-    connectWebSocket();
-
-    statusInterval = setInterval(async () => {
-      try {
-        const s = await fetchStatus();
-        status.set(s);
-      } catch (e) {
-        // Silent — WS may still be delivering updates
-      }
-    }, 30000);
-  });
+  // When the active model changes, load its data if the slice is empty.
+  let lastLoadedModel = null;
+  $: if ($activeModelId && $activeModelId !== lastLoadedModel) {
+    lastLoadedModel = $activeModelId;
+    const m = $models.find((mm) => mm.model_id === $activeModelId);
+    if (m) {
+      loadModelData(m.model_id, m.primary_symbol);
+    }
+  }
 
   onDestroy(() => {
     disconnectWebSocket();
@@ -82,23 +116,28 @@
       chartComponent.setPredictions(preds, lastClose);
     }
   }
+
+  function onModelChange(e) {
+    activeModelId.set(e.target.value);
+  }
+
+  $: modelOptions = $models.map((m) => ({
+    model_id: m.model_id,
+    label: `${m.primary_symbol}/${m.inverse_symbol}`,
+    enabled: m.enabled,
+  }));
 </script>
 
-<!--
-  Layout B — TradingView-Lite
-  ┌────────────────────────────┬──────────────┐
-  │                            │   STATUS     │
-  │         CHART (hero)       ├──────────────┤
-  │                            │   TRADES     │
-  ├────────────────────────────┴──────────────┤
-  │              PnL EQUITY CURVE             │
-  ├────────────┬──────────────┬───────────────┤
-  │  FEATURES  │   HEALTH     │   STRATEGY    │
-  └────────────┴──────────────┴───────────────┘
--->
 <div class="dashboard">
   <div class="dash-header">
     <h1>Dashboard</h1>
+    <select class="model-selector" value={$activeModelId} on:change={onModelChange}>
+      {#each modelOptions as opt}
+        <option value={opt.model_id} disabled={!opt.enabled}>
+          {opt.label}{#if !opt.enabled} (disabled){/if}
+        </option>
+      {/each}
+    </select>
     <span class="dash-subtitle">Logia — Real-time monitoring</span>
   </div>
 
@@ -150,6 +189,22 @@
     font-weight: 600;
     color: var(--text-primary);
     letter-spacing: -0.01em;
+  }
+
+  .model-selector {
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    padding: 0.3rem 0.5rem;
+    border-radius: var(--radius-xs);
+    font-size: 0.82rem;
+    font-family: var(--font-mono);
+    cursor: pointer;
+  }
+
+  .model-selector:focus {
+    outline: none;
+    border-color: var(--accent);
   }
 
   .dash-subtitle {
