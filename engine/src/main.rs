@@ -254,11 +254,15 @@ async fn main() {
         // Clone fields we need into owned strings so the spawned task
         // doesn't borrow from `active_models`.
         let model_primary = model.primary_symbol.clone();
+        let model_id_for_scheduler = model.model_id.clone();
+        let model_pair_for_scheduler = model.pair();
         let model_tx = tx.clone();
         tokio::spawn(async move {
             match scheduler::EquityScheduler::new(
                 model_pool,
                 model_primary,
+                model_id_for_scheduler,
+                model_pair_for_scheduler,
                 &zmq_endpoint,
                 model_norm_stats,
                 feature_window_size,

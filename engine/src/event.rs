@@ -197,49 +197,85 @@ impl EventLogger {
     /// Errors are logged but never propagated — event logging is best-effort
     /// and must not break the engine's main loop.
     pub async fn emit(&self, event: EngineEvent) {
-        let mode = *self.mode.read().await;
-        let mode_str = match mode {
-            TradingMode::Paper => "paper",
-            TradingMode::Live => "live",
-        };
-        let ts = Utc::now().timestamp();
-        let category = event.category.to_string();
-        let severity = event.severity.to_string();
-        let payload = event.payload.to_string();
+        self.emit_with_model(event, None).await;
+    }
 
-        // Persist
-        let res = sqlx::query(
-            r#"INSERT INTO engine_events (ts, category, severity, mode, source, message, payload_json)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
-        )
-        .bind(ts)
-        .bind(&category)
-        .bind(&severity)
-        .bind(mode_str)
-        .bind(event.source)
-        .bind(&event.message)
-        .bind(&payload)
-        .execute(&self.pool)
-        .await;
-
-        if let Err(e) = res {
-            error!(error = %e, "failed to persist engine event");
+    /// Persist + broadcast, attributing the event to a specific model (§8).
+    ///
+    /// `model_id` is added as a top-level `model_id` key in the JSON payload
+    /// so the Events tab can render per-model attribution without reshaping
+    /// the `EngineEvent` schema. `pair` is also added when supplied.
+    pub async fn emit_for_model(
+        &self,
+        event: EngineEvent,
+        model_id: &str,
+        pair: Option<&str>,
+    ) {
+        let mut enriched = event;
+        if let serde_json::Value::Object(ref mut map) = enriched.payload {
+            map.insert("model_id".to_string(), serde_json::Value::String(model_id.to_string()));
+            if let Some(p) = pair {
+                map.insert("pair".to_string(), serde_json::Value::String(p.to_string()));
+            }
+        } else {
+            // payload is not an object — replace with an object carrying the
+            // original value plus the model_id field.
+            let original = std::mem::replace(&mut enriched.payload, serde_json::Value::Null);
+            let mut map = serde_json::Map::new();
+            map.insert("model_id".to_string(), serde_json::Value::String(model_id.to_string()));
+            if let Some(p) = pair {
+                map.insert("pair".to_string(), serde_json::Value::String(p.to_string()));
+            }
+            map.insert("data".to_string(), original);
+            enriched.payload = serde_json::Value::Object(map);
         }
+        self.emit_with_model(enriched, Some(model_id.to_string())).await;
+    }
 
-        // Broadcast
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(TelemetryEvent::EngineEvent {
-                ts,
-                category,
-                severity,
-                mode: mode_str.to_string(),
-                source: event.source.to_string(),
-                message: event.message.clone(),
-                payload: event.payload.clone(),
-            });
+    async fn emit_with_model(&self, event: EngineEvent, _model_id: Option<String>) {
+            let mode = *self.mode.read().await;
+            let mode_str = match mode {
+                TradingMode::Paper => "paper",
+                TradingMode::Live => "live",
+            };
+            let ts = Utc::now().timestamp();
+            let category = event.category.to_string();
+            let severity = event.severity.to_string();
+            let payload = event.payload.to_string();
+
+            // Persist
+            let res = sqlx::query(
+                r#"INSERT INTO engine_events (ts, category, severity, mode, source, message, payload_json)
+                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)"#,
+            )
+            .bind(ts)
+            .bind(&category)
+            .bind(&severity)
+            .bind(mode_str)
+            .bind(event.source)
+            .bind(&event.message)
+            .bind(&payload)
+            .execute(&self.pool)
+            .await;
+
+            if let Err(e) = res {
+                error!(error = %e, "failed to persist engine event");
+            }
+
+            // Broadcast
+            if let Some(tx) = &self.tx {
+                let _ = tx.send(TelemetryEvent::EngineEvent {
+                    ts,
+                    category,
+                    severity,
+                    mode: mode_str.to_string(),
+                    source: event.source.to_string(),
+                    message: event.message.clone(),
+                    payload: event.payload.clone(),
+                });
+            }
         }
     }
-}
 
 #[cfg(test)]
 mod tests {
@@ -328,5 +364,72 @@ mod tests {
             }
             _ => panic!("expected EngineEvent variant"),
         }
+    }
+
+    /// §8 emit_for_model attaches a `model_id` (and optional `pair`) field
+    /// to the JSON payload so the Events tab can attribute events to a
+    /// specific model without reshaping the EngineEvent schema.
+    #[tokio::test]
+    async fn emit_for_model_attaches_model_id_to_payload() {
+        let pool = test_pool().await;
+        let (tx, mut rx) = tokio::sync::broadcast::channel(64);
+        let logger = EventLogger::new(pool.clone(), Some(tx), test_mode());
+
+        let event = EngineEvent::trade_fill("buy", "QQQ", 1.0, 500.0, 0.75, 0.0);
+        logger.emit_for_model(event, "qqq-v1", Some("QQQ/PSQ")).await;
+
+        // Inspect the persisted row — payload_json must carry the model_id.
+        let row: String = sqlx::query_scalar(
+            "SELECT payload_json FROM engine_events ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&row).unwrap();
+        assert_eq!(payload["model_id"], "qqq-v1");
+        assert_eq!(payload["pair"], "QQQ/PSQ");
+        // Original fields must still be present alongside the new ones.
+        assert_eq!(payload["side"], "buy");
+        assert_eq!(payload["symbol"], "QQQ");
+        assert_eq!(payload["price"], 500.0);
+
+        // And the broadcast variant must carry the enriched payload.
+        let event = rx.recv().await.unwrap();
+        match event {
+            TelemetryEvent::EngineEvent { payload, .. } => {
+                assert_eq!(payload["model_id"], "qqq-v1");
+                assert_eq!(payload["pair"], "QQQ/PSQ");
+            }
+            _ => panic!("expected EngineEvent variant"),
+        }
+    }
+
+    /// §8 emit_for_model works when called without `pair` — pair is
+    /// optional for system-level events that don't carry pair semantics.
+    #[tokio::test]
+    async fn emit_for_model_omits_pair_when_none() {
+        let pool = test_pool().await;
+        let logger = EventLogger::new(pool.clone(), None, test_mode());
+
+        logger
+            .emit_for_model(
+                EngineEvent::engine_started(TradingMode::Paper, "QQQ"),
+                "qqq-v1",
+                None,
+            )
+            .await;
+
+        let row: String = sqlx::query_scalar(
+            "SELECT payload_json FROM engine_events ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&row).unwrap();
+        assert_eq!(payload["model_id"], "qqq-v1");
+        assert!(
+            payload.get("pair").is_none(),
+            "pair must be absent when caller passed None: {payload}"
+        );
     }
 }
