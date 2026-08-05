@@ -229,9 +229,13 @@ impl EquityScheduler {
         // Emit unified event.
         if let Some(logger) = &self.event_logger {
             logger
-                .emit(crate::event::EngineEvent::prediction_persisted(
-                    pred.pred_1d, pred.pred_5d, pred.pred_21d, regime,
-                ))
+                .emit_for_model(
+                    crate::event::EngineEvent::prediction_persisted(
+                        pred.pred_1d, pred.pred_5d, pred.pred_21d, regime,
+                    ),
+                    &self.model_id,
+                    Some(&self.pair),
+                )
                 .await;
         }
 
@@ -334,14 +338,18 @@ impl EquityScheduler {
                                         crate::exec::TradeSide::Sell => "sell",
                                     };
                                     logger
-                                        .emit(crate::event::EngineEvent::trade_fill(
-                                            side_str,
-                                            &fill.symbol,
-                                            fill.qty,
-                                            fill.price,
-                                            fill.fee,
-                                            fill.realized_pnl,
-                                        ))
+                                        .emit_for_model(
+                                            crate::event::EngineEvent::trade_fill(
+                                                side_str,
+                                                &fill.symbol,
+                                                fill.qty,
+                                                fill.price,
+                                                fill.fee,
+                                                fill.realized_pnl,
+                                            ),
+                                            &self.model_id,
+                                            Some(&self.pair),
+                                        )
                                         .await;
                                 }
                             }
@@ -396,14 +404,18 @@ impl EquityScheduler {
                                         crate::exec::TradeSide::Sell => "sell",
                                     };
                                     logger
-                                        .emit(crate::event::EngineEvent::trade_fill(
-                                            side_str,
-                                            &fill.symbol,
-                                            fill.qty,
-                                            fill.price,
-                                            fill.fee,
-                                            fill.realized_pnl,
-                                        ))
+                                        .emit_for_model(
+                                            crate::event::EngineEvent::trade_fill(
+                                                side_str,
+                                                &fill.symbol,
+                                                fill.qty,
+                                                fill.price,
+                                                fill.fee,
+                                                fill.realized_pnl,
+                                            ),
+                                            &self.model_id,
+                                            Some(&self.pair),
+                                        )
                                         .await;
                                 }
                             }
