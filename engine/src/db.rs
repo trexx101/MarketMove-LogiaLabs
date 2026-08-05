@@ -210,6 +210,31 @@ CREATE TABLE IF NOT EXISTS engine_events (
 );
 CREATE INDEX IF NOT EXISTS engine_events_ts_idx ON engine_events (ts DESC);
 CREATE INDEX IF NOT EXISTS engine_events_category_ts_idx ON engine_events (category, ts DESC);
+
+-- Multi-model registry (§8 plan amendment 2026-08-05).
+-- The trading unit of meaning is the model, not the symbol. Each row owns
+-- a primary+inverse symbol pair, the path to its trained artifact, the
+-- dollar budget allocated to it, and its enable/disable state. The engine
+-- spawns one EquityScheduler + PaperExecutor per enabled=1 row at startup
+-- while the Config symbol defaults are used as a cold-start fallback when
+-- this table is empty.
+CREATE TABLE IF NOT EXISTS trading_models (
+    model_id        TEXT    PRIMARY KEY,        -- uuid text, not a ticker
+    primary_symbol  TEXT    NOT NULL,           -- e.g. NVDA
+    inverse_symbol  TEXT    NOT NULL,           -- e.g. NVDD
+    model_path      TEXT    NOT NULL,           -- path to model bundle
+    norm_stats_path TEXT    NOT NULL,           -- path to norm stats json
+    budget_usd      REAL    NOT NULL DEFAULT 5000.0,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    deployed_at     INTEGER NOT NULL,
+    last_wf_ic      REAL,
+    last_wf_at      INTEGER,
+    notes           TEXT
+);
+CREATE INDEX IF NOT EXISTS trading_models_enabled_idx
+    ON trading_models (enabled);
+CREATE INDEX IF NOT EXISTS trading_models_primary_symbol_idx
+    ON trading_models (primary_symbol);
 "#;
 
 /// A single OHLCV + VWAP candle as stored in the database.
@@ -264,6 +289,41 @@ pub struct EquityPredictionRow {
     pub source: String,
 }
 
+/// A row from the `trading_models` registry (§8 plan amendment 2026-08-05).
+///
+/// The trading unit of meaning is the model, not the symbol. Each row
+/// owns a primary+inverse symbol pair, the path to its trained artifact,
+/// the dollar budget allocated to it, and its enable/disable state.
+///
+/// `pair` is a derived display label (e.g. `"QQQ/PSQ"`, `"NVDA/NVDD"`),
+/// computed by `TradingModel::pair()`.
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct TradingModel {
+    pub model_id: String,
+    pub primary_symbol: String,
+    pub inverse_symbol: String,
+    pub model_path: String,
+    pub norm_stats_path: String,
+    pub budget_usd: f64,
+    pub enabled: bool,
+    pub deployed_at: i64,
+    pub last_wf_ic: Option<f64>,
+    pub last_wf_at: Option<i64>,
+    pub notes: Option<String>,
+}
+
+impl TradingModel {
+    /// Derived display label: `"<PRIMARY>/<INVERSE>"`, uppercase.
+    pub fn pair(&self) -> String {
+        format!("{}/{}", self.primary_symbol, self.inverse_symbol).to_uppercase()
+    }
+
+    /// Whether this model is currently active in the registry.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+}
+
 /// Open (or create) the SQLite database and apply the startup DDL.
 pub async fn open(database_url: &str) -> Result<DbPool> {
     // SQLite URLs like `sqlite://data/candles.db` need the parent directory to exist.
@@ -300,6 +360,7 @@ pub async fn open(database_url: &str) -> Result<DbPool> {
 
     migrate_predictions(&pool).await?;
     migrate_sentiment_cache(&pool).await?;
+    migrate_trading_models(&pool).await?;
 
     info!("database ready at {database_url}");
     Ok(pool)
@@ -406,6 +467,144 @@ pub async fn migrate_sentiment_cache(pool: &DbPool) -> Result<()> {
             info!("migrated sentiment_cache: weekly_avg type fixed to REAL");
         }
     }
+    Ok(())
+}
+
+/// Idempotent migration for the `trading_models` registry
+/// (§8 plan amendment 2026-08-05).
+///
+/// The base table is created via the `DDL` block; this function is the
+/// additive-column hook for future schema changes (same PRAGMA table_info
+/// pattern as `migrate_sentiment_cache`).
+pub async fn migrate_trading_models(pool: &DbPool) -> Result<()> {
+    let _ = pool; // no pending migrations; placeholder for future use
+    Ok(())
+}
+
+/// Insert a new model into the `trading_models` registry.
+///
+/// `model_id` must be a UUID-style string (caller is responsible for
+/// generating it; the API layer uses `uuid::Uuid::new_v4()`).
+/// Returns the freshly inserted row.
+pub async fn register_model(
+    pool: &DbPool,
+    model_id: &str,
+    primary_symbol: &str,
+    inverse_symbol: &str,
+    model_path: &str,
+    norm_stats_path: &str,
+    budget_usd: f64,
+    notes: Option<&str>,
+) -> Result<TradingModel> {
+    let deployed_at = Utc::now().timestamp();
+    sqlx::query(
+        r#"INSERT INTO trading_models
+               (model_id, primary_symbol, inverse_symbol, model_path,
+                norm_stats_path, budget_usd, enabled, deployed_at,
+                last_wf_ic, last_wf_at, notes)
+           VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, NULL, ?)"#,
+    )
+    .bind(model_id)
+    .bind(primary_symbol)
+    .bind(inverse_symbol)
+    .bind(model_path)
+    .bind(norm_stats_path)
+    .bind(budget_usd)
+    .bind(deployed_at)
+    .bind(notes)
+    .execute(pool)
+    .await
+    .context("register_model: INSERT trading_models")?;
+
+    load_model_by_id(pool, model_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("register_model: row vanished after insert"))
+}
+
+/// Toggle the `enabled` flag for a registered model.
+///
+/// Returns `Ok(None)` if `model_id` does not exist (callers should map
+/// that to a 404).
+pub async fn update_model_enabled(
+    pool: &DbPool,
+    model_id: &str,
+    enabled: bool,
+) -> Result<Option<TradingModel>> {
+    let rows = sqlx::query("UPDATE trading_models SET enabled = ? WHERE model_id = ?")
+        .bind(if enabled { 1_i64 } else { 0_i64 })
+        .bind(model_id)
+        .execute(pool)
+        .await
+        .context("update_model_enabled: UPDATE trading_models")?
+        .rows_affected();
+
+    if rows == 0 {
+        return Ok(None);
+    }
+    load_model_by_id(pool, model_id).await
+}
+
+/// Fetch a single model by id. Returns `Ok(None)` if the id is unknown.
+pub async fn load_model_by_id(pool: &DbPool, model_id: &str) -> Result<Option<TradingModel>> {
+    sqlx::query_as::<_, TradingModel>(
+        "SELECT model_id, primary_symbol, inverse_symbol, model_path,
+                norm_stats_path, budget_usd, enabled, deployed_at,
+                last_wf_ic, last_wf_at, notes
+           FROM trading_models
+          WHERE model_id = ?",
+    )
+    .bind(model_id)
+    .fetch_optional(pool)
+    .await
+    .context("load_model_by_id")
+}
+
+/// Fetch all registered models, newest-first by `deployed_at`.
+pub async fn load_all_models(pool: &DbPool) -> Result<Vec<TradingModel>> {
+    sqlx::query_as::<_, TradingModel>(
+        "SELECT model_id, primary_symbol, inverse_symbol, model_path,
+                norm_stats_path, budget_usd, enabled, deployed_at,
+                last_wf_ic, last_wf_at, notes
+           FROM trading_models
+          ORDER BY deployed_at DESC",
+    )
+    .fetch_all(pool)
+    .await
+    .context("load_all_models")
+}
+
+/// Fetch all models with `enabled = 1`. This is the set the engine
+/// bootstraps into schedulers at startup.
+pub async fn load_enabled_models(pool: &DbPool) -> Result<Vec<TradingModel>> {
+    sqlx::query_as::<_, TradingModel>(
+        "SELECT model_id, primary_symbol, inverse_symbol, model_path,
+                norm_stats_path, budget_usd, enabled, deployed_at,
+                last_wf_ic, last_wf_at, notes
+           FROM trading_models
+          WHERE enabled = 1
+          ORDER BY deployed_at ASC",
+    )
+    .fetch_all(pool)
+    .await
+    .context("load_enabled_models")
+}
+
+/// Update the `last_wf_ic` / `last_wf_at` columns after a walk-forward run.
+pub async fn record_walk_forward_result(
+    pool: &DbPool,
+    model_id: &str,
+    last_wf_ic: Option<f64>,
+    last_wf_at: i64,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE trading_models SET last_wf_ic = ?, last_wf_at = ? WHERE model_id = ?",
+    )
+    .bind(last_wf_ic)
+    .bind(last_wf_at)
+    .bind(model_id)
+    .execute(pool)
+    .await
+    .context("record_walk_forward_result")?;
     Ok(())
 }
 
@@ -1825,6 +2024,156 @@ mod tests {
         let err: String = row.get("last_error");
         assert_eq!(last_ts, 1_700_086_400);
         assert_eq!(err, "timeout");
+    }
+
+    // --- trading_models registry tests (§8 plan amendment 2026-08-05) ---
+
+    #[tokio::test]
+    async fn migrate_trading_models_is_idempotent() {
+        let pool = test_pool().await;
+        migrate_trading_models(&pool).await.unwrap();
+        migrate_trading_models(&pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn register_and_load_model_roundtrip() {
+        let pool = test_pool().await;
+        let model = register_model(
+            &pool,
+            "test-uuid-qqq",
+            "QQQ",
+            "PSQ",
+            "models/qqq_tcn_v1.pt",
+            "models/norm_stats_qqq_v1.json",
+            5000.0,
+            Some("bootstrap"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(model.model_id, "test-uuid-qqq");
+        assert_eq!(model.primary_symbol, "QQQ");
+        assert_eq!(model.inverse_symbol, "PSQ");
+        assert_eq!(model.model_path, "models/qqq_tcn_v1.pt");
+        assert!(model.enabled);
+        assert!((model.budget_usd - 5000.0).abs() < 1e-9);
+        assert_eq!(model.notes.as_deref(), Some("bootstrap"));
+        assert!(model.last_wf_ic.is_none());
+        assert!(model.last_wf_at.is_none());
+
+        // Re-load by id
+        let loaded = load_model_by_id(&pool, "test-uuid-qqq").await.unwrap();
+        assert!(loaded.is_some());
+        assert_eq!(loaded.unwrap().pair(), "QQQ/PSQ");
+
+        // Not found
+        let missing = load_model_by_id(&pool, "no-such-id").await.unwrap();
+        assert!(missing.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_enabled_models_filters_correctly() {
+        let pool = test_pool().await;
+        register_model(
+            &pool,
+            "u-on-1",
+            "QQQ",
+            "PSQ",
+            "m/qqq.pt",
+            "m/qqq.json",
+            5000.0,
+            None,
+        )
+        .await
+        .unwrap();
+        register_model(
+            &pool,
+            "u-off",
+            "NVDA",
+            "NVDD",
+            "m/nvda.pt",
+            "m/nvda.json",
+            5000.0,
+            None,
+        )
+        .await
+        .unwrap();
+        register_model(
+            &pool,
+            "u-on-2",
+            "PLTR",
+            "PSQ",
+            "m/pltr.pt",
+            "m/pltr.json",
+            7500.0,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Disable the middle one
+        update_model_enabled(&pool, "u-off", false).await.unwrap();
+
+        let enabled = load_enabled_models(&pool).await.unwrap();
+        assert_eq!(enabled.len(), 2);
+        // load_enabled_models filters by enabled=1; both ordering fields
+        // are exercised separately because deployed_at can collide.
+        let ids: Vec<&str> = enabled.iter().map(|m| m.model_id.as_str()).collect();
+        assert!(ids.contains(&"u-on-1"), "enabled missing u-on-1: {ids:?}");
+        assert!(ids.contains(&"u-on-2"), "enabled missing u-on-2: {ids:?}");
+        assert!(!ids.contains(&"u-off"), "enabled wrongly includes u-off: {ids:?}");
+
+        // load_all_models returns all three; ordering by deployed_at DESC is
+        // non-deterministic when all three rows share the same timestamp
+        // (sub-second inserts). Test membership instead.
+        let all = load_all_models(&pool).await.unwrap();
+        assert_eq!(all.len(), 3);
+        let all_ids: Vec<&str> = all.iter().map(|m| m.model_id.as_str()).collect();
+        assert!(all_ids.contains(&"u-on-1"), "missing u-on-1: {all_ids:?}");
+        assert!(all_ids.contains(&"u-off"), "missing u-off: {all_ids:?}");
+        assert!(all_ids.contains(&"u-on-2"), "missing u-on-2: {all_ids:?}");
+        // Disabled row must still be returned by load_all_models.
+        assert!(!all.iter().find(|m| m.model_id == "u-off").unwrap().enabled);
+    }
+
+    #[tokio::test]
+    async fn update_model_enabled_returns_none_for_unknown_id() {
+        let pool = test_pool().await;
+        let result = update_model_enabled(&pool, "no-such", true).await.unwrap();
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn record_walk_forward_result_persists() {
+        let pool = test_pool().await;
+        register_model(
+            &pool,
+            "u-wf",
+            "NVDA",
+            "NVDD",
+            "m/nvda.pt",
+            "m/nvda.json",
+            5000.0,
+            None,
+        )
+        .await
+        .unwrap();
+
+        record_walk_forward_result(&pool, "u-wf", Some(0.0823), 1_700_000_000)
+            .await
+            .unwrap();
+
+        let model = load_model_by_id(&pool, "u-wf").await.unwrap().unwrap();
+        assert!(model.last_wf_ic.is_some());
+        assert!((model.last_wf_ic.unwrap() - 0.0823).abs() < 1e-9);
+        assert_eq!(model.last_wf_at, Some(1_700_000_000));
+
+        // Failed gate: last_wf_ic = None, but timestamp still recorded.
+        record_walk_forward_result(&pool, "u-wf", None, 1_700_086_400)
+            .await
+            .unwrap();
+        let model = load_model_by_id(&pool, "u-wf").await.unwrap().unwrap();
+        assert!(model.last_wf_ic.is_none());
+        assert_eq!(model.last_wf_at, Some(1_700_086_400));
     }
 }
 
