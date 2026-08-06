@@ -255,6 +255,10 @@ async fn main() {
                 short_entry_threshold: cfg.short_entry_threshold,
                 short_exit_threshold: cfg.short_exit_threshold,
                 pred_5d_filter: cfg.pred_5d_filter,
+                enable_sentiment_overlay: false,
+                sentiment_reduce_threshold: -0.5,
+                sentiment_exit_threshold: -0.8,
+                sentiment_min_articles: 15,
             },
         ));
         // §8.6: register this model's params in the shared map so the

@@ -37,6 +37,10 @@ fn test_state(pool: db::DbPool) -> State<AppState> {
             short_entry_threshold: -0.004,
             short_exit_threshold: 0.001,
             pred_5d_filter: true,
+            enable_sentiment_overlay: false,
+            sentiment_reduce_threshold: -0.5,
+            sentiment_exit_threshold: -0.8,
+            sentiment_min_articles: 15,
         },
     ));
     State(AppState {
@@ -490,6 +494,10 @@ async fn strategy_config_get_with_known_model_id_returns_per_model_params() {
             short_entry_threshold: -0.008,
             short_exit_threshold: 0.002,
             pred_5d_filter: false,
+            enable_sentiment_overlay: false,
+            sentiment_reduce_threshold: -0.5,
+            sentiment_exit_threshold: -0.8,
+            sentiment_min_articles: 15,
         },
     ));
     state
@@ -541,6 +549,10 @@ async fn strategy_config_put_with_model_id_updates_per_model_params() {
             short_entry_threshold: -0.004,
             short_exit_threshold: 0.001,
             pred_5d_filter: true,
+            enable_sentiment_overlay: false,
+            sentiment_reduce_threshold: -0.5,
+            sentiment_exit_threshold: -0.8,
+            sentiment_min_articles: 15,
         },
     ));
     state
@@ -558,6 +570,10 @@ async fn strategy_config_put_with_model_id_updates_per_model_params() {
         enable_shorting: None,
         short_entry_threshold: None,
         short_exit_threshold: None,
+        enable_sentiment_overlay: None,
+        sentiment_reduce_threshold: None,
+        sentiment_exit_threshold: None,
+        sentiment_min_articles: None,
     };
     let Json(resp) = strategy_config::handle_put(
         state.clone(),
@@ -575,4 +591,67 @@ async fn strategy_config_put_with_model_id_updates_per_model_params() {
     // Verify the underlying Arc<RwLock<>> was updated (the one the scheduler holds).
     let sp = custom_params.read().await;
     assert_eq!(sp.entry_threshold, 0.012);
+}
+
+#[tokio::test]
+async fn strategy_config_sentiment_overlay_update_isolated_per_model() {
+    let pool = test_pool().await;
+    let state = test_state(pool);
+
+    // Insert default per-model params.
+    let custom_params = std::sync::Arc::new(tokio::sync::RwLock::new(
+        crate::strategy::EquityStrategyParams {
+            entry_threshold: 0.005,
+            exit_threshold: -0.0017,
+            sma_window: 3,
+            enable_shorting: false,
+            short_entry_threshold: -0.004,
+            short_exit_threshold: 0.001,
+            pred_5d_filter: true,
+            enable_sentiment_overlay: false,
+            sentiment_reduce_threshold: -0.5,
+            sentiment_exit_threshold: -0.8,
+            sentiment_min_articles: 15,
+        },
+    ));
+    state
+        .strategy_params_by_model
+        .write()
+        .await
+        .insert("test-sentiment".to_string(), custom_params.clone());
+
+    let update = strategy_config::StrategyConfigUpdate {
+        entry_threshold: None,
+        exit_threshold: None,
+        sma_window: None,
+        pred_5d_filter: None,
+        enable_shorting: None,
+        short_entry_threshold: None,
+        short_exit_threshold: None,
+        enable_sentiment_overlay: Some(true),
+        sentiment_reduce_threshold: Some(-0.55),
+        sentiment_exit_threshold: Some(-0.85),
+        sentiment_min_articles: Some(20),
+    };
+    let Json(resp) = strategy_config::handle_put(
+        state.clone(),
+        axum::extract::Query(strategy_config::ModelIdQuery {
+            model_id: Some("test-sentiment".to_string()),
+        }),
+        axum::Json(update),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(resp.model_id, Some("test-sentiment".to_string()));
+    assert!(resp.enable_sentiment_overlay);
+    assert_eq!(resp.sentiment_reduce_threshold, -0.55);
+    assert_eq!(resp.sentiment_exit_threshold, -0.85);
+    assert_eq!(resp.sentiment_min_articles, 20);
+
+    let sp = custom_params.read().await;
+    assert!(sp.enable_sentiment_overlay);
+    assert_eq!(sp.sentiment_reduce_threshold, -0.55);
+    assert_eq!(sp.sentiment_exit_threshold, -0.85);
+    assert_eq!(sp.sentiment_min_articles, 20);
 }

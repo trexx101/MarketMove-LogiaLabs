@@ -481,6 +481,21 @@ pub async fn migrate_trading_models(pool: &DbPool) -> Result<()> {
     Ok(())
 }
 
+/// Latest cached sentiment for a symbol, if any.
+///
+/// Returns (score, buzz) for the most recent row (by date) for the symbol.
+/// If the table is empty, returns None so callers can fall back to stub.
+pub async fn latest_sentiment(pool: &DbPool, symbol: &str) -> Result<Option<(f64, i64)>> {
+    let row: Option<(f64, i64)> = sqlx::query_as(
+        "SELECT score, buzz FROM sentiment_cache WHERE symbol = ?1 ORDER BY date DESC LIMIT 1"
+    )
+    .bind(symbol)
+    .fetch_optional(pool)
+    .await
+    .context("latest_sentiment")?;
+    Ok(row)
+}
+
 /// Insert a new model into the `trading_models` registry.
 ///
 /// `model_id` must be a UUID-style string (caller is responsible for

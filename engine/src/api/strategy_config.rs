@@ -38,6 +38,10 @@ pub struct StrategyConfigResponse {
     pub enable_shorting: bool,
     pub short_entry_threshold: f64,
     pub short_exit_threshold: f64,
+    pub enable_sentiment_overlay: bool,
+    pub sentiment_reduce_threshold: f64,
+    pub sentiment_exit_threshold: f64,
+    pub sentiment_min_articles: i64,
 }
 
 /// Resolve the `Arc<RwLock<EquityStrategyParams>>` for a given model_id.
@@ -79,6 +83,10 @@ pub async fn handle_get(
         enable_shorting: sp.enable_shorting,
         short_entry_threshold: sp.short_entry_threshold,
         short_exit_threshold: sp.short_exit_threshold,
+        enable_sentiment_overlay: sp.enable_sentiment_overlay,
+        sentiment_reduce_threshold: sp.sentiment_reduce_threshold,
+        sentiment_exit_threshold: sp.sentiment_exit_threshold,
+        sentiment_min_articles: sp.sentiment_min_articles,
     }))
 }
 
@@ -98,6 +106,14 @@ pub struct StrategyConfigUpdate {
     pub short_entry_threshold: Option<f64>,
     #[serde(default)]
     pub short_exit_threshold: Option<f64>,
+    #[serde(default)]
+    pub enable_sentiment_overlay: Option<bool>,
+    #[serde(default)]
+    pub sentiment_reduce_threshold: Option<f64>,
+    #[serde(default)]
+    pub sentiment_exit_threshold: Option<f64>,
+    #[serde(default)]
+    pub sentiment_min_articles: Option<i64>,
 }
 
 pub async fn handle_put(
@@ -173,6 +189,43 @@ pub async fn handle_put(
         sp.short_exit_threshold = v;
     }
 
+    if let Some(v) = update.enable_sentiment_overlay {
+        sp.enable_sentiment_overlay = v;
+    }
+
+    if let Some(v) = update.sentiment_reduce_threshold {
+        if v >= 0.0 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("sentiment_reduce_threshold must be < 0, got {v}"),
+            ));
+        }
+        sp.sentiment_reduce_threshold = v;
+    }
+
+    if let Some(v) = update.sentiment_exit_threshold {
+        if v >= 0.0 || v >= sp.sentiment_reduce_threshold {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "sentiment_exit_threshold must be < 0 and < sentiment_reduce_threshold ({}), got {v}",
+                    sp.sentiment_reduce_threshold
+                ),
+            ));
+        }
+        sp.sentiment_exit_threshold = v;
+    }
+
+    if let Some(v) = update.sentiment_min_articles {
+        if v < 0 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("sentiment_min_articles must be >= 0, got {v}"),
+            ));
+        }
+        sp.sentiment_min_articles = v;
+    }
+
     let response = StrategyConfigResponse {
         model_id: resolved_model_id.clone(),
         entry_threshold: sp.entry_threshold,
@@ -182,6 +235,10 @@ pub async fn handle_put(
         enable_shorting: sp.enable_shorting,
         short_entry_threshold: sp.short_entry_threshold,
         short_exit_threshold: sp.short_exit_threshold,
+        enable_sentiment_overlay: sp.enable_sentiment_overlay,
+        sentiment_reduce_threshold: sp.sentiment_reduce_threshold,
+        sentiment_exit_threshold: sp.sentiment_exit_threshold,
+        sentiment_min_articles: sp.sentiment_min_articles,
     };
 
     // Drop the write lock before broadcasting (broadcast may re-read params).
@@ -196,6 +253,10 @@ pub async fn handle_put(
         enable_shorting: response.enable_shorting,
         short_entry_threshold: response.short_entry_threshold,
         short_exit_threshold: response.short_exit_threshold,
+        enable_sentiment_overlay: response.enable_sentiment_overlay,
+        sentiment_reduce_threshold: response.sentiment_reduce_threshold,
+        sentiment_exit_threshold: response.sentiment_exit_threshold,
+        sentiment_min_articles: response.sentiment_min_articles,
     });
 
     // Emit event for the unified log — attribute to the model if resolved.
@@ -209,6 +270,10 @@ pub async fn handle_put(
             enable_shorting: response.enable_shorting,
             short_entry_threshold: response.short_entry_threshold,
             short_exit_threshold: response.short_exit_threshold,
+            enable_sentiment_overlay: response.enable_sentiment_overlay,
+            sentiment_reduce_threshold: response.sentiment_reduce_threshold,
+            sentiment_exit_threshold: response.sentiment_exit_threshold,
+            sentiment_min_articles: response.sentiment_min_articles,
         },
     );
     if let Some(ref mid) = resolved_model_id {

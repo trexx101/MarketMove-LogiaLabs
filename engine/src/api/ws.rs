@@ -98,6 +98,10 @@ pub enum TelemetryEvent {
         enable_shorting: bool,
         short_entry_threshold: f64,
         short_exit_threshold: f64,
+        enable_sentiment_overlay: bool,
+        sentiment_reduce_threshold: f64,
+        sentiment_exit_threshold: f64,
+        sentiment_min_articles: i64,
     },
     /// Advisor briefing generated (Phase 4). Pushed to dashboard on completion.
     AdvisorBriefing {

@@ -147,6 +147,18 @@ pub struct EquityStrategyParams {
     /// Defaults to true (original behavior). Set to false to fire more trades.
     #[serde(default = "default_pred_5d_filter")]
     pub pred_5d_filter: bool,
+    /// Enable sentiment-based risk overlay. Default false per §8.10.
+    #[serde(default = "default_enable_sentiment_overlay")]
+    pub enable_sentiment_overlay: bool,
+    /// Sentiment score below which new entries are blocked (moderate negative).
+    #[serde(default = "default_sentiment_reduce_threshold")]
+    pub sentiment_reduce_threshold: f64,
+    /// Sentiment score below which any position is forced to flat (extreme negative).
+    #[serde(default = "default_sentiment_exit_threshold")]
+    pub sentiment_exit_threshold: f64,
+    /// Minimum article count required for the sentiment overlay to take effect.
+    #[serde(default = "default_sentiment_min_articles")]
+    pub sentiment_min_articles: i64,
 }
 
 fn default_short_entry_threshold() -> f64 {
@@ -157,6 +169,18 @@ fn default_short_exit_threshold() -> f64 {
 }
 fn default_pred_5d_filter() -> bool {
     true
+}
+fn default_enable_sentiment_overlay() -> bool {
+    false
+}
+fn default_sentiment_reduce_threshold() -> f64 {
+    -0.5
+}
+fn default_sentiment_exit_threshold() -> f64 {
+    -0.8
+}
+fn default_sentiment_min_articles() -> i64 {
+    15
 }
 
 impl Default for EquityStrategyParams {
@@ -169,6 +193,10 @@ impl Default for EquityStrategyParams {
             short_entry_threshold: default_short_entry_threshold(),
             short_exit_threshold: default_short_exit_threshold(),
             pred_5d_filter: default_pred_5d_filter(),
+            enable_sentiment_overlay: default_enable_sentiment_overlay(),
+            sentiment_reduce_threshold: default_sentiment_reduce_threshold(),
+            sentiment_exit_threshold: default_sentiment_exit_threshold(),
+            sentiment_min_articles: default_sentiment_min_articles(),
         }
     }
 }
@@ -245,6 +273,42 @@ pub fn next_equity_position(
         }
     }
     current
+}
+
+/// Sentiment risk overlay.
+///
+/// Returns the position after applying sentiment-based risk rules.
+/// - If overlay is disabled or article count is below min_articles: no effect.
+/// - score < exit_threshold: force Flat (hard exit).
+/// - reduce_threshold <= score < exit_threshold: block new entries (return Flat if current is Flat).
+/// - score >= reduce_threshold: no effect.
+///
+/// Note: the original plan proposed a size multiplier to halve position size on
+/// moderate negative sentiment. We instead block new entries only, avoiding
+/// invasive executor changes. See plan §3C deviation note.
+pub fn apply_sentiment_overlay(
+    signal: Position,
+    score: f64,
+    article_count: i64,
+    params: &EquityStrategyParams,
+) -> Position {
+    if !params.enable_sentiment_overlay {
+        return signal;
+    }
+    if article_count < params.sentiment_min_articles {
+        return signal;
+    }
+    if score < params.sentiment_exit_threshold {
+        return Position::Flat;
+    }
+    if score < params.sentiment_reduce_threshold {
+        // Block new entries while still allowing normal exits.
+        if signal != Position::Flat {
+            return signal;
+        }
+        return Position::Flat;
+    }
+    signal
 }
 
 // ---------------------------------------------------------------------------
@@ -377,6 +441,10 @@ mod tests {
             short_entry_threshold: short_entry,
             short_exit_threshold: short_exit,
             pred_5d_filter,
+            enable_sentiment_overlay: false,
+            sentiment_reduce_threshold: -0.5,
+            sentiment_exit_threshold: -0.8,
+            sentiment_min_articles: 15,
         }
     }
 
@@ -537,5 +605,54 @@ mod tests {
         assert_eq!(Position::Long.as_i64(), 1);
         assert_eq!(Position::Short.as_i64(), -1);
         assert_eq!(Position::Flat.as_i64(), 0);
+    }
+
+    #[test]
+    fn sentiment_overlay_disabled_returns_signal() {
+        let mut p = EquityStrategyParams::default();
+        p.enable_sentiment_overlay = false;
+        assert_eq!(apply_sentiment_overlay(Position::Long, -0.9, 20, &p), Position::Long);
+    }
+
+    #[test]
+    fn sentiment_overlay_insufficient_articles_returns_signal() {
+        let mut p = EquityStrategyParams::default();
+        p.enable_sentiment_overlay = true;
+        p.sentiment_min_articles = 20;
+        assert_eq!(apply_sentiment_overlay(Position::Long, -0.9, 15, &p), Position::Long);
+    }
+
+    #[test]
+    fn sentiment_overlay_exit_threshold_forces_flat() {
+        let mut p = EquityStrategyParams::default();
+        p.enable_sentiment_overlay = true;
+        p.sentiment_exit_threshold = -0.8;
+        p.sentiment_min_articles = 5;
+        assert_eq!(apply_sentiment_overlay(Position::Long, -0.85, 20, &p), Position::Flat);
+        assert_eq!(apply_sentiment_overlay(Position::Short, -0.85, 20, &p), Position::Flat);
+    }
+
+    #[test]
+    fn sentiment_overlay_reduce_threshold_blocks_entries() {
+        let mut p = EquityStrategyParams::default();
+        p.enable_sentiment_overlay = true;
+        p.sentiment_reduce_threshold = -0.5;
+        p.sentiment_exit_threshold = -0.8;
+        p.sentiment_min_articles = 5;
+        // Moderate negative sentiment blocks new entries (Flat stays Flat)
+        assert_eq!(apply_sentiment_overlay(Position::Flat, -0.6, 20, &p), Position::Flat);
+        // But does not force an exit from an existing position
+        assert_eq!(apply_sentiment_overlay(Position::Long, -0.6, 20, &p), Position::Long);
+    }
+
+    #[test]
+    fn sentiment_overlay_positive_or_neutral_returns_signal() {
+        let mut p = EquityStrategyParams::default();
+        p.enable_sentiment_overlay = true;
+        p.sentiment_reduce_threshold = -0.5;
+        p.sentiment_exit_threshold = -0.8;
+        p.sentiment_min_articles = 5;
+        assert_eq!(apply_sentiment_overlay(Position::Long, 0.0, 20, &p), Position::Long);
+        assert_eq!(apply_sentiment_overlay(Position::Flat, 0.2, 20, &p), Position::Flat);
     }
 }

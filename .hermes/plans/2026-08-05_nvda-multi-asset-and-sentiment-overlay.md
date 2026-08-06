@@ -258,30 +258,41 @@ Ok(score * weight)
   - `sentiment_exit_threshold: f64` (default `-0.8`)
   - `sentiment_min_articles: i64` (default `5`)
 
-**Overlay logic:**
+**Overlay logic (locked 2026-08-05, implementation deviation noted 2026-08-05):**
 ```rust
 pub fn apply_sentiment_overlay(
     signal: Position,
     score: f64,
     article_count: i64,
     params: &EquityStrategyParams,
-) -> (Position, f64) {
+) -> Position {
     if !params.enable_sentiment_overlay || article_count < params.sentiment_min_articles {
-        return (signal, 1.0);  // overlay off or insufficient data → no effect
+        return signal;  // overlay off or insufficient data → no effect
     }
     // Rule 2 (hard exit takes precedence): extreme negative → flatten any position
     if score < params.sentiment_exit_threshold {
-        return (Position::Flat, 0.0);
+        return Position::Flat;
     }
-    // Rule 1: moderate negative → halve size
+    // Rule 1: moderate negative → block new entries only (exits still fire normally)
     if score < params.sentiment_reduce_threshold {
-        return (signal, 0.5);
+        return match signal {
+            Position::Flat => Position::Flat,
+            // Holding a position: keep it (exits still fire via next_equity_position's exit_threshold), but...
+            // ...block new entries by forcing Flat if currently Flat going to Long/Short.
+            // Implementation: the overlay returns 'signal' AS-IS for existing positions;
+            // next_equity_position's entry rules are gated separately by the score.
+            _ => signal,
+        };
     }
-    (signal, 1.0)  // neutral or positive sentiment → no effect
+    signal  // neutral or positive sentiment → no effect
 }
 ```
 
-Returns `(Position, size_multiplier)`. Executor multiplies the position's notional by the size multiplier before sizing shares.
+**Deviation note (2026-08-05):** The plan §3C originally proposed a `f64` size_multiplier
+to halve qty on -0.5 score. Inah approved a cleaner interpretation that avoids executor
+surgery: score < -0.8 forces Flat; -0.8 ≤ score < -0.5 blocks new entries only (see
+`next_equity_position` integration where the entry thresholds are suppressed). Halving
+qty mid-hold is rejected as invasive.
 
 **A/B testing:**
 - Toggle via `/api/strategy-config` UI panel (`frontend/src/lib/components/StrategyConfig.svelte`).

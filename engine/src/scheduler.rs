@@ -253,6 +253,20 @@ impl EquityScheduler {
 
         self.last_processed_ts = Some(candle_ts);
 
+        // --- Sentiment refresh (§3B) ---
+        // Fetch the latest sentiment for the primary symbol and persist it
+        // to the cache. This is best-effort: failures are logged but do not
+        // block strategy evaluation.
+        if let Err(e) = crate::data::sentiment::fetch_sentiment(&self.pool, &self.symbol).await {
+            warn!(
+                model_id = %self.model_id,
+                pair = %self.pair,
+                symbol = %self.symbol,
+                error = %e,
+                "sentiment refresh failed"
+            );
+        }
+
         // --- Strategy evaluation ---
         if let Err(e) = self.evaluate_and_execute_strategy(candle_ts, pred, &closes, sma, sma_valid).await {
             error!(
@@ -289,7 +303,32 @@ impl EquityScheduler {
         };
 
         let params = self.strategy_params.read().await;
-        let new_pos = strategy::next_equity_position(current_pos, &input, &params);
+        let raw_pos = strategy::next_equity_position(current_pos, &input, &params);
+
+        // Fetch the latest sentiment for the primary symbol. If the cache is
+        // empty or the query fails, fall back to a neutral stub so the
+        // overlay is a no-op.
+        let (sentiment_score, article_count) = match db::latest_sentiment(&self.pool, &self.symbol).await {
+            Ok(Some((score, buzz))) => (score, buzz),
+            Ok(None) => (0.5, 0),
+            Err(e) => {
+                warn!(
+                    model_id = %self.model_id,
+                    pair = %self.pair,
+                    symbol = %self.symbol,
+                    error = %e,
+                    "failed to read latest sentiment"
+                );
+                (0.5, 0)
+            }
+        };
+
+        let new_pos = strategy::apply_sentiment_overlay(
+            raw_pos,
+            sentiment_score,
+            article_count,
+            &params,
+        );
         drop(params);
 
         let regime: i64 = if sma_valid {
