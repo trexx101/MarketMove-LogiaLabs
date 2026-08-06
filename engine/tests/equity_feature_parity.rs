@@ -6,6 +6,19 @@
 //!
 //! To regenerate the fixture:
 //!   python3 training/equities_features.py --generate-fixture
+//!
+//! STATUS 2026-08-05: ignored after parity fix 1A (`drawdown_from_50d_high`
+//! switched from `close`-based to `high`-based rolling max). The current
+//! fixture was generated against `training/equities_features.py` (close-based
+//! per the stale helper) and is therefore strictly wrong — the canonical
+//! fixture must be regenerated from the notebook
+//! `models/colab/QQQ_Equities_Model.ipynb` (cells 8/10/14) which uses
+//! `df['high'].rolling(50).max()`. See plan:
+//! `.hermes/plans/2026-08-05_nvda-multi-asset-and-sentiment-overlay.md` Part 1
+//! step 1A and Part 2 step 2A (notebook generalization + fixture regen).
+//!
+//! Re-enable when the canonical fixture lands. The unit tests in
+//! `equities_v2.rs` itself cover the new `high`-based behavior.
 
 use std::fs;
 
@@ -90,6 +103,7 @@ fn build_candles(input: &FixtureInput) -> Vec<EquityCandle> {
 const TOLERANCE: f64 = 1e-6;
 
 #[test]
+#[ignore = "parity fixture was generated against stale training/equities_features.py (close-based drawdown); see module docs for regen plan"]
 fn rust_vs_python_feature_parity() {
     let fixture = load_fixture();
     let candles = build_candles(&fixture.input);
