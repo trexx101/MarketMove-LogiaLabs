@@ -1,7 +1,7 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { fetchChart, fetchEquityTrades } from '../api.js';
-  import { chartData, status, predictions } from '../stores.js';
+  import { chartData, status, predictions, activeModelId, models, updateSlice } from '../stores.js';
 
   // ── State ───────────────────────────────────────────────────────────────
   let canvas;
@@ -34,12 +34,21 @@
   // Crosshair / tooltip state
   let hover = null; // { x, y, candle, screenX, screenY }
 
+  $: activeModel = $models.find((m) => m.model_id === $activeModelId);
+  $: primarySymbol = activeModel?.primary_symbol || 'QQQ';
+  $: inverseSymbol = activeModel?.inverse_symbol || '';
+  $: chartTitle = inverseSymbol
+    ? `${primarySymbol} / ${inverseSymbol} OHLC + SMA + Volume`
+    : `${primarySymbol} OHLC + SMA + Volume`;
+
   // ── Data fetching ───────────────────────────────────────────────────────
 
-  async function refreshChart() {
+  async function refreshChart(symbol) {
+    const sym = symbol || primarySymbol;
+    if (!sym) return;
     try {
       const tf = TIMEFRAMES.find((t) => t.label === activeTimeframe) ?? TIMEFRAMES[2];
-      const data = await fetchChart(tf.limit);
+      const data = await fetchChart(tf.limit, sym);
       candles = data.candles || [];
       sma = data.sma || [];
       isStale = !!data.stale;
@@ -49,16 +58,18 @@
         liveQuote = data.live_quote;
       }
 
-      chartData.set(data);
+      updateSlice($activeModelId, 'chartData', data);
       draw();
     } catch (e) {
       console.warn('chart refresh failed:', e.message);
     }
   }
 
-  async function refreshTrades() {
+  async function refreshTrades(symbol) {
+    const sym = symbol || primarySymbol;
+    if (!sym) return;
     try {
-      const data = await fetchEquityTrades('QQQ', 200);
+      const data = await fetchEquityTrades(sym, 200);
       trades = data.trades || [];
       draw();
     } catch (e) {
@@ -69,20 +80,20 @@
   function setTimeframe(label) {
     if (label === activeTimeframe) return;
     activeTimeframe = label;
-    refreshChart();
+    refreshChart(primarySymbol);
   }
 
   onMount(async () => {
-    await refreshChart();
-    await refreshTrades();
+    await refreshChart(primarySymbol);
+    await refreshTrades(primarySymbol);
     draw();
 
     resizeObserver = new ResizeObserver(() => draw());
     if (container) resizeObserver.observe(container);
 
     chartTimer = setInterval(async () => {
-      await refreshChart();
-      await refreshTrades();
+      await refreshChart(primarySymbol);
+      await refreshTrades(primarySymbol);
     }, 30_000);
   });
 
@@ -90,6 +101,12 @@
     if (resizeObserver) resizeObserver.disconnect();
     if (chartTimer) clearInterval(chartTimer);
   });
+
+  // React to active model changes
+  $: if (primarySymbol && container) {
+    refreshChart(primarySymbol);
+    refreshTrades(primarySymbol);
+  }
 
   // React to store changes
   $: if ($chartData) {
@@ -498,7 +515,7 @@
 </script>
 
 <div class="chart-card" bind:this={container}>
-  <div class="chart-label">Price — QQQ OHLC + SMA + Volume</div>
+  <div class="chart-label">{chartTitle}</div>
   {#if liveQuote}
     <div class="quote-badge" class:stale={isStale}>
       <span class="quote-price">{liveQuote.price.toFixed(2)}</span>

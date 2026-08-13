@@ -1,7 +1,21 @@
 <script>
-  import { trades } from '../stores.js';
+  import { onMount } from 'svelte';
+  import { fetchEquityTrades } from '../api.js';
 
-  $: tradeList = $trades;
+  let tradeList = [];
+
+  async function loadTrades() {
+    try {
+      const data = await fetchEquityTrades('*', 200);
+      tradeList = data?.trades || [];
+    } catch (e) {
+      console.error('Failed to load trade history:', e);
+    }
+  }
+
+  onMount(() => {
+    loadTrades();
+  });
 
   function fmtTime(ts) {
     if (!ts) return '—';
@@ -24,6 +38,15 @@
     if (v < 0) return 'neg';
     return '';
   }
+
+  function modelBadgeClass(id) {
+    if (!id) return 'badge';
+    // Deterministic muted color based on the model id string.
+    let hash = 0;
+    for (let i = 0; i < id.length; i++) hash = id.charCodeAt(i) + ((hash << 5) - hash);
+    const hue = Math.abs(hash % 360);
+    return `badge badge-hue-${hue}`;
+  }
 </script>
 
 <div class="card">
@@ -35,6 +58,8 @@
       <table>
         <thead>
           <tr>
+            <th>Model</th>
+            <th>Symbol</th>
             <th>Time</th>
             <th>Side</th>
             <th>Qty</th>
@@ -46,7 +71,9 @@
         <tbody>
           {#each tradeList as t}
             <tr>
-              <td class="mono">{fmtTime(t.time)}</td>
+              <td class="mono model-cell"><span class="model-badge">{t.model_id || '—'}</span></td>
+              <td class="mono">{t.symbol || '—'}</td>
+              <td class="mono">{fmtTime(t.ts)}</td>
               <td class="side-{(t.side || '').toLowerCase()}">{t.side || '—'}</td>
               <td class="mono">{t.qty ?? '—'}</td>
               <td class="mono">{fmt(t.price)}</td>
@@ -122,4 +149,25 @@
   .neg { color: var(--red); }
   .side-buy { color: var(--green); font-weight: 600; }
   .side-sell { color: var(--red); font-weight: 600; }
+
+  .model-cell {
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .model-badge {
+    display: inline-block;
+    padding: 0.1rem 0.4rem;
+    border-radius: var(--radius-xs);
+    background: var(--accent-subtle);
+    color: var(--accent);
+    font-size: 0.68rem;
+    font-weight: 600;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 </style>

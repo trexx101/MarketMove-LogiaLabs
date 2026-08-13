@@ -21,6 +21,7 @@ import pickle
 import signal
 import sys
 import time
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -174,7 +175,14 @@ class EquityEnsemble:
 
     Default weights: TCN 0.5, LightGBM 0.5 (equal blend).
     These should be tuned on walk-forward OOS IC.
+
+    §8.4 z-score blending: each model maintains a rolling buffer of
+    recent predictions per horizon. Before blending, each model's raw
+    prediction is z-scored against its own buffer history. This removes
+    per-model bias and matches the notebook's walk-forward evaluation.
     """
+
+    BUFFER_SIZE = 252  # ~1 year of trading days
 
     def __init__(
         self,
@@ -191,8 +199,15 @@ class EquityEnsemble:
         self.lgbm_weight = lgbm_weight
         self._horizons = [1, 5, 21]
 
+        # Per-horizon prediction buffers for z-score blending.
+        # Each buffer stores raw label-space predictions (before
+        # denormalization) from both TCN and LGBM separately.
+        self._tcn_buffer: dict[int, deque[float]] = {h: deque(maxlen=self.BUFFER_SIZE) for h in self._horizons}
+        self._lgbm_buffer: dict[int, deque[float]] = {h: deque(maxlen=self.BUFFER_SIZE) for h in self._horizons}
+
     def predict(
-        self, feature_window: list[list[float]], atr_ratio: float = 0.005
+        self, feature_window: list[list[float]], atr_ratio: float = 0.005,
+        skip_buffer: bool = False,
     ) -> dict[str, float]:
         """Run ensemble prediction on a normalized feature window.
 
@@ -200,54 +215,100 @@ class EquityEnsemble:
         ----------
         feature_window : list of [f0..f7] floats, shape (seq_len, 8)
         atr_ratio : ATR(14) / close for the latest candle.
-            Defaults to 0.005 (~0.5%, a reasonable QQQ long-run estimate).
-            The Rust scheduler computes this and passes it in the V3 request.
+        skip_buffer : if True, do not update z-score prediction buffers
+                      (used for healthcheck pings).
 
         Returns
         -------
         dict with keys pred_1d, pred_5d, pred_21d in raw log-return units.
 
-        Blending: raw weighted average of denormalized model outputs.
-        Both TCN and LightGBM produce label-space values (ATR-normalized),
-        so after denormalization they share the same units and a plain
-        weighted average is appropriate.  The Colab notebook uses z-score
-        blending with rolling statistics per horizon — that requires a
-        prediction history buffer which is not maintained here.
+        Blending: z-score normalized weighted average matching the Colab
+        walk-forward evaluation pipeline.
         """
         # --- TCN path ---
-        x = torch.tensor(feature_window, dtype=torch.float32).unsqueeze(0)  # (1, seq_len, 8)
+        x = torch.tensor(feature_window, dtype=torch.float32).unsqueeze(0)
         with torch.no_grad():
-            tcn_out = self.tcn(x)  # list of 3 tensors, each (1,)
+            tcn_out = self.tcn(x)
         tcn_preds = {h: float(t.squeeze()) for h, t in zip(self._horizons, tcn_out)}
 
         # --- LightGBM path (last timestep only) ---
-        last_row = np.array(feature_window[-1], dtype=np.float64).reshape(1, -1)  # (1, 8)
-        lgbm_preds = {}
-        for h in self._horizons:
-            lgbm_preds[h] = float(self.lgbm_models[h].predict(last_row)[0])
+        last_row = np.array(feature_window[-1], dtype=np.float64).reshape(1, -1)
+        lgbm_preds = {h: float(self.lgbm_models[h].predict(last_row)[0]) for h in self._horizons}
 
-        # --- Weighted raw blend (both models now in label/ATR-normalized space) ---
+        # --- Z-score blending ---
         result = {}
         for h in self._horizons:
-            # Blend in label space, then denormalize to raw log-return:
-            #   label = w_t * tcn[h] + w_l * lgbm[h]
-            #   raw  = label * atr_ratio
-            label = self.tcn_weight * tcn_preds[h] + self.lgbm_weight * lgbm_preds[h]
-            raw_log_return = label * atr_ratio
+            tcn_raw = tcn_preds[h]
+            lgbm_raw = lgbm_preds[h]
+
+            # Z-score TCN prediction against its buffer
+            tcn_z = self._zscore(tcn_raw, self._tcn_buffer[h])
+            # Z-score LGBM prediction against its buffer
+            lgbm_z = self._zscore(lgbm_raw, self._lgbm_buffer[h])
+
+            # Blend z-scores, then denormalize to raw log-return
+            blend_z = self.tcn_weight * tcn_z + self.lgbm_weight * lgbm_z
+
+            # Convert z-score back to raw log-return using the combined
+            # label-space std (pooled from both buffers)
+            combined_std = self._pooled_std(self._tcn_buffer[h], self._lgbm_buffer[h])
+            raw_log_return = blend_z * combined_std * atr_ratio
+
             result[f"pred_{h}d"] = float(raw_log_return)
 
+            # Push raw predictions into buffers for future z-scoring
+            if not skip_buffer:
+                self._tcn_buffer[h].append(tcn_raw)
+                self._lgbm_buffer[h].append(lgbm_raw)
+
         return result
+
+    @staticmethod
+    def _zscore(val: float, buf: deque[float]) -> float:
+        """Z-score val against the buffer's mean and std. Returns 0.0 if buffer has < 2 elements."""
+        if len(buf) < 2:
+            return 0.0
+        arr = np.array(buf, dtype=np.float64)
+        mean = float(np.mean(arr))
+        std = float(np.std(arr, ddof=1))
+        if std < 1e-12:
+            return 0.0
+        return (val - mean) / std
+
+    @staticmethod
+    def _pooled_std(buf_a: deque[float], buf_b: deque[float]) -> float:
+        """Pooled standard deviation of two buffers. Returns 1.0 if insufficient data."""
+        if len(buf_a) < 2 or len(buf_b) < 2:
+            return 1.0
+        combined = np.concatenate([
+            np.array(buf_a, dtype=np.float64),
+            np.array(buf_b, dtype=np.float64),
+        ])
+        std = float(np.std(combined, ddof=1))
+        return std if std > 1e-12 else 1.0
 
 
 # ── Request handling ──────────────────────────────────────────────────────────
 
-def _handle_request(raw_bytes: bytes, ensemble: EquityEnsemble, req_id: int) -> bytes:
-    """Decode one V3 REQ message, run inference, return serialized reply."""
+def _handle_request(raw_bytes: bytes, ensembles: dict[str, EquityEnsemble], req_id: int) -> bytes:
+    """Decode one V3 REQ message, run inference, return serialized reply.
+
+    The request may include a ``symbol`` field (e.g. ``"QQQ"`` or ``"NVDA"``).
+    When present, the corresponding per-symbol ensemble is used.  When absent
+    (legacy clients), the first available ensemble is used as a fallback.
+    """
     try:
         request: dict[str, Any] = json.loads(raw_bytes)
     except json.JSONDecodeError as exc:
         log.error("req_id=%d json_error=%s", req_id, str(exc))
         return json.dumps({"error": f"json decode error: {exc}"}).encode()
+
+    # Select ensemble by symbol, fall back to the first available.
+    symbol = request.get("symbol", "")
+    ensemble = ensembles.get(symbol) or (next(iter(ensembles.values())) if ensembles else None)
+    if ensemble is None:
+        log.error("req_id=%d no_ensemble symbol=%s", req_id, symbol)
+        return json.dumps({"error": f"no ensemble for symbol '{symbol}'"}).encode()
 
     feature_window = request.get("feature_window")
     if (
@@ -275,8 +336,15 @@ def _handle_request(raw_bytes: bytes, ensemble: EquityEnsemble, req_id: int) -> 
         log.error("req_id=%d %s", req_id, err)
         return json.dumps({"error": err}).encode()
 
+    # Detect healthcheck requests: seq_len=1 with all-zero features.
+    # These must not pollute the z-score prediction buffers.
+    is_healthcheck = (
+        len(feature_window) == 1
+        and all(abs(v) < 1e-12 for v in feature_window[0])
+    )
+
     try:
-        preds = ensemble.predict(feature_window, atr_ratio=atr_ratio)
+        preds = ensemble.predict(feature_window, atr_ratio=atr_ratio, skip_buffer=is_healthcheck)
     except Exception as exc:
         log.error("req_id=%d inference_error=%s", req_id, str(exc))
         return json.dumps({"error": f"inference error: {exc}"}).encode()
@@ -292,6 +360,7 @@ def _handle_request(raw_bytes: bytes, ensemble: EquityEnsemble, req_id: int) -> 
         json.dumps(
             {
                 "req_id": req_id,
+                "symbol": symbol,
                 "seq_len": len(feature_window),
                 "n_features": n_features,
                 "atr_ratio": atr_ratio,
@@ -341,14 +410,17 @@ def _load_ensemble(
 
 def run_service(
     zmq_bind: str,
-    tcn_path: str,
-    lgbm_h1_path: str,
-    lgbm_h5_path: str,
-    lgbm_h21_path: str,
-    tcn_weight: float = 0.5,
-    lgbm_weight: float = 0.5,
+    ensembles: dict[str, EquityEnsemble],
 ) -> int:
-    """Start the ZMQ REP loop. Blocks until shutdown signal."""
+    """Start the ZMQ REP loop. Blocks until shutdown signal.
+
+    Parameters
+    ----------
+    zmq_bind : str
+        ZMQ bind address, e.g. ``tcp://*:5555``.
+    ensembles : dict[str, EquityEnsemble]
+        Per-symbol ensemble dict keyed by symbol (e.g. ``{"QQQ": ..., "NVDA": ...}``).
+    """
     try:
         import zmq
     except ImportError:
@@ -365,15 +437,8 @@ def run_service(
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
-    # ── Load ensemble ─────────────────────────────────────────────────────────
-    try:
-        ensemble = _load_ensemble(
-            tcn_path, lgbm_h1_path, lgbm_h5_path, lgbm_h21_path,
-            tcn_weight, lgbm_weight,
-        )
-    except Exception as exc:
-        log.error("failed to load ensemble: %s", exc)
-        return 1
+    symbol_list = list(ensembles.keys())
+    log.info("loaded ensembles for symbols: %s", symbol_list)
 
     # ── Bind ZMQ socket ───────────────────────────────────────────────────────
     context = zmq.Context()
@@ -385,7 +450,7 @@ def run_service(
         context.destroy()
         return 1
 
-    log.info("ZMQ REP bound to %s — ready (V3 equities)", zmq_bind)
+    log.info("ZMQ REP bound to %s — ready (V3 equities, %d symbols)", zmq_bind, len(symbol_list))
 
     # ── REQ/REP loop ──────────────────────────────────────────────────────────
     req_id = 0
@@ -407,7 +472,7 @@ def run_service(
             continue
 
         req_id += 1
-        reply = _handle_request(raw, ensemble, req_id)
+        reply = _handle_request(raw, ensembles, req_id)
         socket.send(reply)
 
     log.info("shutting down — processed %d requests", req_id)
@@ -419,29 +484,82 @@ def run_service(
 def main() -> int:
     # ── Resolve paths from env ────────────────────────────────────────────────
     models_dir = Path(os.environ.get("MODELS_DIR", "models"))
-
-    tcn_path = os.environ.get("TCN_PATH", str(models_dir / "qqq_tcn_v1.pt"))
-    lgbm_h1_path = os.environ.get("LGBM_H1_PATH", str(models_dir / "qqq_lgbm_h1_v1.pkl"))
-    lgbm_h5_path = os.environ.get("LGBM_H5_PATH", str(models_dir / "qqq_lgbm_h5_v1.pkl"))
-    lgbm_h21_path = os.environ.get("LGBM_H21_PATH", str(models_dir / "qqq_lgbm_h21_v1.pkl"))
     zmq_bind = os.environ.get("ZMQ_BIND", "tcp://*:5555")
     tcn_weight = float(os.environ.get("TCN_WEIGHT", "0.5"))
     lgbm_weight = float(os.environ.get("LGBM_WEIGHT", "0.5"))
 
-    # ── Verify artifacts exist ────────────────────────────────────────────────
-    for label, path in [("TCN", tcn_path), ("LGBM-h1", lgbm_h1_path),
-                         ("LGBM-h5", lgbm_h5_path), ("LGBM-h21", lgbm_h21_path)]:
-        if not Path(path).exists():
-            print(f"error: {label} artifact not found: {path}", file=sys.stderr)
-            return 1
+    # ── Discover per-symbol model bundles ─────────────────────────────────
+    # Each subdirectory under MODELS_DIR that contains a TCN checkpoint
+    # (named *tcn*.pt) is treated as a symbol model bundle.  The directory
+    # name is used as the symbol (e.g. "NVDA" → symbol="NVDA").
+    # Legacy flat layout (models directly in MODELS_DIR) is treated as the
+    # default symbol "QQQ" when a TCN is found there.
+    ensembles: dict[str, EquityEnsemble] = {}
+
+    # First, check for per-symbol subdirectories
+    if models_dir.is_dir():
+        for entry in sorted(models_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            sym = entry.name
+            tcn_files = list(entry.glob("*tcn*.pt"))
+            if not tcn_files:
+                continue
+            tcn_path = str(tcn_files[0])
+            lgbm_h1 = entry / f"{sym.lower()}_lgbm_h1_v1.pkl"
+            lgbm_h5 = entry / f"{sym.lower()}_lgbm_h5_v1.pkl"
+            lgbm_h21 = entry / f"{sym.lower()}_lgbm_h21_v1.pkl"
+            if not lgbm_h1.exists():
+                # Try lowercase prefix
+                lgbm_h1 = entry / f"{sym.lower()}_lgbm_h1_v1.pkl"
+            if not all(p.exists() for p in [lgbm_h1, lgbm_h5, lgbm_h21]):
+                log.warning(
+                    "skipping %s: missing LGBM files (%s, %s, %s)",
+                    sym, lgbm_h1, lgbm_h5, lgbm_h21,
+                )
+                continue
+            try:
+                ensemble = _load_ensemble(
+                    tcn_path, str(lgbm_h1), str(lgbm_h5), str(lgbm_h21),
+                    tcn_weight, lgbm_weight,
+                )
+                ensembles[sym] = ensemble
+                log.info("loaded model bundle for symbol=%s tcn=%s", sym, tcn_path)
+            except Exception as exc:
+                log.error("failed to load ensemble for symbol=%s: %s", sym, exc)
+
+    # Fallback: legacy flat layout (models directly in MODELS_DIR).
+    # Always attempted — even when per-symbol subdirectories are found,
+    # the flat layout provides the default QQQ ensemble.
+    tcn_path = os.environ.get("TCN_PATH", str(models_dir / "qqq_tcn_v1.pt"))
+    lgbm_h1_path = os.environ.get("LGBM_H1_PATH", str(models_dir / "qqq_lgbm_h1_v1.pkl"))
+    lgbm_h5_path = os.environ.get("LGBM_H5_PATH", str(models_dir / "qqq_lgbm_h5_v1.pkl"))
+    lgbm_h21_path = os.environ.get("LGBM_H21_PATH", str(models_dir / "qqq_lgbm_h21_v1.pkl"))
+
+    if all(Path(p).exists() for p in [tcn_path, lgbm_h1_path, lgbm_h5_path, lgbm_h21_path]):
+        try:
+            ensemble = _load_ensemble(
+                tcn_path, lgbm_h1_path, lgbm_h5_path, lgbm_h21_path,
+                tcn_weight, lgbm_weight,
+            )
+            ensembles["QQQ"] = ensemble
+            log.info(
+                "loaded default QQQ ensemble: tcn=%s lgbm=[%s,%s,%s]",
+                tcn_path, lgbm_h1_path, lgbm_h5_path, lgbm_h21_path,
+            )
+        except Exception as exc:
+            log.error("failed to load default QQQ ensemble: %s", exc)
+
+    if not ensembles:
+        print("error: no model bundles found in %s" % models_dir, file=sys.stderr)
+        return 1
 
     log.info(
-        "equity inference configured: tcn=%s lgbm=[%s,%s,%s] zmq_bind=%s weights=(tcn=%.2f lgbm=%.2f)",
-        tcn_path, lgbm_h1_path, lgbm_h5_path, lgbm_h21_path, zmq_bind, tcn_weight, lgbm_weight,
+        "equity inference configured: %d ensembles, zmq_bind=%s, weights=(tcn=%.2f lgbm=%.2f)",
+        len(ensembles), zmq_bind, tcn_weight, lgbm_weight,
     )
 
-    return run_service(zmq_bind, tcn_path, lgbm_h1_path, lgbm_h5_path, lgbm_h21_path,
-                       tcn_weight, lgbm_weight)
+    return run_service(zmq_bind, ensembles)
 
 
 if __name__ == "__main__":

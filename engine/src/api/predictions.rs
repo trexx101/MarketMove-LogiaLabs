@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use axum::{extract::State, response::Json};
 use serde::Serialize;
 
@@ -38,8 +40,10 @@ pub(crate) struct PredictionDto {
 
 pub(crate) async fn handle_predictions(
     State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> ApiResult<PredictionsResponse> {
-    let history = db::fetch_recent_equity_predictions(&state.pool, &state.symbol, 48)
+    let symbol = params.get("symbol").cloned().unwrap_or_else(|| state.symbol.clone());
+    let history = db::fetch_recent_equity_predictions(&state.pool, &symbol, 48)
         .await
         .map_err(|e| internal_error("fetch_recent_equity_predictions", e))?;
 
@@ -52,10 +56,21 @@ pub(crate) async fn handle_predictions(
     }))
 }
 
-pub(crate) async fn handle_accuracy(State(state): State<AppState>) -> ApiResult<AccuracyResponse> {
-    let stats = db::fetch_equity_accuracy(&state.pool, &state.symbol)
+pub(crate) async fn handle_accuracy(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+) -> ApiResult<AccuracyResponse> {
+    let symbol = params.get("symbol").cloned().unwrap_or_else(|| state.symbol.clone());
+    let stats = db::fetch_equity_accuracy(&state.pool, &symbol)
         .await
         .map_err(|e| internal_error("fetch_equity_accuracy", e))?;
+
+    if stats.resolved_count == 0 {
+        return Err((
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "equity accuracy not yet implemented or no resolved predictions".to_string(),
+        ));
+    }
 
     Ok(Json(AccuracyResponse {
         directional_1h: stats.directional_1h,

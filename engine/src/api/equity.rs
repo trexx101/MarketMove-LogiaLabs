@@ -360,6 +360,7 @@ pub(crate) async fn handle_backfill_predictions(
         // Call inference service.
         match bridge
             .predict_v3_with_retry(
+                &state.symbol,
                 &feature_window,
                 atr_ratio,
                 std::time::Duration::from_secs(10),
@@ -478,6 +479,8 @@ fn compute_atr_for_bar(candles: &[crate::db::EquityCandle], period: usize) -> Op
 pub(crate) struct EquityTradePoint {
     id: i64,
     ts: String,
+    symbol: String,
+    model_id: String,
     side: String,
     qty: f64,
     price: f64,
@@ -530,6 +533,8 @@ pub(crate) async fn handle_equity_trades(
             EquityTradePoint {
                 id: r.id,
                 ts: super::ts_to_rfc3339(r.candle_ts),
+                symbol: r.symbol.clone(),
+                model_id: r.model_id.clone(),
                 side: r.side.clone(),
                 qty: r.qty,
                 price: r.price,

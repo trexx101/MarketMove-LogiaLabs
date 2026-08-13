@@ -4,18 +4,26 @@ const API_BASE = '/api';
  * Fetch current system status.
  * @returns {Promise<object>} StatusResponse
  */
-export async function fetchStatus() {
-  const res = await fetch(`${API_BASE}/status`);
+export async function fetchStatus(modelId = null, symbol = null) {
+  let url = `${API_BASE}/status`;
+  const params = new URLSearchParams();
+  if (modelId) params.append('model_id', modelId);
+  if (symbol) params.append('symbol', symbol);
+  if (params.toString()) url += `?${params.toString()}`;
+  const res = await fetch(url);
   if (!res.ok) throw new Error(`status: ${res.status}`);
   return res.json();
 }
 
 /**
  * Fetch recent predictions.
+ * @param {string|null} symbol - optional primary symbol filter
  * @returns {Promise<object>} PredictionsResponse
  */
-export async function fetchPredictions() {
-  const res = await fetch(`${API_BASE}/predictions`);
+export async function fetchPredictions(symbol = null) {
+  let url = `${API_BASE}/predictions`;
+  if (symbol) url += `?symbol=${encodeURIComponent(symbol)}`;
+  const res = await fetch(url);
   if (!res.ok) throw new Error(`predictions: ${res.status}`);
   return res.json();
 }
@@ -25,20 +33,26 @@ export async function fetchPredictions() {
  * Default 90 daily candles (~6 months) so prediction cones have room to render.
  * Pass a different limit (10-1500) to widen/narrow the window.
  * @param {number} [limit=90] Number of candles to fetch
+ * @param {string|null} symbol - optional primary symbol filter
  * @returns {Promise<object>} ChartResponse
  */
-export async function fetchChart(limit = 90) {
-  const res = await fetch(`${API_BASE}/chart?limit=${limit}`);
+export async function fetchChart(limit = 90, symbol = null) {
+  let url = `${API_BASE}/chart?limit=${limit}`;
+  if (symbol) url += `&symbol=${encodeURIComponent(symbol)}`;
+  const res = await fetch(url);
   if (!res.ok) throw new Error(`chart: ${res.status}`);
   return res.json();
 }
 
 /**
  * Fetch model accuracy / IC drift metrics.
+ * @param {string|null} symbol - optional primary symbol filter
  * @returns {Promise<object|null>} AccuracyResponse or null if unavailable
  */
-export async function fetchAccuracy() {
-  const res = await fetch(`${API_BASE}/accuracy`);
+export async function fetchAccuracy(symbol = null) {
+  let url = `${API_BASE}/accuracy`;
+  if (symbol) url += `?symbol=${encodeURIComponent(symbol)}`;
+  const res = await fetch(url);
   if (!res.ok) return null;
   return res.json();
 }

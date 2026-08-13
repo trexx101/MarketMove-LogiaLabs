@@ -173,7 +173,7 @@ impl EquityScheduler {
             .expect("ZMQ bridge not configured (test mode — use process_with_prediction)");
 
         let pred = bridge
-            .predict_v3_with_retry(&feature_window, atr_ratio, Duration::from_secs(10), 2)
+            .predict_v3_with_retry(&self.symbol, &feature_window, atr_ratio, Duration::from_secs(10), 2)
             .await?;
 
         self.finalize_candle(candle_ts, &pred, &feature_window, &candles).await
@@ -288,7 +288,7 @@ impl EquityScheduler {
         sma_valid: bool,
     ) -> Result<()> {
         let current_pos = Position::from_i64(
-            db::load_position(&self.pool).await?
+            db::load_position(&self.pool, &self.model_id, &self.symbol).await?
         );
 
         let latest_close = closes.last().copied().unwrap_or(0.0);
@@ -339,6 +339,8 @@ impl EquityScheduler {
 
         db::insert_position_event(
             &self.pool,
+            &self.model_id,
+            &self.symbol,
             candle_ts,
             new_pos.as_i64(),
             pred.pred_1d,

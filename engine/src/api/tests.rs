@@ -69,7 +69,12 @@ fn test_state(pool: db::DbPool) -> State<AppState> {
 #[tokio::test]
 async fn status_returns_empty_state() {
     let pool = test_pool().await;
-    let Json(status) = status::handle_status(test_state(pool)).await.unwrap();
+    let Json(status) = status::handle_status(
+        test_state(pool),
+        axum::extract::Query(status::StatusQuery { model_id: None, symbol: None }),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(status.mode, "paper");
     assert_eq!(status.symbol, "BTC/USD");
@@ -85,7 +90,11 @@ async fn status_returns_empty_state() {
 #[tokio::test]
 async fn accuracy_returns_503_when_no_resolved() {
     let pool = test_pool().await;
-    let result = predictions::handle_accuracy(test_state(pool)).await;
+    let result = predictions::handle_accuracy(
+        test_state(pool),
+        axum::extract::Query(std::collections::HashMap::new()),
+    )
+    .await;
 
     let err = result.unwrap_err();
     assert_eq!(err.0, axum::http::StatusCode::SERVICE_UNAVAILABLE);
@@ -108,7 +117,12 @@ async fn predictions_returns_history() {
     .await
     .unwrap();
 
-    let Json(resp) = predictions::handle_predictions(test_state(pool)).await.unwrap();
+    let Json(resp) = predictions::handle_predictions(
+        test_state(pool),
+        axum::extract::Query(std::collections::HashMap::new()),
+    )
+    .await
+    .unwrap();
     assert!(resp.latest.is_some());
     assert_eq!(resp.history.len(), 1);
     let latest = resp.latest.unwrap();
@@ -187,7 +201,7 @@ async fn chart_computes_rolling_sma() {
     }
 
     let query = axum::extract::Query(
-        [("symbol".to_string(), "QQQ".to_string())]
+        [("symbol".to_string(), "BTC/USD".to_string())]
             .into_iter()
             .collect::<std::collections::HashMap<_, _>>(),
     );
@@ -207,7 +221,7 @@ async fn status_reports_unrealized_pnl_for_open_position() {
     db::save_position(&pool, strategy::Position::Long.as_i64())
         .await
         .unwrap();
-    db::insert_equity_trade(&pool, "BTC/USD", 1_000_000, "buy", 1.0, 100.0, 0.0, 0.0)
+    db::insert_equity_trade(&pool, "test-model", "BTC/USD", 1_000_000, "buy", 1.0, 100.0, 0.0, 0.0)
         .await
         .unwrap();
     db::upsert_equity_candle(
@@ -226,7 +240,12 @@ async fn status_reports_unrealized_pnl_for_open_position() {
     .await
     .unwrap();
 
-    let Json(status) = status::handle_status(test_state(pool)).await.unwrap();
+    let Json(status) = status::handle_status(
+        test_state(pool),
+        axum::extract::Query(status::StatusQuery { model_id: None, symbol: None }),
+    )
+    .await
+    .unwrap();
     assert_eq!(status.position, "long");
     assert!((status.entry_price - 100.0).abs() < 1e-9);
     assert!((status.unrealized_pnl - 10.0).abs() < 1e-9);

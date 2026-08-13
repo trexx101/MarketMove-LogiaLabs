@@ -1,15 +1,24 @@
-use axum::{extract::State, response::Json};
-use serde::Serialize;
+use axum::{extract::{State, Query}, response::Json};
+use anyhow::Context;
+use serde::{Deserialize, Serialize};
 
 use crate::api::{internal_error, ApiResult};
 use crate::db::{self, DbPool};
 use crate::strategy;
 use crate::api::AppState;
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct StatusQuery {
+    pub(crate) model_id: Option<String>,
+    pub(crate) symbol: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct StatusResponse {
     pub mode: String,
+    pub model_id: String,
     pub symbol: String,
+    pub short_symbol: String,
     pub position: String,
     pub entry_price: f64,
     pub realized_pnl: f64,
@@ -37,33 +46,62 @@ pub struct StrategySnapshot {
     pub short_exit_threshold: f64,
 }
 
+/// Resolve a status request to a (model_id, primary_symbol, short_symbol) tuple.
+/// Priority: explicit `model_id` query param -> explicit `symbol` -> legacy state default.
+async fn resolve_status_symbols(
+    state: &AppState,
+    query: &StatusQuery,
+) -> anyhow::Result<(String, String, String)> {
+    if let Some(mid) = &query.model_id {
+        let row = sqlx::query_as::<_, (String, String)>(
+            "SELECT primary_symbol, inverse_symbol FROM trading_models WHERE model_id = ?1"
+        )
+        .bind(mid)
+        .fetch_optional(&state.pool)
+        .await
+        .context("resolve_status_symbols: lookup trading_models")?;
+        if let Some((primary, inverse)) = row {
+            return Ok((mid.clone(), primary, inverse));
+        }
+    }
+    if let Some(sym) = &query.symbol {
+        return Ok(("legacy".to_string(), sym.clone(), state.short_symbol.clone()));
+    }
+    Ok(("legacy".to_string(), state.symbol.clone(), state.short_symbol.clone()))
+}
+
 pub(crate) async fn handle_status(
     State(state): State<AppState>,
+    Query(query): Query<StatusQuery>,
 ) -> ApiResult<StatusResponse> {
     let pool = &state.pool;
+
+    let (model_id, primary_symbol, short_symbol) = resolve_status_symbols(&state, &query)
+        .await
+        .map_err(|e| internal_error("resolve_status_symbols", e))?;
 
     let mode = {
         let mode_lock = state.trading_mode.read().await;
         format!("{:?}", *mode_lock).to_lowercase()
     };
 
-    let position_raw = db::load_position(pool)
+    let position_raw = db::load_position(pool, &model_id, &primary_symbol)
         .await
         .map_err(|e| internal_error("load_position", e))?;
     let position = strategy::Position::from_i64(position_raw);
 
-    let realized_pnl = db::sum_equity_realized_pnl(pool, &state.symbol)
+    let realized_pnl = db::sum_equity_realized_pnl(pool, &primary_symbol)
         .await
         .map_err(|e| internal_error("sum_equity_realized_pnl", e))?;
 
-    let candle = db::fetch_latest_equity_candle(pool, &state.symbol)
+    let candle = db::fetch_latest_equity_candle(pool, &primary_symbol)
         .await
         .map_err(|e| internal_error("fetch_latest_equity_candle", e))?;
 
     let (entry_price, unrealized_pnl) = match position {
         strategy::Position::Flat => (0.0, 0.0),
         strategy::Position::Long => {
-            let entry = db::fetch_equity_entry_trade_price(pool, &state.symbol)
+            let entry = db::fetch_equity_entry_trade_price(pool, &primary_symbol)
                 .await
                 .map_err(|e| internal_error("fetch_equity_entry_trade_price", e))?;
             let last_close = candle.as_ref().map(|c| c.close).unwrap_or(0.0);
@@ -74,28 +112,20 @@ pub(crate) async fn handle_status(
             (entry.unwrap_or(0.0), unrealized)
         }
         strategy::Position::Short => {
-            // Short via inverse ETF (PSQ). The paper executor records PSQ entry
-            // at its actual market price, but exits use the QQQ close passed by
-            // the scheduler. We scale QQQ close into PSQ price space using the
-            // PSQ/QQQ ratio observed at entry time.
-            let psq_entry = db::fetch_equity_entry_trade_price(pool, &state.short_symbol)
+            let psq_entry = db::fetch_equity_entry_trade_price(pool, &short_symbol)
                 .await
                 .map_err(|e| internal_error("fetch_equity_entry_trade_price(psq)", e))?;
-            let entry_ts = db::fetch_equity_entry_trade_ts(pool, &state.short_symbol)
+            let entry_ts = db::fetch_equity_entry_trade_ts(pool, &short_symbol)
                 .await
                 .map_err(|e| internal_error("fetch_equity_entry_trade_ts", e))?;
             let last_close = candle.as_ref().map(|c| c.close).unwrap_or(0.0);
             let unrealized = match (psq_entry, entry_ts) {
                 (Some(psq_ep), Some(ets)) => {
-                    let qqq_at_entry = db::fetch_equity_close_at_ts(pool, &state.symbol, ets)
+                    let qqq_at_entry = db::fetch_equity_close_at_ts(pool, &primary_symbol, ets)
                         .await
                         .map_err(|e| internal_error("fetch_equity_close_at_ts", e))?;
                     match qqq_at_entry {
                         Some(qqq_ep) if qqq_ep > 0.0 => {
-                            // PSQ is an inverse ETF (~-1x QQQ daily), so
-                            // PSQ_return ≈ -(QQQ_return).
-                            // PnL ≈ PSQ_entry * (QQQ_current / QQQ_entry - 1).
-                            // Positive when QQQ rose (short loses), negative when QQQ fell (short wins).
                             psq_ep * (last_close / qqq_ep - 1.0)
                         }
                         _ => 0.0,
@@ -107,11 +137,11 @@ pub(crate) async fn handle_status(
         }
     };
 
-    let latest_pred = db::fetch_latest_equity_prediction(pool, &state.symbol)
+    let latest_pred = db::fetch_latest_equity_prediction(pool, &primary_symbol)
         .await
         .map_err(|e| internal_error("fetch_latest_equity_prediction", e))?;
 
-    let staleness_secs = match db::latest_equity_candle_ts(pool, &state.symbol)
+    let staleness_secs = match db::latest_equity_candle_ts(pool, &primary_symbol)
         .await
         .map_err(|e| internal_error("latest_equity_candle_ts", e))?
     {
@@ -123,11 +153,20 @@ pub(crate) async fn handle_status(
     };
 
     // Single read of strategy_params for SMA + snapshot.
+    // For per-model requests, try the per-model params; fall back to default.
+    let params_arc = {
+        let by_model = state.strategy_params_by_model.read().await;
+        if let Some(arc) = by_model.get(&model_id) {
+            arc.clone()
+        } else {
+            state.strategy_params.clone()
+        }
+    };
     let (sma, sma_valid, strategy_snapshot) = {
-        let params = state.strategy_params.read().await;
+        let params = params_arc.read().await;
         let sma_window = params.sma_window;
 
-        let chart_data = db::fetch_equity_candles_asc(pool, &state.symbol, sma_window as i64)
+        let chart_data = db::fetch_equity_candles_asc(pool, &primary_symbol, sma_window as i64)
             .await
             .map_err(|e| internal_error("fetch_equity_candles_asc", e))?;
         let closes: Vec<f64> = chart_data.iter().map(|c| c.close).collect();
@@ -156,8 +195,10 @@ pub(crate) async fn handle_status(
 
     Ok(Json(StatusResponse {
         mode,
+        model_id: model_id.clone(),
+        symbol: primary_symbol.clone(),
+        short_symbol: short_symbol.clone(),
         position: position.to_string(),
-        symbol: state.symbol.clone(),
         entry_price,
         unrealized_pnl,
         realized_pnl,

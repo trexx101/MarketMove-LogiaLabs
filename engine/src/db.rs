@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS signal_state (
 );
 CREATE TABLE IF NOT EXISTS positions (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_id   TEXT    NOT NULL DEFAULT '',
+    symbol     TEXT    NOT NULL DEFAULT '',
     candle_ts  INTEGER NOT NULL,
     position   INTEGER NOT NULL,
     pred_4h    REAL    NOT NULL,
@@ -77,20 +79,22 @@ CREATE INDEX IF NOT EXISTS equity_candles_symbol_ts_idx
 CREATE TABLE IF NOT EXISTS equity_predictions (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     symbol        TEXT    NOT NULL,
-    candle_ts     INTEGER NOT NULL UNIQUE,
+    candle_ts     INTEGER NOT NULL,
     pred_1d       REAL    NOT NULL,
     pred_5d       REAL    NOT NULL,
     pred_21d      REAL    NOT NULL,
     regime        TEXT    NOT NULL DEFAULT 'unknown',
     features_json TEXT    NOT NULL DEFAULT '{}',
     created_at    INTEGER NOT NULL,
-    source        TEXT    NOT NULL DEFAULT 'qqq_tcn_v1'
+    source        TEXT    NOT NULL DEFAULT 'qqq_tcn_v1',
+    UNIQUE(symbol, candle_ts)
 );
 CREATE INDEX IF NOT EXISTS equity_predictions_ts_idx
     ON equity_predictions (candle_ts DESC);
 
 CREATE TABLE IF NOT EXISTS equity_trades (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_id      TEXT    NOT NULL DEFAULT '',
     symbol        TEXT    NOT NULL,
     candle_ts     INTEGER NOT NULL,
     side          TEXT    NOT NULL,
@@ -361,6 +365,7 @@ pub async fn open(database_url: &str) -> Result<DbPool> {
     migrate_predictions(&pool).await?;
     migrate_sentiment_cache(&pool).await?;
     migrate_trading_models(&pool).await?;
+    migrate_multi_model(&pool).await?;
 
     info!("database ready at {database_url}");
     Ok(pool)
@@ -478,6 +483,47 @@ pub async fn migrate_sentiment_cache(pool: &DbPool) -> Result<()> {
 /// pattern as `migrate_sentiment_cache`).
 pub async fn migrate_trading_models(pool: &DbPool) -> Result<()> {
     let _ = pool; // no pending migrations; placeholder for future use
+    Ok(())
+}
+
+/// §8 multi-model migration: add model_id/symbol columns to positions and
+/// model_id to equity_trades if they are missing.
+pub async fn migrate_multi_model(pool: &DbPool) -> Result<()> {
+    // positions(model_id, symbol)
+    let rows = sqlx::query("PRAGMA table_info(positions)")
+        .fetch_all(pool)
+        .await
+        .context("PRAGMA table_info(positions)")?;
+    let existing: Vec<String> = rows.iter().map(|r| r.get::<String, _>(1)).collect();
+
+    for (col, col_type, default) in &[("model_id", "TEXT", "''"), ("symbol", "TEXT", "''")] {
+        if !existing.iter().any(|name| name == col) {
+            let sql = format!(
+                "ALTER TABLE positions ADD COLUMN {col} {col_type} NOT NULL DEFAULT {default}"
+            );
+            sqlx::query(&sql)
+                .execute(pool)
+                .await
+                .with_context(|| format!("adding column positions.{col}"))?;
+            info!("migrated positions: added column {col}");
+        }
+    }
+
+    // equity_trades(model_id)
+    let rows = sqlx::query("PRAGMA table_info(equity_trades)")
+        .fetch_all(pool)
+        .await
+        .context("PRAGMA table_info(equity_trades)")?;
+    let existing: Vec<String> = rows.iter().map(|r| r.get::<String, _>(1)).collect();
+
+    if !existing.iter().any(|name| name == "model_id") {
+        sqlx::query("ALTER TABLE equity_trades ADD COLUMN model_id TEXT NOT NULL DEFAULT ''")
+            .execute(pool)
+            .await
+            .context("adding column equity_trades.model_id")?;
+        info!("migrated equity_trades: added column model_id");
+    }
+
     Ok(())
 }
 
@@ -817,14 +863,29 @@ pub async fn fetch_recent_candles(pool: &DbPool, limit: usize) -> Result<Vec<Can
 }
 
 /// Return the current position from `signal_state` (id = 1), or `0` if no row exists.
-pub async fn load_position(pool: &DbPool) -> Result<i64> {
+pub async fn load_position(pool: &DbPool, model_id: &str, symbol: &str) -> Result<i64> {
+    // §8 per-model: prefer the latest position event for this model/symbol.
+    let row = sqlx::query(
+        "SELECT position FROM positions WHERE model_id = ?1 AND symbol = ?2 ORDER BY candle_ts DESC LIMIT 1"
+    )
+    .bind(model_id)
+    .bind(symbol)
+    .fetch_optional(pool)
+    .await
+    .context("load_position")?;
+
+    if let Some(r) = row {
+        return Ok(r.get(0));
+    }
+
+    // Legacy fallback: the singleton signal_state row (used by pre-§8 code/tests).
     match sqlx::query("SELECT position FROM signal_state WHERE id = 1")
         .fetch_one(pool)
         .await
     {
         Ok(row) => Ok(row.get(0)),
         Err(sqlx::Error::RowNotFound) => Ok(0),
-        Err(e) => Err(e).context("load_position"),
+        Err(e) => Err(e).context("load_position fallback"),
     }
 }
 
@@ -846,6 +907,8 @@ pub async fn save_position(pool: &DbPool, position: i64) -> Result<()> {
 /// Append a position-change event to the `positions` audit table.
 pub async fn insert_position_event(
     pool: &DbPool,
+    model_id: &str,
+    symbol: &str,
     candle_ts: i64,
     position: i64,
     pred_4h: f64,
@@ -855,9 +918,11 @@ pub async fn insert_position_event(
 ) -> Result<()> {
     let created_at = Utc::now().timestamp();
     sqlx::query(
-        "INSERT INTO positions (candle_ts, position, pred_4h, pred_24h, regime, sma, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO positions (model_id, symbol, candle_ts, position, pred_4h, pred_24h, regime, sma, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
+    .bind(model_id)
+    .bind(symbol)
     .bind(candle_ts)
     .bind(position)
     .bind(pred_4h)
@@ -906,6 +971,7 @@ pub async fn insert_trade(
 /// ETF symbol (e.g. PSQ), not the primary symbol (QQQ).
 pub async fn insert_equity_trade(
     pool: &DbPool,
+    model_id: &str,
     symbol: &str,
     candle_ts: i64,
     side: &str,
@@ -916,9 +982,10 @@ pub async fn insert_equity_trade(
 ) -> Result<()> {
     let created_at = Utc::now().timestamp();
     sqlx::query(
-        "INSERT INTO equity_trades (symbol, candle_ts, side, qty, price, fee, realized_pnl, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO equity_trades (model_id, symbol, candle_ts, side, qty, price, fee, realized_pnl, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
+    .bind(model_id)
     .bind(symbol)
     .bind(candle_ts)
     .bind(side)
@@ -958,6 +1025,8 @@ pub struct PredictionRow {
 #[allow(dead_code)]
 pub struct TradeRow {
     pub id: i64,
+    pub symbol: String,
+    pub model_id: String,
     pub candle_ts: i64,
     pub side: String,
     pub qty: f64,
@@ -1016,6 +1085,8 @@ pub async fn fetch_recent_trades(pool: &DbPool, limit: usize) -> Result<Vec<Trad
         .iter()
         .map(|row| TradeRow {
             id: row.get(0),
+            symbol: String::new(),
+            model_id: String::new(),
             candle_ts: row.get(1),
             side: row.get(2),
             qty: row.get(3),
@@ -1045,7 +1116,7 @@ pub async fn fetch_recent_equity_trades(
     limit: usize,
 ) -> Result<Vec<TradeRow>> {
     let rows = sqlx::query(
-        "SELECT id, candle_ts, side, qty, price, fee, realized_pnl, created_at
+        "SELECT id, symbol, model_id, candle_ts, side, qty, price, fee, realized_pnl, created_at
          FROM equity_trades
          WHERE symbol = ?1
          ORDER BY id DESC
@@ -1061,13 +1132,15 @@ pub async fn fetch_recent_equity_trades(
         .iter()
         .map(|row| TradeRow {
             id: row.get(0),
-            candle_ts: row.get(1),
-            side: row.get(2),
-            qty: row.get(3),
-            price: row.get(4),
-            fee: row.get(5),
-            realized_pnl: row.get(6),
-            created_at: row.get(7),
+            symbol: row.get(1),
+            model_id: row.get(2),
+            candle_ts: row.get(3),
+            side: row.get(4),
+            qty: row.get(5),
+            price: row.get(6),
+            fee: row.get(7),
+            realized_pnl: row.get(8),
+            created_at: row.get(9),
         })
         .collect())
 }
@@ -1079,7 +1152,7 @@ pub async fn fetch_recent_all_equity_trades(
     limit: usize,
 ) -> Result<Vec<TradeRow>> {
     let rows = sqlx::query(
-        "SELECT id, candle_ts, side, qty, price, fee, realized_pnl, created_at
+        "SELECT id, symbol, model_id, candle_ts, side, qty, price, fee, realized_pnl, created_at
          FROM equity_trades
          ORDER BY id DESC
          LIMIT ?1",
@@ -1093,13 +1166,15 @@ pub async fn fetch_recent_all_equity_trades(
         .iter()
         .map(|row| TradeRow {
             id: row.get(0),
-            candle_ts: row.get(1),
-            side: row.get(2),
-            qty: row.get(3),
-            price: row.get(4),
-            fee: row.get(5),
-            realized_pnl: row.get(6),
-            created_at: row.get(7),
+            symbol: row.get(1),
+            model_id: row.get(2),
+            candle_ts: row.get(3),
+            side: row.get(4),
+            qty: row.get(5),
+            price: row.get(6),
+            fee: row.get(7),
+            realized_pnl: row.get(8),
+            created_at: row.get(9),
         })
         .collect())
 }
@@ -1396,12 +1471,19 @@ pub async fn fetch_equity_candles_asc(
     symbol: &str,
     limit: i64,
 ) -> Result<Vec<EquityCandle>> {
+    // Subquery: grab the latest N rows (DESC), then re-sort ascending so
+    // callers get chronological order.  Without the subquery, ASC LIMIT N
+    // would return the OLDEST N rows (2021 data) instead of the latest.
     let rows = sqlx::query(
         r#"SELECT symbol, ts, open, high, low, close, volume, source
-           FROM equity_candles
-           WHERE symbol = ?1
-           ORDER BY ts ASC
-           LIMIT ?2"#,
+           FROM (
+             SELECT symbol, ts, open, high, low, close, volume, source
+             FROM equity_candles
+             WHERE symbol = ?1
+             ORDER BY ts DESC
+             LIMIT ?2
+           )
+           ORDER BY ts ASC"#,
     )
     .bind(symbol)
     .bind(limit)
@@ -1473,7 +1555,7 @@ pub async fn insert_equity_prediction(
         r#"INSERT INTO equity_predictions
                (symbol, candle_ts, pred_1d, pred_5d, pred_21d, regime, features_json, created_at, source)
            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'qqq_tcn_v1')
-           ON CONFLICT(candle_ts) DO UPDATE SET
+           ON CONFLICT(symbol, candle_ts) DO UPDATE SET
                pred_1d=excluded.pred_1d,
                pred_5d=excluded.pred_5d,
                pred_21d=excluded.pred_21d,

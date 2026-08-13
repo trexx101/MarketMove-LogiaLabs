@@ -152,7 +152,7 @@ impl PaperExecutor {
                 "closing position"
             );
             db::insert_equity_trade(
-                &self.pool, exit_symbol, ts, side_str, self.qty, close, fee, pnl,
+                &self.pool, &self.model_id, exit_symbol, ts, side_str, self.qty, close, fee, pnl,
             )
             .await?;
             let fill = FillResult {
@@ -186,7 +186,7 @@ impl PaperExecutor {
                 "opening position"
             );
             db::insert_equity_trade(
-                &self.pool, entry_symbol, ts, side_str, self.qty, close, fee, 0.0,
+                &self.pool, &self.model_id, entry_symbol, ts, side_str, self.qty, close, fee, 0.0,
             )
             .await?;
             self.entry_price = close;

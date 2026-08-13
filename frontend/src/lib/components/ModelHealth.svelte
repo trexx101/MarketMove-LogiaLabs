@@ -1,18 +1,30 @@
 <script>
   import { onMount } from 'svelte';
   import { fetchAccuracy } from '../api.js';
-  import { wsConnected, status } from '../stores.js';
+  import { wsConnected, status, activeModelId, models } from '../stores.js';
 
   let accuracyData = null;
   let error = null;
 
-  onMount(async () => {
+  $: activeModel = $models.find((m) => m.model_id === $activeModelId);
+  $: primarySymbol = activeModel?.primary_symbol;
+
+  async function loadAccuracy(symbol) {
+    if (!symbol) return;
     try {
-      accuracyData = await fetchAccuracy();
+      error = null;
+      accuracyData = await fetchAccuracy(symbol);
     } catch (e) {
       error = e.message;
     }
+  }
+
+  onMount(async () => {
+    await loadAccuracy(primarySymbol);
   });
+
+  // Re-fetch when the active model changes
+  $: loadAccuracy(primarySymbol);
 
   $: staleness = $status?.staleness_secs ?? 0;
   $: stale = staleness > 120;

@@ -213,12 +213,14 @@ impl ZmqBridge {
     /// to denormalize predictions back to raw log-return space.
     pub async fn predict_v3(
         &mut self,
+        symbol: &str,
         feature_window: &[[f64; EQ_FEATURE_DIM]],
         atr_ratio: f64,
         timeout: Duration,
     ) -> Result<EquityPrediction> {
         let payload = json!({
             "schema_version": 3,
+            "symbol": symbol,
             "feature_window": feature_window,
             "atr_ratio": atr_ratio,
         })
@@ -259,6 +261,7 @@ impl ZmqBridge {
     /// V3 retry wrapper.
     pub async fn predict_v3_with_retry(
         &mut self,
+        symbol: &str,
         feature_window: &[[f64; EQ_FEATURE_DIM]],
         atr_ratio: f64,
         timeout: Duration,
@@ -267,7 +270,7 @@ impl ZmqBridge {
         let total_attempts = retries + 1;
         let mut last_err = anyhow!("no attempts made");
         for attempt in 1..=total_attempts {
-            match self.predict_v3(feature_window, atr_ratio, timeout).await {
+            match self.predict_v3(symbol, feature_window, atr_ratio, timeout).await {
                 Ok(pred) => return Ok(pred),
                 Err(e) => {
                     last_err = e;

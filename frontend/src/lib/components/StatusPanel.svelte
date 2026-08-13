@@ -1,11 +1,9 @@
 <script>
-  import { onMount } from 'svelte';
-  import { status } from '../stores.js';
+  import { status, models, activeModelId } from '../stores.js';
   import { fetchMode, setMode } from '../api.js';
 
   $: s = $status;
   $: mode = s?.mode || 'PAPER';
-  $: symbol = s?.symbol || 'QQQ';
   $: position = s?.position || 'flat';
   $: entryPrice = s?.entry_price;
   $: realizedPnl = s?.realized_pnl;
@@ -14,6 +12,10 @@
   $: pred1d = s?.pred_1d;
   $: pred5d = s?.pred_5d;
   $: pred21d = s?.pred_21d;
+
+  $: activeModel = $models.find((m) => m.model_id === $activeModelId);
+  $: primarySymbol = activeModel?.primary_symbol || s?.symbol || '—';
+  $: inverseSymbol = activeModel?.inverse_symbol || '';
 
   let showModeModal = false;
   let modeInfo = null;
@@ -103,7 +105,12 @@
 
   <div class="row">
     <span class="label">Symbol</span>
-    <span class="value">{symbol}</span>
+    <span class="value">{primarySymbol}{inverseSymbol ? ` / ${inverseSymbol}` : ''}</span>
+  </div>
+
+  <div class="row">
+    <span class="label">Model</span>
+    <span class="value model-id">{activeModel?.model_id || '—'}</span>
   </div>
 
   <div class="row">
@@ -261,6 +268,12 @@
 
   .value {
     color: var(--text-primary);
+  }
+
+  .value.model-id {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--text-secondary);
   }
 
   .value.mono {

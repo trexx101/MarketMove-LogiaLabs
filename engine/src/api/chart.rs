@@ -45,6 +45,7 @@ pub(crate) struct SmaPoint {
 pub(crate) struct ChartQuery {
     pub range: Option<String>,
     pub limit: Option<i64>,
+    pub symbol: Option<String>,
 }
 
 impl ChartQuery {
@@ -71,15 +72,17 @@ pub(crate) async fn handle_chart(
     let query = ChartQuery {
         range: params.get("range").cloned(),
         limit: params.get("limit").and_then(|s| s.parse().ok()),
+        symbol: params.get("symbol").cloned(),
     };
     let limit = query.limit() as i64;
     let range = query.range();
+    let symbol = query.symbol.as_ref().cloned().unwrap_or_else(|| state.symbol.clone());
 
     // Always try to refresh from Yahoo (will skip if data is fresh enough).
     let backfill_started = std::time::Instant::now();
     let backfill_err = match crate::data::yahoo::backfill(
         &state.pool,
-        &state.symbol,
+        &symbol,
         200,
         range,
         43_200, // 12-hour stale threshold
@@ -89,7 +92,7 @@ pub(crate) async fn handle_chart(
         Ok(n) => {
             if n > 0 {
                 tracing::info!(
-                    symbol = %state.symbol,
+                    symbol = %symbol,
                     fetched = n,
                     range,
                     elapsed_ms = backfill_started.elapsed().as_millis(),
@@ -99,7 +102,7 @@ pub(crate) async fn handle_chart(
             None
         }
         Err(e) => {
-            tracing::warn!(symbol = %state.symbol, error = %e, "chart backfill failed");
+            tracing::warn!(symbol = %symbol, error = %e, "chart backfill failed");
             Some(e)
         }
     };
@@ -108,7 +111,7 @@ pub(crate) async fn handle_chart(
     sleep(Duration::from_millis(50)).await;
 
     let candles =
-        db::fetch_recent_equity_candles(&state.pool, &state.symbol, limit)
+        db::fetch_recent_equity_candles(&state.pool, &symbol, limit)
             .await
             .map_err(|e| internal_error("fetch_recent_equity_candles", e))?;
 
@@ -120,7 +123,7 @@ pub(crate) async fn handle_chart(
 
     // Fetch live quote — Moomoo first, Yahoo fallback.
     // It anchors the live-price dashed line and the prediction projections.
-    let live_quote = fetch_live_quote(&state.symbol).await;
+    let live_quote = fetch_live_quote(&symbol).await;
 
     if candles.is_empty() && live_quote.is_none() {
         return Err((
@@ -128,7 +131,7 @@ pub(crate) async fn handle_chart(
             format!(
                 "no candle data for {} and live quote unavailable — \
                  ensure /api/equity/backfill has been run or check network access",
-                state.symbol
+                symbol
             ),
         ));
     }

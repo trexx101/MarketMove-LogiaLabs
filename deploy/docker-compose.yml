@@ -45,6 +45,7 @@ services:
     env_file:
       - ../.env
     environment:
+      MODELS_DIR: /models
       TCN_PATH: ${TCN_PATH:-/models/qqq_tcn_v1.pt}
       LGBM_H1_PATH: ${LGBM_H1_PATH:-/models/qqq_lgbm_h1_v1.pkl}
       LGBM_H5_PATH: ${LGBM_H5_PATH:-/models/qqq_lgbm_h5_v1.pkl}

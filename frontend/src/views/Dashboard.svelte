@@ -38,8 +38,10 @@
     statusInterval = setInterval(async () => {
       const mid = $activeModelId;
       if (!mid) return;
+      const m = $models.find((mm) => mm.model_id === mid);
+      if (!m) return;
       try {
-        const s = await fetchStatus();
+        const s = await fetchStatus(mid, m.primary_symbol);
         setSlice(mid, 'status', s);
       } catch (e) {
         // Silent — WS may still be delivering updates
@@ -52,35 +54,35 @@
     const mid = modelId || 'legacy';
 
     try {
-      const s = await fetchStatus();
+      const s = await fetchStatus(modelId, symbol);
       setSlice(mid, 'status', s);
     } catch (e) {
       console.error('Failed to fetch status:', e);
     }
 
     try {
-      const p = await fetchPredictions();
+      const p = await fetchPredictions(symbol);
       setSlice(mid, 'predictions', p);
     } catch (e) {
       console.error('Failed to fetch predictions:', e);
     }
 
     try {
-      const c = await fetchChart();
+      const c = await fetchChart(90, symbol);
       setSlice(mid, 'chartData', c);
     } catch (e) {
       console.error('Failed to fetch chart:', e);
     }
 
     try {
-      const a = await fetchAccuracy();
+      const a = await fetchAccuracy(symbol);
       if (a) setSlice(mid, 'accuracy', a);
     } catch (e) {
       console.error('Failed to fetch accuracy:', e);
     }
 
     try {
-      const td = await fetchEquityTrades(symbol || '*', 200);
+      const td = await fetchEquityTrades('*', 200);
       setSlice(mid, 'trades', (td.trades || []).map((t) => ({
         time: t.ts,
         side: t.side,
@@ -88,6 +90,8 @@
         price: t.price,
         fee: t.fee,
         realized_pnl: t.realized_pnl,
+        symbol: t.symbol,
+        model_id: t.model_id,
       })));
     } catch (e) {
       console.error('Failed to fetch trades:', e);
