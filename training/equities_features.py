@@ -234,7 +234,15 @@ def compute_equity_features(opens, highs, lows, closes, volumes, vix=None, tlt=N
 
 
 def generate_synthetic_data(n=120, seed=42):
-    """Generate synthetic OHLCV + VIX + TLT for parity testing."""
+    """Generate synthetic OHLCV + VIX + TLT for parity testing.
+
+    Returns the in-memory arrays (vix, tlt as plain close arrays) used by
+    `compute_equity_features` plus a `vix_pairs` / `tlt_pairs` form encoded
+    as `(ts, close)` 2-element lists — matching the Rust
+    `compute_equity_features(..., vix_pairs: Option<&[(i64, f64)]>, ...)`
+    contract (Deferred Fix 1 timestamp alignment). The fixture writer pulls
+    the pair form for the JSON output.
+    """
     rng = np.random.RandomState(seed)
     # Random walk with slight uptrend
     returns = rng.normal(0.001, 0.015, n)
@@ -249,6 +257,7 @@ def generate_synthetic_data(n=120, seed=42):
     vix = 18.0 + 8.0 * np.sin(np.linspace(0, 4 * np.pi, n))
     # TLT: slight negative correlation with QQQ
     tlt = 90.0 - 0.3 * np.cumsum(returns) + rng.normal(0, 0.2, n)
+    ts = list(range(n))
 
     return {
         "opens": opens.tolist(),
@@ -256,8 +265,13 @@ def generate_synthetic_data(n=120, seed=42):
         "lows": lows.tolist(),
         "closes": closes.tolist(),
         "volumes": volumes.tolist(),
+        "ts": ts,
+        # Plain close arrays — used by `compute_equity_features`.
         "vix": vix.tolist(),
         "tlt": tlt.tolist(),
+        # (ts, close) pairs — written into the JSON fixture for the Rust parity test.
+        "vix_pairs": [[t, float(v)] for t, v in zip(ts, vix.tolist())],
+        "tlt_pairs": [[t, float(x)] for t, x in zip(ts, tlt.tolist())],
     }
 
 
@@ -275,7 +289,21 @@ def main():
             data["closes"], data["volumes"],
             vix=data["vix"], tlt=data["tlt"]
         )
-        fixture = {"input": data, "expected": features}
+        # The Rust parity test expects `(ts, close)` pair arrays for VIX/TLT
+        # (Deferred Fix 1 timestamp alignment).
+        fixture = {
+            "input": {
+                "opens": data["opens"],
+                "highs": data["highs"],
+                "lows": data["lows"],
+                "closes": data["closes"],
+                "volumes": data["volumes"],
+                "ts": data["ts"],
+                "vix": data["vix_pairs"],
+                "tlt": data["tlt_pairs"],
+            },
+            "expected": features,
+        }
         out_path = args.output or "engine/tests/fixtures/equity_feature_parity.json"
         Path(out_path).parent.mkdir(parents=True, exist_ok=True)
         with open(out_path, "w") as f:

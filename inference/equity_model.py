@@ -192,6 +192,7 @@ class EquityEnsemble:
         lgbm_h21: Any,
         tcn_weight: float = 0.5,
         lgbm_weight: float = 0.5,
+        model_meta_path: str | None = None,
     ) -> None:
         self.tcn = tcn
         self.lgbm_models = {1: lgbm_h1, 5: lgbm_h5, 21: lgbm_h21}
@@ -204,6 +205,39 @@ class EquityEnsemble:
         # denormalization) from both TCN and LGBM separately.
         self._tcn_buffer: dict[int, deque[float]] = {h: deque(maxlen=self.BUFFER_SIZE) for h in self._horizons}
         self._lgbm_buffer: dict[int, deque[float]] = {h: deque(maxlen=self.BUFFER_SIZE) for h in self._horizons}
+
+        # Fixed training-time label std per horizon (Deferred Fix 2).
+        # The live system previously used a non-stationary buffer-based pooled
+        # std for de-normalization, which made the same feature window produce
+        # a different raw prediction depending on call history. The notebook
+        # de-normalizes using the training-time label std, which is stationary.
+        # Defaults below are typical QQQ values; overridden by model_meta when
+        # present (see training notebook cell 14 / walk-forward evaluation).
+        self._label_std: dict[int, float] = {1: 0.012, 5: 0.028, 21: 0.065}
+        if model_meta_path:
+            meta_path = Path(model_meta_path)
+            if meta_path.exists():
+                try:
+                    meta = json.loads(meta_path.read_text())
+                    for h in self._horizons:
+                        key = f"label_std_{h}d"
+                        if key in meta:
+                            self._label_std[h] = float(meta[key])
+                    log.info(
+                        "loaded label_std from %s: %s",
+                        model_meta_path,
+                        self._label_std,
+                    )
+                except Exception as exc:  # noqa: BLE001 — surface but never crash boot
+                    log.warning(
+                        "failed to parse label_std from %s: %s", model_meta_path, exc
+                    )
+            else:
+                log.info(
+                    "model_meta not found at %s — using default label_std %s",
+                    model_meta_path,
+                    self._label_std,
+                )
 
     def predict(
         self, feature_window: list[list[float]], atr_ratio: float = 0.005,
@@ -241,18 +275,30 @@ class EquityEnsemble:
             tcn_raw = tcn_preds[h]
             lgbm_raw = lgbm_preds[h]
 
+            # Warmup: buffers are too short for a reliable z-score. Use the raw
+            # 0.5/0.5 blend of the two model outputs (Deferred Fix 2). The raw
+            # blend lives in the same label-space units as the de-normalized
+            # output, so it is a reasonable stand-in until the buffer fills.
+            if len(self._tcn_buffer[h]) < 10:
+                raw_pred = self.tcn_weight * tcn_raw + self.lgbm_weight * lgbm_raw
+                result[f"pred_{h}d"] = float(raw_pred)
+                if not skip_buffer:
+                    self._tcn_buffer[h].append(tcn_raw)
+                    self._lgbm_buffer[h].append(lgbm_raw)
+                continue
+
             # Z-score TCN prediction against its buffer
             tcn_z = self._zscore(tcn_raw, self._tcn_buffer[h])
             # Z-score LGBM prediction against its buffer
             lgbm_z = self._zscore(lgbm_raw, self._lgbm_buffer[h])
 
-            # Blend z-scores, then denormalize to raw log-return
+            # Blend z-scores, then denormalize to raw log-return using the
+            # FIXED training-time label std (Deferred Fix 2). This scale is
+            # stationary — it does not drift as the buffers fill — so the same
+            # feature window always yields the same raw prediction.
             blend_z = self.tcn_weight * tcn_z + self.lgbm_weight * lgbm_z
-
-            # Convert z-score back to raw log-return using the combined
-            # label-space std (pooled from both buffers)
-            combined_std = self._pooled_std(self._tcn_buffer[h], self._lgbm_buffer[h])
-            raw_log_return = blend_z * combined_std * atr_ratio
+            label_std = self._label_std.get(h, 0.012)
+            raw_log_return = blend_z * label_std
 
             result[f"pred_{h}d"] = float(raw_log_return)
 
@@ -401,6 +447,7 @@ def _load_ensemble(
     lgbm_h21_path: str,
     tcn_weight: float,
     lgbm_weight: float,
+    model_meta_path: str | None = None,
 ) -> EquityEnsemble:
     """Load all model artifacts and construct the ensemble."""
     log.info("loading TCN from %s", tcn_path)
@@ -413,7 +460,9 @@ def _load_ensemble(
     lgbm_h21 = load_lgbm(lgbm_h21_path)
     log.info("lightgbm loaded — h1/h5/h21 boosters ready")
 
-    return EquityEnsemble(tcn, lgbm_h1, lgbm_h5, lgbm_h21, tcn_weight, lgbm_weight)
+    return EquityEnsemble(
+        tcn, lgbm_h1, lgbm_h5, lgbm_h21, tcn_weight, lgbm_weight, model_meta_path
+    )
 
 
 def run_service(
@@ -527,9 +576,11 @@ def main() -> int:
                 )
                 continue
             try:
+                # Per-symbol model_meta sits next to the TCN checkpoint.
+                meta_path = str(entry / f"model_meta_{sym.lower()}_v1.json")
                 ensemble = _load_ensemble(
                     tcn_path, str(lgbm_h1), str(lgbm_h5), str(lgbm_h21),
-                    tcn_weight, lgbm_weight,
+                    tcn_weight, lgbm_weight, meta_path,
                 )
                 ensembles[sym] = ensemble
                 log.info("loaded model bundle for symbol=%s tcn=%s", sym, tcn_path)
@@ -545,10 +596,11 @@ def main() -> int:
     lgbm_h21_path = os.environ.get("LGBM_H21_PATH", str(models_dir / "qqq_lgbm_h21_v1.pkl"))
 
     if all(Path(p).exists() for p in [tcn_path, lgbm_h1_path, lgbm_h5_path, lgbm_h21_path]):
+        qqq_meta = os.environ.get("MODEL_META_PATH", str(models_dir / "model_meta_qqq_v1.json"))
         try:
             ensemble = _load_ensemble(
                 tcn_path, lgbm_h1_path, lgbm_h5_path, lgbm_h21_path,
-                tcn_weight, lgbm_weight,
+                tcn_weight, lgbm_weight, qqq_meta,
             )
             ensembles["QQQ"] = ensemble
             log.info(
