@@ -182,13 +182,21 @@ pub(crate) async fn handle_equity_features(
         .await
         .unwrap_or_default();
 
-    let vix_close = align_series(&candles, &vix_candles);
-    let tlt_close = align_series(&candles, &tlt_candles);
+    // Build (timestamp, close) pairs for VIX/TLT — compute_equity_features
+    // aligns by timestamp (Deferred Fix 1), so missing bars don't shift the series.
+    let vix_pairs: Vec<(i64, f64)> = vix_candles
+        .iter()
+        .map(|c| (c.ts, c.close))
+        .collect();
+    let tlt_pairs: Vec<(i64, f64)> = tlt_candles
+        .iter()
+        .map(|c| (c.ts, c.close))
+        .collect();
 
     let rows = crate::features::equities_v2::compute_equity_features(
         &candles,
-        vix_close.as_deref(),
-        tlt_close.as_deref(),
+        if vix_pairs.is_empty() { None } else { Some(&vix_pairs) },
+        if tlt_pairs.is_empty() { None } else { Some(&tlt_pairs) },
     );
     let count = rows.len();
     let latest = rows.last().cloned().ok_or((
@@ -305,7 +313,7 @@ pub(crate) async fn handle_backfill_predictions(
         .map(|rows| rows.into_iter().map(|p| (p.candle_ts, ())).collect())
         .unwrap_or_default();
 
-    // Align macro series to QQQ timestamps.
+    // Align macro series to QQQ timestamps — return (ts, close) pairs.
     let vix_aligned = align_for_features(&candles, &vix_map);
     let tlt_aligned = align_for_features(&candles, &tlt_map);
 
@@ -431,11 +439,11 @@ pub(crate) async fn handle_backfill_predictions(
 }
 
 /// Align a macro close series (HashMap ts→close) to the main candle list.
-/// Returns a Vec<f64> indexed by main-candle position, 0.0 for gaps.
-fn align_for_features(candles: &[crate::db::EquityCandle], series: &HashMap<i64, f64>) -> Vec<f64> {
+/// Returns a Vec<(ts, close)> indexed by main-candle position, (ts, 0.0) for gaps.
+fn align_for_features(candles: &[crate::db::EquityCandle], series: &HashMap<i64, f64>) -> Vec<(i64, f64)> {
     let mut result = Vec::with_capacity(candles.len());
     for c in candles {
-        result.push(series.get(&c.ts).copied().unwrap_or(0.0));
+        result.push((c.ts, series.get(&c.ts).copied().unwrap_or(0.0)));
     }
     result
 }

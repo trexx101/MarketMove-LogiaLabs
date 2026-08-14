@@ -88,23 +88,45 @@ impl EquityFeatureRow {
 }
 
 /// Compute equities features for every candle in `qqq` (daily OHLCV, oldest
-/// first), optionally enriched with VIX and TLT close-aligned series.
+/// first), optionally enriched with VIX and TLT close series.
 ///
-/// `vix_close` and `tlt_close` must be aligned to `qqq` by timestamp (same
-/// length, same ordering). If either is `None` or shorter than `qqq`, the
-/// corresponding feature is filled with `0.0` for the missing entries.
+/// `vix_pairs` / `tlt_pairs` are `(timestamp, close)` tuples. The series are
+/// joined to `qqq` **by timestamp** — not by array index — so a missing VIX/TLT
+/// bar (holiday mismatch, vendor gap) only zeroes the feature for that one
+/// candle instead of silently shifting the entire series by one day. Bars whose
+/// timestamp is not present in the pair list get `0.0` (the historical
+/// "calm"/unknown regime fill).
 ///
 /// Returns one `EquityFeatureRow` per input candle. Warmup periods that lack
 /// sufficient lookback produce `0.0` for the affected features (not NaN).
 pub fn compute_equity_features(
     qqq: &[EquityCandle],
-    vix_close: Option<&[f64]>,
-    tlt_close: Option<&[f64]>,
+    vix_pairs: Option<&[(i64, f64)]>,
+    tlt_pairs: Option<&[(i64, f64)]>,
 ) -> Vec<EquityFeatureRow> {
     let n = qqq.len();
     if n == 0 {
         return Vec::new();
     }
+
+    // Timestamp → close lookup maps for positionally-correct alignment.
+    let vix_map: std::collections::HashMap<i64, f64> = vix_pairs
+        .map(|pairs| pairs.iter().copied().collect())
+        .unwrap_or_default();
+    let tlt_map: std::collections::HashMap<i64, f64> = tlt_pairs
+        .map(|pairs| pairs.iter().copied().collect())
+        .unwrap_or_default();
+
+    // Align by timestamp. Missing bars → 0.0 (calm/unknown fill, same as before
+    // but now the value lands on the correct candle).
+    let vix_close: Vec<f64> = qqq
+        .iter()
+        .map(|c| vix_map.get(&c.ts).copied().unwrap_or(0.0))
+        .collect();
+    let tlt_close: Vec<f64> = qqq
+        .iter()
+        .map(|c| tlt_map.get(&c.ts).copied().unwrap_or(0.0))
+        .collect();
 
     // --- pre-compute closes, volumes, etc. ---
     let closes: Vec<f64> = qqq.iter().map(|c| c.close).collect();
@@ -122,8 +144,8 @@ pub fn compute_equity_features(
     let rsi = rsi_14(&closes);
 
     // VIX regime bucketing.
-    let vix_feat: Vec<f64> = match vix_close {
-        Some(v) if v.len() == n => v
+    let vix_feat: Vec<f64> = if vix_close.len() == n {
+        vix_close
             .iter()
             .map(|&vix| {
                 if vix <= 0.0 {
@@ -136,14 +158,16 @@ pub fn compute_equity_features(
                     2.0 // stress
                 }
             })
-            .collect(),
-        _ => vec![0.0; n],
+            .collect()
+    } else {
+        vec![0.0; n]
     };
 
     // 20-day rolling correlation QQQ vs TLT.
-    let tlt_corr: Vec<f64> = match tlt_close {
-        Some(t) if t.len() == n => rolling_correlation(&closes, t, 20),
-        _ => vec![0.0; n],
+    let tlt_corr: Vec<f64> = if tlt_close.len() == n {
+        rolling_correlation(&closes, &tlt_close, 20)
+    } else {
+        vec![0.0; n]
     };
 
     // Relative volume: today's volume / 20d avg.
@@ -645,18 +669,19 @@ mod tests {
     #[test]
     fn vix_regime_buckets() {
         let candles = synthetic_qqq(60);
+        let ts: Vec<i64> = (0..60).map(|i| i as i64 * 86400).collect();
         // VIX = 15 → calm → 0.0
-        let vix = vec![15.0; 60];
+        let vix: Vec<(i64, f64)> = ts.iter().map(|&t| (t, 15.0)).collect();
         let rows = compute_equity_features(&candles, Some(&vix), None);
         assert_eq!(rows[59].vix_regime, 0.0);
 
         // VIX = 20 → normal → 1.0
-        let vix2 = vec![20.0; 60];
+        let vix2: Vec<(i64, f64)> = ts.iter().map(|&t| (t, 20.0)).collect();
         let rows2 = compute_equity_features(&candles, Some(&vix2), None);
         assert_eq!(rows2[59].vix_regime, 1.0);
 
         // VIX = 30 → stress → 2.0
-        let vix3 = vec![30.0; 60];
+        let vix3: Vec<(i64, f64)> = ts.iter().map(|&t| (t, 30.0)).collect();
         let rows3 = compute_equity_features(&candles, Some(&vix3), None);
         assert_eq!(rows3[59].vix_regime, 2.0);
     }
@@ -664,7 +689,8 @@ mod tests {
     #[test]
     fn tlt_correlation_in_range() {
         let candles = synthetic_qqq(60);
-        let tlt = (0..60).map(|i| 50.0 + (i as f64 * 0.1)).collect::<Vec<_>>();
+        let ts: Vec<i64> = (0..60).map(|i| i as i64 * 86400).collect();
+        let tlt: Vec<(i64, f64)> = ts.iter().map(|&t| (t, 50.0 + (t as f64 / 86400.0) * 0.1)).collect();
         let rows = compute_equity_features(&candles, None, Some(&tlt));
         for r in &rows {
             assert!(r.tlt_corr_20d >= -1.0 && r.tlt_corr_20d <= 1.0, "corr out of range");
@@ -944,6 +970,70 @@ mod tests {
         assert!(
             (trend_z - expected).abs() < 1e-9,
             "1D FAIL: when MAD=1.0 > floor=0.005, scale must use MAD. got {trend_z}, expected {expected}"
+        );
+    }
+
+    /// 1E: VIX/TLT must be aligned by timestamp, not array index.
+    /// If VIX has a gap (missing bar), the old code shifted all subsequent
+    /// VIX values by one position. The fix joins on timestamp.
+    #[test]
+    fn parity_1e_vix_tlt_timestamp_alignment() {
+        // 60 QQQ candles at ts = 1000..1059
+        let candles: Vec<EquityCandle> = (0..60)
+            .map(|i| EquityCandle {
+                symbol: "QQQ".into(),
+                ts: 1000 + i,
+                open: 100.0,
+                high: 101.0,
+                low: 99.0,
+                close: 100.0 + i as f64,
+                volume: 1_000_000,
+                source: "yahoo".into(),
+            })
+            .collect();
+
+        // VIX: 59 candles — missing ts=1020 (simulated vendor gap)
+        let vix_candles: Vec<EquityCandle> = (0..60)
+            .filter(|&i| i != 20) // skip ts=1020
+            .map(|i| EquityCandle {
+                symbol: "^VIX".into(),
+                ts: 1000 + i,
+                open: 15.0,
+                high: 15.5,
+                low: 14.5,
+                close: 15.0 + i as f64 * 0.1,
+                volume: 0,
+                source: "cboe".into(),
+            })
+            .collect();
+
+        // Pass VIX as (ts, close) pairs
+        let vix_pairs: Vec<(i64, f64)> =
+            vix_candles.iter().map(|c| (c.ts, c.close)).collect();
+
+        let features = compute_equity_features(&candles, Some(&vix_pairs), None);
+
+        // At ts=1020 (index 20), VIX should be 0.0 (missing — no alignment possible)
+        assert_eq!(features[20].vix_regime, 0.0, "missing VIX bar should be 0.0");
+
+        // At ts=1021 (index 21), VIX close is 15.0 + 21*0.1 = 17.1 (present, calm bucket 0.0).
+        // With OLD index-based code, this would instead pick up ts=1020's close (17.0)
+        // because the VIX array was shifted left by one after the gap — but ts=1020 is
+        // missing, so the old code would read the wrong bar entirely. Confirms we align
+        // by timestamp, not position.
+        assert!(
+            (features[21].vix_regime - 0.0).abs() < 1e-9,
+            "VIX at ts=1021 should be 17.1 → calm bucket (0.0), aligned by timestamp; got {}",
+            features[21].vix_regime
+        );
+
+        // At ts=1030 (index 30), VIX close is 15.0 + 30*0.1 = 18.0 → normal bucket (1.0).
+        // If alignment were index-based, index 30 would read the VIX at array position 30
+        // (ts=1031, close 18.1) instead of the correctly timestamp-matched bar.
+        assert!(
+            (features[30].vix_regime - 1.0).abs() < 1e-9,
+            "VIX at ts=1030 should be 18.0 → normal bucket (1.0), aligned by timestamp; got {}",
+            features[30].vix_regime
         );
     }
 }

@@ -112,6 +112,36 @@ impl EquityScheduler {
             }
         }
 
+        // Backfill: process any candles that were missed during downtime.
+        // (Deferred Fix 3) After recovering last_processed_ts, process all
+        // candles between the last prediction and the latest candle so a
+        // multi-day outage doesn't permanently skip intermediate predictions.
+        if let Some(last_ts) = self.last_processed_ts {
+            if let Ok(Some(latest_candle_ts)) =
+                db::latest_equity_candle_ts(&self.pool, &self.symbol).await
+            {
+                if latest_candle_ts > last_ts {
+                    let missed = db::fetch_unprocessed_candle_ts(
+                        &self.pool,
+                        &self.symbol,
+                        last_ts,
+                        latest_candle_ts,
+                    )
+                    .await
+                    .unwrap_or_default();
+                    if !missed.is_empty() {
+                        info!(symbol = %self.symbol, count = missed.len(), "backfilling missed candles");
+                        for ts in &missed {
+                            if let Err(e) = self.process(*ts).await {
+                                warn!(symbol = %self.symbol, ts = *ts, error = %e, "backfill failed for candle");
+                            }
+                        }
+                        info!(symbol = %self.symbol, "backfill complete");
+                    }
+                }
+            }
+        }
+
         loop {
             let now = chrono::Utc::now().timestamp();
             let next_open = crate::market_hours::next_market_open(now);
@@ -146,12 +176,31 @@ impl EquityScheduler {
             return Ok(());
         }
 
-        // Fetch VIX and TLT close-aligned series (optional — features degrade to 0.0).
+        // Fetch VIX and TLT as (ts, close) pairs for timestamp alignment
+        // (Deferred Fix 1 — align by timestamp, not array index).
         let vix = db::fetch_equity_candles_asc(&self.pool, "^VIX", fetch_count).await.ok();
         let tlt = db::fetch_equity_candles_asc(&self.pool, "TLT", fetch_count).await.ok();
 
-        let vix_close: Option<Vec<f64>> = vix.map(|c| c.iter().map(|c| c.close).collect());
-        let tlt_close: Option<Vec<f64>> = tlt.map(|c| c.iter().map(|c| c.close).collect());
+        let vix_pairs: Option<Vec<(i64, f64)>> =
+            vix.map(|c| c.iter().map(|c| (c.ts, c.close)).collect());
+        let tlt_pairs: Option<Vec<(i64, f64)>> =
+            tlt.map(|c| c.iter().map(|c| (c.ts, c.close)).collect());
+
+        // Warn if macro coverage is thin — features degrade to the calm/unknown
+        // fill for missing bars.
+        let n = candles.len();
+        if let Some(ref pairs) = vix_pairs {
+            let coverage = pairs.len() as f64 / n as f64;
+            if coverage < 0.9 {
+                warn!(
+                    symbol = %self.symbol,
+                    vix_bars = pairs.len(),
+                    qqq_bars = n,
+                    coverage_pct = coverage * 100.0,
+                    "VIX coverage below 90% — features may be degraded"
+                );
+            }
+        }
 
         // Compute ATR(14) / close for the last candle — needed by the inference
         // service to denormalize predictions back to raw log-return space.
@@ -160,8 +209,8 @@ impl EquityScheduler {
 
         let all_features = compute_equity_features(
             &candles,
-            vix_close.as_deref(),
-            tlt_close.as_deref(),
+            vix_pairs.as_deref(),
+            tlt_pairs.as_deref(),
         );
 
         if all_features.is_empty() {

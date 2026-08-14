@@ -7,18 +7,10 @@
 //! To regenerate the fixture:
 //!   python3 training/equities_features.py --generate-fixture
 //!
-//! STATUS 2026-08-05: ignored after parity fix 1A (`drawdown_from_50d_high`
-//! switched from `close`-based to `high`-based rolling max). The current
-//! fixture was generated against `training/equities_features.py` (close-based
-//! per the stale helper) and is therefore strictly wrong — the canonical
-//! fixture must be regenerated from the notebook
-//! `models/colab/QQQ_Equities_Model.ipynb` (cells 8/10/14) which uses
-//! `df['high'].rolling(50).max()`. See plan:
-//! `.hermes/plans/2026-08-05_nvda-multi-asset-and-sentiment-overlay.md` Part 1
-//! step 1A and Part 2 step 2A (notebook generalization + fixture regen).
-//!
-//! Re-enable when the canonical fixture lands. The unit tests in
-//! `equities_v2.rs` itself cover the new `high`-based behavior.
+//! The fixture carries per-bar timestamps; VIX/TLT are stored as
+//! `(ts, close)` tuples and joined to QQQ **by timestamp** (see Deferred Fix 1),
+//! so a missing macro bar zeroes the feature for that one candle only instead of
+//! shifting the whole series.
 
 use std::fs;
 
@@ -39,8 +31,9 @@ struct FixtureInput {
     lows: Vec<f64>,
     closes: Vec<f64>,
     volumes: Vec<f64>,
-    vix: Vec<f64>,
-    tlt: Vec<f64>,
+    ts: Vec<i64>,
+    vix: Vec<[i64; 2]>,
+    tlt: Vec<[i64; 2]>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -89,7 +82,7 @@ fn build_candles(input: &FixtureInput) -> Vec<EquityCandle> {
     (0..n)
         .map(|i| EquityCandle {
             symbol: "QQQ".to_string(),
-            ts: i as i64,
+            ts: input.ts[i],
             open: input.opens[i],
             high: input.highs[i],
             low: input.lows[i],
@@ -100,17 +93,21 @@ fn build_candles(input: &FixtureInput) -> Vec<EquityCandle> {
         .collect()
 }
 
+fn as_pairs(rows: &[[i64; 2]]) -> Vec<(i64, f64)> {
+    rows.iter().map(|r| (r[0], r[1])).collect()
+}
+
 const TOLERANCE: f64 = 1e-6;
 
 #[test]
-#[ignore = "parity fixture was generated against stale training/equities_features.py (close-based drawdown); see module docs for regen plan"]
 fn rust_vs_python_feature_parity() {
     let fixture = load_fixture();
     let candles = build_candles(&fixture.input);
-    let vix: Vec<f64> = fixture.input.vix.clone();
-    let tlt: Vec<f64> = fixture.input.tlt.clone();
+    let vix: Vec<(i64, f64)> = as_pairs(&fixture.input.vix);
+    let tlt: Vec<(i64, f64)> = as_pairs(&fixture.input.tlt);
 
-    let rust_rows = compute_equity_features(&candles, Some(&vix), Some(&tlt));
+    let rust_rows =
+        compute_equity_features(&candles, Some(&vix), Some(&tlt));
 
     assert_eq!(
         rust_rows.len(),

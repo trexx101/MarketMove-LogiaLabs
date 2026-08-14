@@ -1576,6 +1576,29 @@ pub async fn insert_equity_prediction(
     Ok(())
 }
 
+/// Fetch all candle timestamps for a symbol between `after_ts` (exclusive)
+/// and `latest_ts` (inclusive), ordered ascending. Used by the scheduler
+/// backfill on engine restart to recover candles missed during downtime.
+pub async fn fetch_unprocessed_candle_ts(
+    pool: &DbPool,
+    symbol: &str,
+    after_ts: i64,
+    latest_ts: i64,
+) -> Result<Vec<i64>> {
+    let rows = sqlx::query_scalar::<_, i64>(
+        "SELECT ts FROM equity_candles
+         WHERE symbol = ?1 AND ts > ?2 AND ts <= ?3
+         ORDER BY ts ASC",
+    )
+    .bind(symbol)
+    .bind(after_ts)
+    .bind(latest_ts)
+    .fetch_all(pool)
+    .await
+    .context("fetch_unprocessed_candle_ts")?;
+    Ok(rows)
+}
+
 /// Fetch the latest equity candle timestamp for a symbol (newest first).
 /// Returns `None` if no candles exist.
 pub async fn latest_equity_candle_ts(pool: &DbPool, symbol: &str) -> Result<Option<i64>> {
