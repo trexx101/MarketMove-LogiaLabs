@@ -215,11 +215,11 @@ pub struct EquitySignalInput {
 /// Daily equities position state machine.
 ///
 /// Long/flat when shorting is disabled (default). When `enable_shorting` is
-/// set, a bearish regime (`close <= SMA200` or invalid SMA) can also produce a
+/// set, a bearish regime (`close <= SMA` or invalid SMA) can also produce a
 /// `Short` target, executed via an inverse ETF (PSQ) by the executor.
 ///
 /// Uses `pred_1d` as the primary signal with `pred_5d` confirmation, filtered
-/// by the SMA200 regime.
+/// by the SMA regime.
 ///
 /// Transition safety (executor relies on this):
 /// - `Long -> Short` is never returned directly. A long first exits to `Flat`,
@@ -231,6 +231,21 @@ pub fn next_equity_position(
     input: &EquitySignalInput,
     params: &EquityStrategyParams,
 ) -> Position {
+    // NaN guard: if any input is non-finite, hold current position and log
+    if !input.pred_1d.is_finite() || !input.pred_5d.is_finite() || !input.pred_21d.is_finite()
+        || !input.current_close.is_finite() || !input.sma.is_finite()
+    {
+        tracing::error!(
+            pred_1d = input.pred_1d,
+            pred_5d = input.pred_5d,
+            pred_21d = input.pred_21d,
+            close = input.current_close,
+            sma = input.sma,
+            "non-finite input to next_equity_position, holding current position"
+        );
+        return current;
+    }
+
     // --- 1. Exit the currently-held position (regime-agnostic). ---
     match current {
         Position::Long => {
@@ -250,9 +265,23 @@ pub fn next_equity_position(
         Position::Flat => {}
     }
 
-    // --- 2. Enter a new position (regime-gated; never Long<->Short directly). ---
+    // --- 2. Regime-conflict exits (hard exits when regime contradicts position). ---
     let bullish = input.sma_valid && input.current_close > input.sma;
 
+    // Short in bullish regime: force exit. This is the most expensive failure
+    // mode — shorting into a rally has no upside cap and inverse-ETF drag.
+    // Without this, a short held while the market trends up stays open forever
+    // when pred_1d stays below the exit threshold (e.g. z-score cold start 0.0).
+    if current == Position::Short && bullish {
+        return Position::Flat;
+    }
+
+    // NOTE: a held Long in bearish regime is intentionally NOT force-exited
+    // here — long exits remain prediction-driven (pred_1d < exit_threshold),
+    // preserving the original long/flat state machine (see
+    // `equity_long_holds_in_bearish_until_exit`).
+
+    // --- 3. Enter a new position (regime-gated; never Long<->Short directly). ---
     if bullish {
         // Bullish regime: long entries only.
         if current == Position::Flat
@@ -261,13 +290,14 @@ pub fn next_equity_position(
         {
             return Position::Long;
         }
-        // Long holds; a held Short is retained until it exits above (step 1).
+        // Long holds in bullish regime.
         return current;
     }
 
-    // Bearish regime (close <= SMA200 OR sma_invalid): no long entries.
-    // Short entries only when enabled and currently Flat.
-    if params.enable_shorting && current == Position::Flat {
+    // Bearish regime (close <= SMA OR sma_valid): no long entries.
+    // Short entries only when enabled, currently Flat, AND sma_valid is true.
+    // This prevents shorts during warmup when regime is unknown.
+    if params.enable_shorting && current == Position::Flat && input.sma_valid {
         if input.pred_1d < params.short_entry_threshold {
             return Position::Short;
         }

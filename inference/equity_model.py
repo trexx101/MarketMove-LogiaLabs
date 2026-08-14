@@ -277,15 +277,23 @@ class EquityEnsemble:
 
     @staticmethod
     def _pooled_std(buf_a: deque[float], buf_b: deque[float]) -> float:
-        """Pooled standard deviation of two buffers. Returns 1.0 if insufficient data."""
+        """Proper pooled standard deviation: sqrt((s_a^2 + s_b^2) / 2).
+        
+        The previous implementation concatenated buffers, which included
+        between-model mean offset as variance (incorrect). This formula
+        pools the variances correctly.
+        
+        Returns 1.0 if insufficient data.
+        """
         if len(buf_a) < 2 or len(buf_b) < 2:
             return 1.0
-        combined = np.concatenate([
-            np.array(buf_a, dtype=np.float64),
-            np.array(buf_b, dtype=np.float64),
-        ])
-        std = float(np.std(combined, ddof=1))
-        return std if std > 1e-12 else 1.0
+        arr_a = np.array(buf_a, dtype=np.float64)
+        arr_b = np.array(buf_b, dtype=np.float64)
+        std_a = float(np.std(arr_a, ddof=1))
+        std_b = float(np.std(arr_b, ddof=1))
+        # Proper pooled std: sqrt((s_a^2 + s_b^2) / 2)
+        pooled = float(np.sqrt((std_a**2 + std_b**2) / 2))
+        return pooled if pooled > 1e-12 else 1.0
 
 
 # ── Request handling ──────────────────────────────────────────────────────────

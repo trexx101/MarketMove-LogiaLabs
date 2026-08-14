@@ -98,6 +98,20 @@ impl EquityScheduler {
 
     /// Poll loop — checks for new daily candles every 5 minutes.
     pub async fn run(&mut self) -> Result<()> {
+        // Recovery: on startup, recover last_processed_ts from DB to avoid reprocessing
+        match db::latest_prediction_ts(&self.pool, &self.symbol).await {
+            Ok(Some(ts)) => {
+                self.last_processed_ts = Some(ts);
+                info!(symbol = %self.symbol, last_processed_ts = ts, "recovered last_processed_ts from DB");
+            }
+            Ok(None) => {
+                info!(symbol = %self.symbol, "no prior predictions found, starting fresh");
+            }
+            Err(e) => {
+                warn!(symbol = %self.symbol, error = %e, "failed to recover last_processed_ts, starting fresh");
+            }
+        }
+
         loop {
             let now = chrono::Utc::now().timestamp();
             let next_open = crate::market_hours::next_market_open(now);
@@ -187,6 +201,28 @@ impl EquityScheduler {
         feature_window: &[[f64; EQ_FEATURE_DIM]],
         candles: &[crate::db::EquityCandle],
     ) -> Result<()> {
+        // Validate prediction: reject all-zero or non-finite predictions
+        // These indicate inference failure or z-score cold-start
+        let all_zero = pred.pred_1d.abs() < 1e-10
+            && pred.pred_5d.abs() < 1e-10
+            && pred.pred_21d.abs() < 1e-10;
+        let any_nan = pred.pred_1d.is_nan()
+            || pred.pred_5d.is_nan()
+            || pred.pred_21d.is_nan();
+
+        if all_zero || any_nan {
+            warn!(
+                candle_ts,
+                pred_1d = pred.pred_1d,
+                pred_5d = pred.pred_5d,
+                pred_21d = pred.pred_21d,
+                "prediction validation failed (all-zero or NaN), skipping strategy evaluation"
+            );
+            // Still mark as processed to avoid infinite retry loop
+            self.last_processed_ts = Some(candle_ts);
+            return Ok(());
+        }
+
         let features_json = serde_json::to_string(feature_window)?;
 
         // Compute regime label for audit.

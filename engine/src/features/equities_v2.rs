@@ -478,9 +478,9 @@ fn gap_pct(opens: &[f64], closes: &[f64]) -> Vec<f64> {
 /// less-negative values because intraday highs were ignored.
 ///
 /// Parity fix 1A (2026-08-05): separate `highs` argument, rolling max over
-/// `highs`. The deployed QQQ model was trained on the `close`-based feature
-/// and continues to operate on it; the fix takes effect for new symbols
-/// (NVDA pipeline) and after the next QQQ retrain.
+/// `highs`. Matches notebook cell 8: `df['high'].rolling(50).max()`. The
+/// training helper (`equities_features.py`) previously used `closes`; corrected
+/// 2026-08-14 to match the notebook source of truth.
 fn drawdown_from_high(highs: &[f64], closes: &[f64], window: usize) -> Vec<f64> {
     let n = closes.len();
     debug_assert_eq!(highs.len(), n, "drawdown_from_high: highs/closes length mismatch");

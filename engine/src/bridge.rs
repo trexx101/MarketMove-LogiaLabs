@@ -27,6 +27,7 @@ pub struct EquityPrediction {
 /// ZeroMQ REQ client that sends feature windows to a Python inference service.
 pub struct ZmqBridge {
     socket: ReqSocket,
+    endpoint: String,
 }
 
 impl ZmqBridge {
@@ -37,7 +38,7 @@ impl ZmqBridge {
             .connect(endpoint)
             .await
             .map_err(|e| anyhow!("ZMQ connect to {endpoint} failed: {e}"))?;
-        Ok(Self { socket })
+        Ok(Self { socket, endpoint: endpoint.to_string() })
     }
 
     /// Send `feature_window` and receive a `Prediction`.
@@ -258,7 +259,10 @@ impl ZmqBridge {
             .map_err(|_| anyhow!("V3 inference request timed out after {timeout:?}"))?
     }
 
-    /// V3 retry wrapper.
+    /// V3 retry wrapper with socket recovery.
+    ///
+    /// After a timeout, the REQ socket is in an invalid state (send→recv lockstep violated).
+    /// We must reconnect before retrying.
     pub async fn predict_v3_with_retry(
         &mut self,
         symbol: &str,
@@ -275,9 +279,33 @@ impl ZmqBridge {
                 Err(e) => {
                     last_err = e;
                     warn!(attempt, total_attempts, error = %last_err, "V3 inference attempt failed");
+                    // After timeout or error, reconnect to reset REQ socket state
+                    if attempt < total_attempts {
+                        if let Err(reconnect_err) = self.reconnect().await {
+                            warn!(error = %reconnect_err, "failed to reconnect ZMQ socket");
+                        }
+                        // Brief backoff to avoid tight retry loop
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
                 }
             }
         }
         Err(last_err)
+    }
+
+    /// Reconnect the ZMQ REQ socket to reset its state machine.
+    ///
+    /// After a timeout, the socket is stuck in "awaiting reply" state.
+    /// Closing and reconnecting resets it to a clean state.
+    pub async fn reconnect(&mut self) -> Result<()> {
+        // Create a new socket and connect to the same endpoint
+        let mut new_socket = ReqSocket::new();
+        new_socket
+            .connect(&self.endpoint)
+            .await
+            .map_err(|e| anyhow!("ZMQ reconnect to {} failed: {}", self.endpoint, e))?;
+        self.socket = new_socket;
+        debug!("ZMQ socket reconnected to {}", self.endpoint);
+        Ok(())
     }
 }

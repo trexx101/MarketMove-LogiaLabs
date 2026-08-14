@@ -1589,6 +1589,19 @@ pub async fn latest_equity_candle_ts(pool: &DbPool, symbol: &str) -> Result<Opti
     Ok(row.map(|r| r.get::<i64, _>("ts")))
 }
 
+/// Fetch the latest prediction timestamp for a symbol.
+/// Returns `None` if no predictions exist.
+pub async fn latest_prediction_ts(pool: &DbPool, symbol: &str) -> Result<Option<i64>> {
+    let row = sqlx::query(
+        r#"SELECT candle_ts FROM equity_predictions WHERE symbol = ?1 ORDER BY candle_ts DESC LIMIT 1"#,
+    )
+    .bind(symbol)
+    .fetch_optional(pool)
+    .await
+    .context("latest_prediction_ts")?;
+    Ok(row.map(|r| r.get::<i64, _>("candle_ts")))
+}
+
 /// Fetch the most recent equity candle for a given symbol.
 pub async fn fetch_latest_equity_candle(
     pool: &DbPool,

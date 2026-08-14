@@ -177,14 +177,14 @@ def gap_pct(opens: np.ndarray, closes: np.ndarray) -> np.ndarray:
     return out
 
 
-def drawdown_from_high(closes: np.ndarray, window: int = 50) -> np.ndarray:
+def drawdown_from_high(highs: np.ndarray, closes: np.ndarray, window: int = 50) -> np.ndarray:
     """Drawdown from rolling N-day high."""
     n = len(closes)
     out = np.zeros(n)
     if n < window + 1:
         return out
     for i in range(window, n):
-        high = np.max(closes[i - window:i + 1])
+        high = np.max(highs[i - window:i + 1])
         if high > 0:
             out[i] = (closes[i] - high) / high
     return out
@@ -210,7 +210,7 @@ def compute_equity_features(opens, highs, lows, closes, volumes, vix=None, tlt=N
     tlt_corr = rolling_correlation(closes_arr, tlt_arr, 20) if tlt_arr is not None else np.zeros(n)
     rvol = rvol_20d(volumes_arr)
     gaps = gap_pct(opens_arr, closes_arr)
-    dd = drawdown_from_high(closes_arr, 50)
+    dd = drawdown_from_high(highs_arr, closes_arr, 50)
 
     rows = []
     for i in range(n):

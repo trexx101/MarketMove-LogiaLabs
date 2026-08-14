@@ -34,6 +34,11 @@ async fn main() {
         )
         .init();
 
+    // Load .env here (bootstrap concern), NOT inside Config::from_env, so that
+    // config parsing stays a pure function of the process environment and the
+    // unit tests can exercise the fallback defaults deterministically.
+    let _ = dotenvy::dotenv();
+
     let cfg = match config::Config::from_env() {
         Ok(c) => c,
         Err(e) => {

@@ -117,8 +117,6 @@ impl fmt::Display for TradingMode {
 
 impl Config {
     pub fn from_env() -> Result<Self> {
-        let _ = dotenvy::dotenv();
-
         let trading_mode_raw = env_or("TRADING_MODE", "paper");
         let trading_mode: TradingMode = trading_mode_raw
             .parse()
@@ -434,8 +432,9 @@ mod tests {
         assert_eq!(cfg.http_port, 8080);
         assert_eq!(cfg.symbol, "BTC/USD");
         assert_eq!(cfg.database_url, "sqlite://data/candles.db");
-        // dotenvy loads .env which overrides the default path.
-        assert_eq!(cfg.norm_stats_path, "/models/norm_stats_qqq_v1.json");
+        // Code default (dotenv is loaded in main(), not from_env()); the
+        // container overrides this to /models/norm_stats_qqq_v1.json via env.
+        assert_eq!(cfg.norm_stats_path, "models/norm_stats_qqq_v1.json");
         assert_eq!(cfg.feature_window_size, 126);
         assert_eq!(cfg.parity_marker_path, "parity_verified.json");
         assert_eq!(cfg.parity_max_age_secs, 7 * 24 * 60 * 60);
@@ -467,11 +466,22 @@ mod tests {
     fn live_mode_falls_back_to_paper() {
         let _g = ENV_LOCK.lock().unwrap();
         clear_engine_env();
+        // Write a fresh parity marker so from_env() passes verify_parity_marker.
+        let marker_path = std::env::temp_dir().join("live_mode_falls_back_to_paper_marker.json");
+        let marker = crate::parity::ParityMarker {
+            verified_at: chrono::Utc::now().timestamp(),
+            fixture_sha256: "abc".to_string(),
+            candles_compared: 0,
+            max_abs_error: 1e-9,
+            tolerance: 1e-6,
+            notes: "test marker".to_string(),
+        };
+        crate::parity::write_marker(&marker_path, &marker).expect("write test parity marker");
+        env::set_var("PARITY_MARKER_PATH", marker_path.to_str().unwrap());
         env::set_var("TRADING_MODE", "live");
-        // Wave 5: Kraken retired; live execution is not yet wired to Binance, so
-        // the engine must still load (and will fall back to paper at runtime).
-        let cfg = Config::from_env().expect("live mode must load without exchange keys");
+        let cfg = Config::from_env().expect("live mode must load with parity marker");
         assert_eq!(cfg.trading_mode, TradingMode::Live);
+        let _ = std::fs::remove_file(&marker_path);
     }
 
     #[test]
