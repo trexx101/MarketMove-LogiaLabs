@@ -47,6 +47,10 @@ pub struct Config {
     /// Require pred_5d > 0.0 as an additional entry filter for longs.
     /// Default: false (disabled — lets more trades fire).
     pub pred_5d_filter: bool,
+    /// Require pred_5d < 0.0 as an additional entry filter for shorts.
+    /// Default: false (disabled — backward compatible). Symmetric to
+    /// `pred_5d_filter` for longs.
+    pub short_pred_5d_filter: bool,
     /// Primary symbol traded for long positions (e.g. "QQQ").
     pub symbol: String,
     /// Inverse-ETF symbol used to express short positions (default "PSQ").
@@ -183,6 +187,9 @@ impl Config {
         let pred_5d_filter = parse_env::<bool>("PRED_5D_FILTER", "false")
             .context("PRED_5D_FILTER must be 'true' or 'false'")?;
 
+        let short_pred_5d_filter = parse_env::<bool>("SHORT_PRED_5D_FILTER", "false")
+            .context("SHORT_PRED_5D_FILTER must be 'true' or 'false'")?;
+
         let http_port = parse_env::<u16>("HTTP_PORT", "8080")
             .context("HTTP_PORT must be a u16 in the range 1..=65535")?;
         if http_port == 0 {
@@ -276,6 +283,7 @@ impl Config {
             entry_threshold,
             exit_threshold,
             pred_5d_filter,
+            short_pred_5d_filter,
             http_port,
             symbol,
             short_symbol,
@@ -375,6 +383,7 @@ mod tests {
             "ENTRY_THRESHOLD",
             "EXIT_THRESHOLD",
             "PRED_5D_FILTER",
+            "SHORT_PRED_5D_FILTER",
             "HTTP_PORT",
             "SYMBOL",
             "KRAKEN_API_KEY",
@@ -429,6 +438,7 @@ mod tests {
         assert!((cfg.entry_threshold - 0.001).abs() < 1e-12);
         assert!((cfg.exit_threshold - (-0.0005)).abs() < 1e-12);
         assert!(!cfg.pred_5d_filter);
+        assert!(!cfg.short_pred_5d_filter);
         assert_eq!(cfg.http_port, 8080);
         assert_eq!(cfg.symbol, "BTC/USD");
         assert_eq!(cfg.database_url, "sqlite://data/candles.db");

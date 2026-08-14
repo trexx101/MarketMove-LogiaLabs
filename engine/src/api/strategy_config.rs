@@ -35,6 +35,7 @@ pub struct StrategyConfigResponse {
     pub exit_threshold: f64,
     pub sma_window: usize,
     pub pred_5d_filter: bool,
+    pub short_pred_5d_filter: bool,
     pub enable_shorting: bool,
     pub short_entry_threshold: f64,
     pub short_exit_threshold: f64,
@@ -80,6 +81,7 @@ pub async fn handle_get(
         exit_threshold: sp.exit_threshold,
         sma_window: sp.sma_window,
         pred_5d_filter: sp.pred_5d_filter,
+        short_pred_5d_filter: sp.short_pred_5d_filter,
         enable_shorting: sp.enable_shorting,
         short_entry_threshold: sp.short_entry_threshold,
         short_exit_threshold: sp.short_exit_threshold,
@@ -100,6 +102,8 @@ pub struct StrategyConfigUpdate {
     pub sma_window: Option<usize>,
     #[serde(default)]
     pub pred_5d_filter: Option<bool>,
+    #[serde(default)]
+    pub short_pred_5d_filter: Option<bool>,
     #[serde(default)]
     pub enable_shorting: Option<bool>,
     #[serde(default)]
@@ -160,6 +164,10 @@ pub async fn handle_put(
 
     if let Some(v) = update.pred_5d_filter {
         sp.pred_5d_filter = v;
+    }
+
+    if let Some(v) = update.short_pred_5d_filter {
+        sp.short_pred_5d_filter = v;
     }
 
     if let Some(v) = update.enable_shorting {
@@ -232,6 +240,7 @@ pub async fn handle_put(
         exit_threshold: sp.exit_threshold,
         sma_window: sp.sma_window,
         pred_5d_filter: sp.pred_5d_filter,
+        short_pred_5d_filter: sp.short_pred_5d_filter,
         enable_shorting: sp.enable_shorting,
         short_entry_threshold: sp.short_entry_threshold,
         short_exit_threshold: sp.short_exit_threshold,
@@ -267,6 +276,7 @@ pub async fn handle_put(
             exit_threshold: response.exit_threshold,
             sma_window: response.sma_window,
             pred_5d_filter: response.pred_5d_filter,
+            short_pred_5d_filter: response.short_pred_5d_filter,
             enable_shorting: response.enable_shorting,
             short_entry_threshold: response.short_entry_threshold,
             short_exit_threshold: response.short_exit_threshold,

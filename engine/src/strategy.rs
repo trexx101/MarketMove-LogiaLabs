@@ -147,6 +147,11 @@ pub struct EquityStrategyParams {
     /// Defaults to true (original behavior). Set to false to fire more trades.
     #[serde(default = "default_pred_5d_filter")]
     pub pred_5d_filter: bool,
+    /// Require pred_5d < 0.0 as an additional confirmation filter for short
+    /// entries. Symmetric to `pred_5d_filter` for longs. Defaults to false
+    /// (backward compatible — shorts did not previously require this).
+    #[serde(default = "default_short_pred_5d_filter")]
+    pub short_pred_5d_filter: bool,
     /// Enable sentiment-based risk overlay. Default false per §8.10.
     #[serde(default = "default_enable_sentiment_overlay")]
     pub enable_sentiment_overlay: bool,
@@ -169,6 +174,9 @@ fn default_short_exit_threshold() -> f64 {
 }
 fn default_pred_5d_filter() -> bool {
     true
+}
+fn default_short_pred_5d_filter() -> bool {
+    false
 }
 fn default_enable_sentiment_overlay() -> bool {
     false
@@ -193,6 +201,7 @@ impl Default for EquityStrategyParams {
             short_entry_threshold: default_short_entry_threshold(),
             short_exit_threshold: default_short_exit_threshold(),
             pred_5d_filter: default_pred_5d_filter(),
+            short_pred_5d_filter: default_short_pred_5d_filter(),
             enable_sentiment_overlay: default_enable_sentiment_overlay(),
             sentiment_reduce_threshold: default_sentiment_reduce_threshold(),
             sentiment_exit_threshold: default_sentiment_exit_threshold(),
@@ -298,7 +307,9 @@ pub fn next_equity_position(
     // Short entries only when enabled, currently Flat, AND sma_valid is true.
     // This prevents shorts during warmup when regime is unknown.
     if params.enable_shorting && current == Position::Flat && input.sma_valid {
-        if input.pred_1d < params.short_entry_threshold {
+        if input.pred_1d < params.short_entry_threshold
+            && (!params.short_pred_5d_filter || input.pred_5d < 0.0)
+        {
             return Position::Short;
         }
     }
@@ -471,6 +482,7 @@ mod tests {
             short_entry_threshold: short_entry,
             short_exit_threshold: short_exit,
             pred_5d_filter,
+            short_pred_5d_filter: false,
             enable_sentiment_overlay: false,
             sentiment_reduce_threshold: -0.5,
             sentiment_exit_threshold: -0.8,
@@ -530,6 +542,49 @@ mod tests {
         let input = eq_signal(-0.006, -0.01, 49000.0, 50000.0, true);
         let result = next_equity_position(Position::Long, &input, &p);
         assert_eq!(result, Position::Flat);
+    }
+
+    #[test]
+    fn equity_short_entry_blocked_by_pred_5d_filter() {
+        // short_pred_5d_filter=true: a positive pred_5d must block short entry
+        // even when pred_1d is strongly negative. Symmetric to the long filter.
+        let p = EquityStrategyParams {
+            enable_shorting: true,
+            short_pred_5d_filter: true,
+            short_entry_threshold: -0.001,
+            ..Default::default()
+        };
+        let input = EquitySignalInput {
+            pred_1d: -0.005, // below short_entry_threshold
+            pred_5d: 0.002,  // POSITIVE — filter should block short
+            pred_21d: -0.01,
+            current_close: 49000.0,
+            sma: 50000.0,
+            sma_valid: true,
+        };
+        let result = next_equity_position(Position::Flat, &input, &p);
+        assert_eq!(result, Position::Flat, "short should be blocked by pred_5d filter");
+    }
+
+    #[test]
+    fn equity_short_entry_allowed_by_pred_5d_filter_when_negative() {
+        // short_pred_5d_filter=true but pred_5d < 0 → short allowed.
+        let p = EquityStrategyParams {
+            enable_shorting: true,
+            short_pred_5d_filter: true,
+            short_entry_threshold: -0.001,
+            ..Default::default()
+        };
+        let input = EquitySignalInput {
+            pred_1d: -0.005,
+            pred_5d: -0.002, // negative → passes filter
+            pred_21d: -0.01,
+            current_close: 49000.0,
+            sma: 50000.0,
+            sma_valid: true,
+        };
+        let result = next_equity_position(Position::Flat, &input, &p);
+        assert_eq!(result, Position::Short, "short should be allowed when pred_5d < 0");
     }
 
     #[test]

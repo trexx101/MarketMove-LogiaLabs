@@ -35,6 +35,8 @@ fn test_config(totp_secret: String, parity_marker_path: String) -> Config {
         enable_shorting: false,
         short_entry_threshold: -0.004,
         short_exit_threshold: 0.001,
+        pred_5d_filter: false,
+        short_pred_5d_filter: false,
         http_port: 0,
         symbol: "QQQ".to_string(),
         short_symbol: "PSQ".to_string(),

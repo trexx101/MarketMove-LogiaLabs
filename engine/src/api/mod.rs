@@ -72,6 +72,7 @@ pub fn router(
         short_entry_threshold: config.short_entry_threshold,
         short_exit_threshold: config.short_exit_threshold,
         pred_5d_filter: config.pred_5d_filter,
+        short_pred_5d_filter: config.short_pred_5d_filter,
         enable_sentiment_overlay: false,
         sentiment_reduce_threshold: -0.5,
         sentiment_exit_threshold: -0.8,
