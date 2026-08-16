@@ -196,7 +196,19 @@ impl EquityScheduler {
         // Need enough candles for feature warmup (50d SMA, 20d correlation, etc.)
         // plus the feature window for the TCN sequence.
         let fetch_count = (self.feature_window_size + 60) as i64;
-        let candles = db::fetch_equity_candles_asc(&self.pool, &self.symbol, fetch_count).await?;
+        // Backfill-safe fetch: slice the window to END at `candle_ts`, not at
+        // "now". The live path processes the latest candle (end_ts == now), so
+        // behaviour is unchanged there; but during backfill this feeds each
+        // historical candle the features actually available at that time,
+        // instead of the current window (which would yield a constant prediction
+        // for every replayed candle).
+        let candles = db::fetch_equity_candles_asc_before(
+            &self.pool,
+            &self.symbol,
+            candle_ts,
+            fetch_count,
+        )
+        .await?;
 
         if candles.len() < self.feature_window_size + 50 {
             warn!(

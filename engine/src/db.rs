@@ -1507,6 +1507,52 @@ pub async fn fetch_equity_candles_asc(
         .collect())
 }
 
+/// Fetch the most recent `limit` candles for a symbol **with `ts <= end_ts`**,
+/// returned in ascending (chronological) order.
+///
+/// This is the backfill-safe variant of `fetch_equity_candles_asc`: it slices
+/// the window to end at a specific historical `candle_ts` rather than "now",
+/// so replaying an old candle feeds the model the features that were actually
+/// available at that time (not the current window, which would produce an
+/// identical constant prediction for every replayed candle).
+pub async fn fetch_equity_candles_asc_before(
+    pool: &DbPool,
+    symbol: &str,
+    end_ts: i64,
+    limit: i64,
+) -> Result<Vec<EquityCandle>> {
+    let rows = sqlx::query(
+        r#"SELECT symbol, ts, open, high, low, close, volume, source
+           FROM (
+             SELECT symbol, ts, open, high, low, close, volume, source
+             FROM equity_candles
+             WHERE symbol = ?1 AND ts <= ?3
+             ORDER BY ts DESC
+             LIMIT ?2
+           )
+           ORDER BY ts ASC"#,
+    )
+    .bind(symbol)
+    .bind(limit)
+    .bind(end_ts)
+    .fetch_all(pool)
+    .await
+    .context("fetch_equity_candles_asc_before")?;
+    Ok(rows
+        .iter()
+        .map(|r| EquityCandle {
+            symbol: r.get::<String, _>("symbol"),
+            ts: r.get::<i64, _>("ts"),
+            open: r.get::<f64, _>("open"),
+            high: r.get::<f64, _>("high"),
+            low: r.get::<f64, _>("low"),
+            close: r.get::<f64, _>("close"),
+            volume: r.get::<i64, _>("volume"),
+            source: r.get::<String, _>("source"),
+        })
+        .collect())
+}
+
 /// Fetch equity candles for a symbol, **newest first** (descending ts).
 /// Used for computing trailing SMAs where we want the most recent values.
 pub async fn fetch_equity_candles_desc(
