@@ -39,6 +39,10 @@ pub struct EquityScheduler {
     bridge: Option<ZmqBridge>,
     norm_stats: EquityNormStats,
     feature_window_size: usize,
+    /// Days of history to backfill when a model has no prior predictions.
+    /// Applied to fresh-model seed only — existing-history backfill (when
+    /// `last_processed_ts` is set) is unaffected.
+    backfill_days: i64,
     last_processed_ts: Option<i64>,
     strategy_params: Arc<RwLock<EquityStrategyParams>>,
     /// Trading mode. Read at the start of each cycle; flipped by `POST /api/mode`.
@@ -62,6 +66,7 @@ impl EquityScheduler {
         zmq_endpoint: &str,
         norm_stats: EquityNormStats,
         feature_window_size: usize,
+        backfill_days: i64,
         strategy_params: Arc<RwLock<EquityStrategyParams>>,
         trading_mode: Arc<RwLock<TradingMode>>,
         executor: Arc<RwLock<ExecutorKind>>,
@@ -77,6 +82,7 @@ impl EquityScheduler {
             bridge: Some(bridge),
             norm_stats,
             feature_window_size,
+            backfill_days,
             last_processed_ts: None,
             strategy_params,
             trading_mode,
@@ -125,12 +131,22 @@ impl EquityScheduler {
         let backfill_start = match self.last_processed_ts {
             Some(ts) => ts,
             None => {
-                // Earliest candle we have for this symbol.
-                db::earliest_equity_candle_ts(&self.pool, &self.symbol)
+                // FRESH model: seed history. If a backfill cap is set, only
+                // seed the last N days so first boot stays fast (~7m/symbol
+                // vs ~84m for full 1255-candle history across SMH+XLF).
+                // Older history accumulates one candle per day forward.
+                let earliest = db::earliest_equity_candle_ts(&self.pool, &self.symbol)
                     .await
                     .ok()
                     .flatten()
-                    .unwrap_or(0)
+                    .unwrap_or(0);
+                if self.backfill_days > 0 {
+                    let cap_ts = chrono::Utc::now().timestamp()
+                        - self.backfill_days * 86_400;
+                    earliest.max(cap_ts)
+                } else {
+                    earliest
+                }
             }
         };
 
@@ -689,6 +705,7 @@ mod tests {
             bridge: None,
             norm_stats: test_norm_stats(),
             feature_window_size: 10,
+            backfill_days: 90,
             last_processed_ts: None,
             strategy_params: Arc::new(RwLock::new(EquityStrategyParams::default())),
             trading_mode: Arc::new(RwLock::new(TradingMode::Paper)),

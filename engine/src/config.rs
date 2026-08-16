@@ -61,6 +61,13 @@ pub struct Config {
     pub norm_stats_path: String,
     /// Number of candles sent as the feature window to the inference service.
     pub feature_window_size: usize,
+    /// Days of history to backfill when a model has no prior predictions
+    /// (fresh-enable). Caps the fresh-model seed so a brand-new symbol
+    /// doesn't try to backfill all 1255 candles (~7m/symbol) on first boot.
+    /// When the cap is hit, the scheduler only seeds the last N days; older
+    /// history accumulates one candle per day forward.
+    /// Default: 90. Set to 0 to disable the cap (full history).
+    pub backfill_days: i64,
     /// Path to the `parity_verified.json` marker written by Feature 13.
     pub parity_marker_path: String,
     /// Maximum age (in seconds) of the parity marker before `live` mode
@@ -271,6 +278,9 @@ impl Config {
             return Err(anyhow!("FEATURE_WINDOW_SIZE must be > 0, got 0"));
         }
 
+        let backfill_days = parse_env::<i64>("BACKFILL_DAYS", "90")
+            .context("BACKFILL_DAYS must be an integer")?;
+
         Ok(Self {
             trading_mode,
             zmq_endpoint,
@@ -290,6 +300,7 @@ impl Config {
             database_url,
             norm_stats_path,
             feature_window_size,
+            backfill_days,
             parity_marker_path,
             parity_max_age_secs,
             moomoo_creds_path,

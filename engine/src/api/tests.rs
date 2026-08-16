@@ -283,6 +283,7 @@ async fn router_serves_static_files_and_api() {
             database_url: ":memory:".to_string(),
             norm_stats_path: "models/norm_stats.json".to_string(),
             feature_window_size: 72,
+            backfill_days: 90,
             parity_marker_path: std::env::temp_dir()
                 .join("parity_marker_api_test.json")
                 .to_string_lossy()

@@ -291,6 +291,7 @@ async fn main() {
                 &zmq_endpoint,
                 model_norm_stats,
                 feature_window_size,
+                cfg.backfill_days,
                 model_strategy_params_clone,
                 model_trading_mode,
                 model_executor,
