@@ -49,9 +49,12 @@ export async function fetchChart(limit = 90, symbol = null) {
  * @param {string|null} symbol - optional primary symbol filter
  * @returns {Promise<object|null>} AccuracyResponse or null if unavailable
  */
-export async function fetchAccuracy(symbol = null) {
+export async function fetchAccuracy(symbol = null, sinceDays = 90) {
   let url = `${API_BASE}/accuracy`;
-  if (symbol) url += `?symbol=${encodeURIComponent(symbol)}`;
+  const params = new URLSearchParams();
+  if (symbol) params.append('symbol', symbol);
+  if (sinceDays && sinceDays > 0) params.append('since', sinceDays);
+  if (params.toString()) url += `?${params.toString()}`;
   const res = await fetch(url);
   if (!res.ok) return null;
   return res.json();

@@ -29,10 +29,12 @@
   $: staleness = $status?.staleness_secs ?? 0;
   $: stale = staleness > 120;
   $: stalenessHours = (staleness / 3600).toFixed(staleness < 3600 ? 1 : 0);
-  $: dirAcc1d = accuracyData?.directional_1h;
-  $: dirAcc5d = accuracyData?.directional_4h;
-  $: dirAcc21d = accuracyData?.directional_24h;
-  $: mae1d = accuracyData?.mae_1h;
+  $: dirAcc1d = accuracyData?.directional_1d;
+  $: dirAcc5d = accuracyData?.directional_5d;
+  $: dirAcc21d = accuracyData?.directional_21d;
+  $: mae1d = accuracyData?.mae_1d;
+  $: mae5d = accuracyData?.mae_5d;
+  $: mae21d = accuracyData?.mae_21d;
   $: resolvedCount = accuracyData?.resolved_count;
 
   function fmtPct(v) {
