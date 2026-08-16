@@ -116,28 +116,44 @@ impl EquityScheduler {
         // (Deferred Fix 3) After recovering last_processed_ts, process all
         // candles between the last prediction and the latest candle so a
         // multi-day outage doesn't permanently skip intermediate predictions.
-        if let Some(last_ts) = self.last_processed_ts {
-            if let Ok(Some(latest_candle_ts)) =
-                db::latest_equity_candle_ts(&self.pool, &self.symbol).await
-            {
-                if latest_candle_ts > last_ts {
-                    let missed = db::fetch_unprocessed_candle_ts(
-                        &self.pool,
-                        &self.symbol,
-                        last_ts,
-                        latest_candle_ts,
-                    )
+        //
+        // For a FRESH model (no prior predictions -> last_processed_ts is None),
+        // seed the full available history so directional-accuracy metrics have
+        // a sample to resolve against immediately. Without this, a newly
+        // enabled model only accumulates predictions forward and its accuracy
+        // window stays empty for weeks.
+        let backfill_start = match self.last_processed_ts {
+            Some(ts) => ts,
+            None => {
+                // Earliest candle we have for this symbol.
+                db::earliest_equity_candle_ts(&self.pool, &self.symbol)
                     .await
-                    .unwrap_or_default();
-                    if !missed.is_empty() {
-                        info!(symbol = %self.symbol, count = missed.len(), "backfilling missed candles");
-                        for ts in &missed {
-                            if let Err(e) = self.process(*ts).await {
-                                warn!(symbol = %self.symbol, ts = *ts, error = %e, "backfill failed for candle");
-                            }
+                    .ok()
+                    .flatten()
+                    .unwrap_or(0)
+            }
+        };
+
+        if let Ok(Some(latest_candle_ts)) =
+            db::latest_equity_candle_ts(&self.pool, &self.symbol).await
+        {
+            if latest_candle_ts > backfill_start {
+                let missed = db::fetch_unprocessed_candle_ts(
+                    &self.pool,
+                    &self.symbol,
+                    backfill_start,
+                    latest_candle_ts,
+                )
+                .await
+                .unwrap_or_default();
+                if !missed.is_empty() {
+                    info!(symbol = %self.symbol, count = missed.len(), "backfilling candles (incl. fresh-model seed)");
+                    for ts in &missed {
+                        if let Err(e) = self.process(*ts).await {
+                            warn!(symbol = %self.symbol, ts = *ts, error = %e, "backfill failed for candle");
                         }
-                        info!(symbol = %self.symbol, "backfill complete");
                     }
+                    info!(symbol = %self.symbol, "backfill complete");
                 }
             }
         }

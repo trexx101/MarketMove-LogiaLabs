@@ -1258,12 +1258,12 @@ pub async fn fetch_equity_close_at_ts(
 /// Accuracy metrics computed over resolved predictions.
 #[derive(Debug, Clone)]
 pub struct AccuracyStats {
-    pub directional_1h: f64,
-    pub directional_4h: f64,
-    pub directional_24h: f64,
-    pub mae_1h: f64,
-    pub mae_4h: f64,
-    pub mae_24h: f64,
+    pub directional_1d: f64,
+    pub directional_5d: f64,
+    pub directional_21d: f64,
+    pub mae_1d: f64,
+    pub mae_5d: f64,
+    pub mae_21d: f64,
     pub resolved_count: usize,
 }
 
@@ -1384,12 +1384,14 @@ pub async fn fetch_accuracy(pool: &DbPool) -> Result<AccuracyStats> {
     let resolved_count = rows.len();
 
     Ok(AccuracyStats {
-        directional_1h: if count_1h > 0 { (dir_1h as f64 / count_1h as f64) * 100.0 } else { 0.0 },
-        directional_4h: if count_4h > 0 { (dir_4h as f64 / count_4h as f64) * 100.0 } else { 0.0 },
-        directional_24h: if count_24h > 0 { (dir_24h as f64 / count_24h as f64) * 100.0 } else { 0.0 },
-        mae_1h: if count_1h > 0 { sum_ae_1h / count_1h as f64 } else { 0.0 },
-        mae_4h: if count_4h > 0 { sum_ae_4h / count_4h as f64 } else { 0.0 },
-        mae_24h: if count_24h > 0 { sum_ae_24h / count_24h as f64 } else { 0.0 },
+        // Legacy crypto path is hourly (1h/4h/24h); mapped onto the shared
+        // daily-named struct fields (1d/5d/21d) for API consistency.
+        directional_1d: if count_1h > 0 { (dir_1h as f64 / count_1h as f64) * 100.0 } else { 0.0 },
+        directional_5d: if count_4h > 0 { (dir_4h as f64 / count_4h as f64) * 100.0 } else { 0.0 },
+        directional_21d: if count_24h > 0 { (dir_24h as f64 / count_24h as f64) * 100.0 } else { 0.0 },
+        mae_1d: if count_1h > 0 { sum_ae_1h / count_1h as f64 } else { 0.0 },
+        mae_5d: if count_4h > 0 { sum_ae_4h / count_4h as f64 } else { 0.0 },
+        mae_21d: if count_24h > 0 { sum_ae_24h / count_24h as f64 } else { 0.0 },
         resolved_count,
     })
 }
@@ -1612,6 +1614,20 @@ pub async fn latest_equity_candle_ts(pool: &DbPool, symbol: &str) -> Result<Opti
     Ok(row.map(|r| r.get::<i64, _>("ts")))
 }
 
+/// Fetch the earliest equity candle timestamp for a symbol (oldest first).
+/// Used to seed a fresh model's backfill from the start of its history.
+/// Returns `None` if no candles exist.
+pub async fn earliest_equity_candle_ts(pool: &DbPool, symbol: &str) -> Result<Option<i64>> {
+    let row = sqlx::query(
+        r#"SELECT ts FROM equity_candles WHERE symbol = ?1 ORDER BY ts ASC LIMIT 1"#,
+    )
+    .bind(symbol)
+    .fetch_optional(pool)
+    .await
+    .context("earliest_equity_candle_ts")?;
+    Ok(row.map(|r| r.get::<i64, _>("ts")))
+}
+
 /// Fetch the latest prediction timestamp for a symbol.
 /// Returns `None` if no predictions exist.
 pub async fn latest_prediction_ts(pool: &DbPool, symbol: &str) -> Result<Option<i64>> {
@@ -1702,19 +1718,51 @@ pub async fn fetch_recent_equity_predictions(
 /// The equity_predictions table has no actuals columns (unlike the crypto
 /// `predictions` table), so we compute on-the-fly.
 pub async fn fetch_equity_accuracy(pool: &DbPool, symbol: &str) -> Result<AccuracyStats> {
-    // Fetch predictions and candles
-    let preds = sqlx::query_as::<_, EquityPredictionRow>(
-        r#"SELECT id, symbol, candle_ts, pred_1d, pred_5d, pred_21d,
-                  regime, features_json, created_at, source
-           FROM equity_predictions
-           WHERE symbol = ?1
-           ORDER BY candle_ts DESC
-           LIMIT 500"#,
-    )
-    .bind(symbol)
-    .fetch_all(pool)
-    .await
-    .context("fetch_equity_accuracy: predictions")?;
+    fetch_equity_accuracy_since(pool, symbol, 0).await
+}
+
+/// Compute directional accuracy, MAE, and IC over resolved equity predictions,
+/// optionally restricted to predictions at or after `since_ts` (Unix seconds).
+///
+/// For each prediction at `candle_ts`, the actual return at horizon N is
+/// `ln(close[ts+N] / close[ts])`, looked up from `equity_candles`.
+/// The equity_predictions table has no actuals columns (unlike the crypto
+/// `predictions` table), so we compute on-the-fly.
+pub async fn fetch_equity_accuracy_since(
+    pool: &DbPool,
+    symbol: &str,
+    since_ts: i64,
+) -> Result<AccuracyStats> {
+    // Fetch predictions and candles. When a `since_ts` window is requested we
+    // only pull predictions at/after it; otherwise we cap at the most recent
+    // 500 (legacy behaviour) so the all-time stat stays cheap.
+    let preds = if since_ts > 0 {
+        sqlx::query_as::<_, EquityPredictionRow>(
+            r#"SELECT id, symbol, candle_ts, pred_1d, pred_5d, pred_21d,
+                      regime, features_json, created_at, source
+               FROM equity_predictions
+               WHERE symbol = ?1 AND candle_ts >= ?2
+               ORDER BY candle_ts DESC"#,
+        )
+        .bind(symbol)
+        .bind(since_ts)
+        .fetch_all(pool)
+        .await
+        .context("fetch_equity_accuracy: predictions")?
+    } else {
+        sqlx::query_as::<_, EquityPredictionRow>(
+            r#"SELECT id, symbol, candle_ts, pred_1d, pred_5d, pred_21d,
+                      regime, features_json, created_at, source
+               FROM equity_predictions
+               WHERE symbol = ?1
+               ORDER BY candle_ts DESC
+               LIMIT 500"#,
+        )
+        .bind(symbol)
+        .fetch_all(pool)
+        .await
+        .context("fetch_equity_accuracy: predictions")?
+    };
 
     let candles = sqlx::query("SELECT ts, close FROM equity_candles WHERE symbol = ?1 ORDER BY ts ASC")
         .bind(symbol)
@@ -1724,12 +1772,12 @@ pub async fn fetch_equity_accuracy(pool: &DbPool, symbol: &str) -> Result<Accura
 
     if preds.is_empty() || candles.len() < 2 {
         return Ok(AccuracyStats {
-            directional_1h: 0.0,
-            directional_4h: 0.0,
-            directional_24h: 0.0,
-            mae_1h: 0.0,
-            mae_4h: 0.0,
-            mae_24h: 0.0,
+            directional_1d: 0.0,
+            directional_5d: 0.0,
+            directional_21d: 0.0,
+            mae_1d: 0.0,
+            mae_5d: 0.0,
+            mae_21d: 0.0,
             resolved_count: 0,
         });
     }
@@ -1810,12 +1858,12 @@ pub async fn fetch_equity_accuracy(pool: &DbPool, symbol: &str) -> Result<Accura
     let resolved_count = count_1d.max(count_5d).max(count_21d);
 
     Ok(AccuracyStats {
-        directional_1h: if count_1d > 0 { (dir_1d as f64 / count_1d as f64) * 100.0 } else { 0.0 },
-        directional_4h: if count_5d > 0 { (dir_5d as f64 / count_5d as f64) * 100.0 } else { 0.0 },
-        directional_24h: if count_21d > 0 { (dir_21d as f64 / count_21d as f64) * 100.0 } else { 0.0 },
-        mae_1h: if count_1d > 0 { sum_ae_1d / count_1d as f64 } else { 0.0 },
-        mae_4h: if count_5d > 0 { sum_ae_5d / count_5d as f64 } else { 0.0 },
-        mae_24h: if count_21d > 0 { sum_ae_21d / count_21d as f64 } else { 0.0 },
+        directional_1d: if count_1d > 0 { (dir_1d as f64 / count_1d as f64) * 100.0 } else { 0.0 },
+        directional_5d: if count_5d > 0 { (dir_5d as f64 / count_5d as f64) * 100.0 } else { 0.0 },
+        directional_21d: if count_21d > 0 { (dir_21d as f64 / count_21d as f64) * 100.0 } else { 0.0 },
+        mae_1d: if count_1d > 0 { sum_ae_1d / count_1d as f64 } else { 0.0 },
+        mae_5d: if count_5d > 0 { sum_ae_5d / count_5d as f64 } else { 0.0 },
+        mae_21d: if count_21d > 0 { sum_ae_21d / count_21d as f64 } else { 0.0 },
         resolved_count,
     })
 }
@@ -2136,13 +2184,13 @@ mod tests {
         let stats = fetch_accuracy(&pool).await.unwrap();
         assert_eq!(stats.resolved_count, 1);
         // 1h: pred=0.01 (+), actual=0.015 (+) → direction match
-        assert!((stats.directional_1h - 100.0).abs() < 1e-9);
+        assert!((stats.directional_1d - 100.0).abs() < 1e-9);
         // 4h: pred=0.02 (+), actual=-0.01 (-) → mismatch
-        assert!((stats.directional_4h - 0.0).abs() < 1e-9);
+        assert!((stats.directional_5d - 0.0).abs() < 1e-9);
         // 24h: pred=-0.03 (-), actual=-0.025 (-) → match
-        assert!((stats.directional_24h - 100.0).abs() < 1e-9);
+        assert!((stats.directional_21d - 100.0).abs() < 1e-9);
         // MAE: |0.01 - 0.015| = 0.005
-        assert!((stats.mae_1h - 0.005).abs() < 1e-9);
+        assert!((stats.mae_1d - 0.005).abs() < 1e-9);
     }
 
     // ===== Wave A: equity data layer tests ============================

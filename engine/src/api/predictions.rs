@@ -9,12 +9,12 @@ use super::{internal_error, ts_to_rfc3339, ApiResult, AppState};
 
 #[derive(Debug, Serialize)]
 pub(crate) struct AccuracyResponse {
-    directional_1h: f64,
-    directional_4h: f64,
-    directional_24h: f64,
-    mae_1h: f64,
-    mae_4h: f64,
-    mae_24h: f64,
+    directional_1d: f64,
+    directional_5d: f64,
+    directional_21d: f64,
+    mae_1d: f64,
+    mae_5d: f64,
+    mae_21d: f64,
     resolved_count: usize,
 }
 
@@ -61,7 +61,17 @@ pub(crate) async fn handle_accuracy(
     axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> ApiResult<AccuracyResponse> {
     let symbol = params.get("symbol").cloned().unwrap_or_else(|| state.symbol.clone());
-    let stats = db::fetch_equity_accuracy(&state.pool, &symbol)
+    // Optional `since` window in days. When provided (>0), accuracy is computed
+    // only over predictions at/after (now - since_days). This lets the dashboard
+    // show reliability over a specific recent window (e.g. 30/60/90 days) rather
+    // than the hardcoded most-recent-500 all-time snapshot.
+    let since_ts = match params.get("since").and_then(|v| v.parse::<i64>().ok()) {
+        Some(days) if days > 0 => {
+            chrono::Utc::now().timestamp() - days * 86_400
+        }
+        _ => 0,
+    };
+    let stats = db::fetch_equity_accuracy_since(&state.pool, &symbol, since_ts)
         .await
         .map_err(|e| internal_error("fetch_equity_accuracy", e))?;
 
@@ -73,12 +83,12 @@ pub(crate) async fn handle_accuracy(
     }
 
     Ok(Json(AccuracyResponse {
-        directional_1h: stats.directional_1h,
-        directional_4h: stats.directional_4h,
-        directional_24h: stats.directional_24h,
-        mae_1h: stats.mae_1h,
-        mae_4h: stats.mae_4h,
-        mae_24h: stats.mae_24h,
+        directional_1d: stats.directional_1d,
+        directional_5d: stats.directional_5d,
+        directional_21d: stats.directional_21d,
+        mae_1d: stats.mae_1d,
+        mae_5d: stats.mae_5d,
+        mae_21d: stats.mae_21d,
         resolved_count: stats.resolved_count,
     }))
 }
