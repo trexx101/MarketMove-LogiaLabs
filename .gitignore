@@ -61,3 +61,8 @@ logs/
 .omo/run-continuation/*
 moomoo_OpenD_10.9.6918_Ubuntu18.04/
 nohup.out
+
+# Stale artifacts (prevent re-tracking)
+graphify-out/20*/*
+models/archive/
+.agents/
