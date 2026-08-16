@@ -108,6 +108,7 @@ services:
       DATABASE_URL: sqlite:///app/data/candles.db
       NORM_STATS_PATH: /models/norm_stats_qqq_v1.json
       FEATURE_WINDOW_SIZE: ${FEATURE_WINDOW_SIZE:-126}
+      BACKFILL_DAYS: ${BACKFILL_DAYS:-90}
       PARITY_MARKER_PATH: /app/data/parity_verified.json
       PARITY_MAX_AGE_SECS: ${PARITY_MAX_AGE_SECS:-604800}
       RUST_LOG: ${RUST_LOG:-info}
