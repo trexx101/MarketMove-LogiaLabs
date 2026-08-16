@@ -281,7 +281,10 @@ class EquityEnsemble:
             # output, so it is a reasonable stand-in until the buffer fills.
             if len(self._tcn_buffer[h]) < 10:
                 raw_pred = self.tcn_weight * tcn_raw + self.lgbm_weight * lgbm_raw
-                result[f"pred_{h}d"] = float(raw_pred)
+                # Convert from ATR-scaled label space to raw log-return space.
+                # During warmup the raw blend is in mag units; multiply by the
+                # current ATR ratio to get back to return space.
+                result[f"pred_{h}d"] = float(raw_pred * atr_ratio)
                 if not skip_buffer:
                     self._tcn_buffer[h].append(tcn_raw)
                     self._lgbm_buffer[h].append(lgbm_raw)
@@ -293,12 +296,12 @@ class EquityEnsemble:
             lgbm_z = self._zscore(lgbm_raw, self._lgbm_buffer[h])
 
             # Blend z-scores, then denormalize to raw log-return using the
-            # FIXED training-time label std (Deferred Fix 2). This scale is
-            # stationary — it does not drift as the buffers fill — so the same
-            # feature window always yields the same raw prediction.
+            # FIXED training-time label std (Deferred Fix 2) and the current
+            # ATR ratio.  label_std is the std of the ATR-scaled labels (mag),
+            # so we multiply by atr_ratio to return to raw return space.
             blend_z = self.tcn_weight * tcn_z + self.lgbm_weight * lgbm_z
             label_std = self._label_std.get(h, 0.012)
-            raw_log_return = blend_z * label_std
+            raw_log_return = blend_z * label_std * atr_ratio
 
             result[f"pred_{h}d"] = float(raw_log_return)
 
