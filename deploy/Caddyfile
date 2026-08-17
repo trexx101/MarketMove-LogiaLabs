@@ -50,7 +50,24 @@
 # during the TLS handshake (localhost, VPS IP, port-forwarded address, etc.).
 # When `HOST` is set, Caddy auto-issues a Let's Encrypt cert via the DNS
 # challenge for the configured hostname.
+#
+# AUTHENTICATION: Basic auth protects the entire dashboard.
+#   - Default user: admin
+#   - Change password: docker run --rm caddy:2-alpine caddy hash-password --plaintext "YOUR_PASSWORD"
+#   - Replace the hash below with your new one.
+#   - Optional: uncomment the remote_ip matcher to also restrict by IP.
 :80, :443 {
     tls internal
+
+    # Basic authentication (guards entire dashboard)
+    basic_auth {
+        admin $2a$14$vYowfZFr6iE0cWFWRJVQZuTzzBLEXEbP.4QqSRIHxPToUybQvRz9a
+    }
+
+    # Optional: IP whitelist (belt + suspenders)
+    # Uncomment and set your IP(s) to also block non-matching IPs
+    # @not_allowed not remote_ip 123.45.67.89
+    # respond @not_allowed "Forbidden" 403
+
     import backend
 }
