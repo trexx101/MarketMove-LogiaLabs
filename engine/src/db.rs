@@ -165,6 +165,61 @@ CREATE TABLE IF NOT EXISTS backtest_results (
     timestamp         INTEGER NOT NULL,
     FOREIGN KEY(strategy_id) REFERENCES strategy_configs(id) ON DELETE CASCADE
 );
+
+-- Options momentum engine tables (Phase 3).
+-- All use TEXT PRIMARY KEY (UUID generated at app layer).
+
+CREATE TABLE IF NOT EXISTS strategy_versions (
+    id                      TEXT    PRIMARY KEY,
+    family                  TEXT    NOT NULL,
+    params_json             TEXT    NOT NULL,
+    status                  TEXT    NOT NULL DEFAULT 'CANDIDATE',
+    promotion_metadata_json TEXT    NOT NULL DEFAULT '{}',
+    created_at              INTEGER NOT NULL,
+    updated_at              INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS option_positions (
+    id                      TEXT    PRIMARY KEY,
+    underlying              TEXT    NOT NULL,
+    contract_code           TEXT    NOT NULL,
+    strategy_version_id     TEXT    NOT NULL,
+    entry_underlying_price  REAL    NOT NULL,
+    entry_spread            REAL    NOT NULL,
+    entry_slippage_budget   REAL    NOT NULL,
+    qty                     INTEGER NOT NULL,
+    qty_filled_residual     INTEGER NOT NULL DEFAULT 0,
+    status                  TEXT    NOT NULL DEFAULT 'OPEN',
+    dte_at_entry            INTEGER NOT NULL,
+    delta_at_entry          REAL    NOT NULL,
+    created_at              INTEGER NOT NULL,
+    updated_at              INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS option_positions_underlying_status_idx
+    ON option_positions (underlying, status);
+
+CREATE TABLE IF NOT EXISTS exit_signals (
+    id                    TEXT    PRIMARY KEY,
+    position_id           TEXT    NOT NULL,
+    trigger_source        TEXT    NOT NULL,
+    priority              INTEGER NOT NULL,
+    stage                 INTEGER NOT NULL,
+    intended_action       TEXT    NOT NULL,
+    persisted_before_send INTEGER NOT NULL DEFAULT 0,
+    created_at            INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS exit_signals_position_created_idx
+    ON exit_signals (position_id, created_at);
+
+CREATE TABLE IF NOT EXISTS option_tape_meta (
+    id                    TEXT    PRIMARY KEY,
+    underlying            TEXT    NOT NULL,
+    chain_code            TEXT    NOT NULL,
+    quota_accounting_json TEXT    NOT NULL DEFAULT '{}',
+    created_at            INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS option_tape_meta_underlying_chain_idx
+    ON option_tape_meta (underlying, chain_code);
 "#;
 
 /// A single OHLCV + VWAP candle as stored in the database.
@@ -1651,6 +1706,52 @@ mod tests {
         let err: String = row.get("last_error");
         assert_eq!(last_ts, 1_700_086_400);
         assert_eq!(err, "timeout");
+    }
+
+    // ===== Options momentum engine tables (Phase 3) ===================
+
+    #[tokio::test]
+    async fn options_tables_created_by_ddl() {
+        let pool = test_pool().await;
+
+        // Verify all 4 new tables exist
+        let tables = vec![
+            "strategy_versions",
+            "option_positions",
+            "exit_signals",
+            "option_tape_meta",
+        ];
+
+        for table in tables {
+            let row = sqlx::query(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            )
+            .bind(table)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+
+            assert!(row.is_some(), "table {} should exist", table);
+        }
+
+        // Verify indexes exist
+        let indexes = vec![
+            "option_positions_underlying_status_idx",
+            "exit_signals_position_created_idx",
+            "option_tape_meta_underlying_chain_idx",
+        ];
+
+        for index in indexes {
+            let row = sqlx::query(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name=?",
+            )
+            .bind(index)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+
+            assert!(row.is_some(), "index {} should exist", index);
+        }
     }
 }
 

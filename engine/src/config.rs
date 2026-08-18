@@ -24,6 +24,85 @@ pub struct LlmConfig {
     pub cache_ttl_seconds: u64,
 }
 
+/// Options Momentum Engine configuration (Phase 0a).
+/// All values are D-table defaults; env vars use OPT_ prefix.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OptionsEngineConfig {
+    /// Futu quota tier: 20 | 60 | 200 (verified via probe).
+    pub quota_tier: u32,
+    /// Fraction of quota reserved for tape recorder (D3).
+    pub recorder_quota_pct: f64,
+    /// Minimum bid price to consider a contract liquid (D18).
+    pub bid_min: f64,
+    /// Maximum spread as fraction of mid-price (D18).
+    pub spread_cap_pct: f64,
+    /// Minimum open interest (D18).
+    pub oi_min: u32,
+    /// Minimum DTE for chain selection (D17).
+    pub dte_min: u32,
+    /// Maximum DTE for chain selection (D17).
+    pub dte_max: u32,
+    /// Target delta for chain selection (D17).
+    pub delta_target: f64,
+    /// Minimum delta drift band (D15 — hardcoded risk rail, but config for flexibility).
+    pub delta_drift_min: f64,
+    /// Maximum delta drift band (D15).
+    pub delta_drift_max: f64,
+    /// Slippage multiplier on entry-time spread (D8).
+    pub slippage_multiplier: f64,
+    /// Maximum slippage as fraction of premium (D8).
+    pub slippage_premium_cap_pct: f64,
+    /// Circuit breaker cooldown in seconds (D9).
+    pub cooldown_seconds: u64,
+    /// VIX level gate for pause (D6).
+    pub vix_level_gate: f64,
+    /// VIX slope window in days (D6).
+    pub vix_slope_window: u32,
+    /// Risk per trade as fraction of equity (D20).
+    pub risk_pct: f64,
+    /// Maximum premium as fraction of equity (D20).
+    pub max_premium_pct: f64,
+    /// Maximum deployed capital as fraction of equity (D21).
+    pub deployed_cap_pct: f64,
+    /// Hard cap on contracts per position (D20).
+    pub contracts_cap: u32,
+    /// Max positions per underlying (D20).
+    pub positions_per_underlying: u32,
+    /// Max total positions (D20).
+    pub max_positions: u32,
+    /// Operating mode: 'paper' | 'micro' | 'full' (D12).
+    pub mode: String,
+}
+
+impl Default for OptionsEngineConfig {
+    fn default() -> Self {
+        Self {
+            quota_tier: 20,
+            recorder_quota_pct: 0.6,
+            bid_min: 0.01,
+            spread_cap_pct: 0.08,
+            oi_min: 100,
+            dte_min: 30,
+            dte_max: 45,
+            delta_target: 0.45,
+            delta_drift_min: 0.15,
+            delta_drift_max: 0.70,
+            slippage_multiplier: 1.0,
+            slippage_premium_cap_pct: 0.05,
+            cooldown_seconds: 900,
+            vix_level_gate: 30.0,
+            vix_slope_window: 5,
+            risk_pct: 0.01,
+            max_premium_pct: 0.05,
+            deployed_cap_pct: 0.25,
+            contracts_cap: 10,
+            positions_per_underlying: 1,
+            max_positions: 3,
+            mode: "paper".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub trading_mode: TradingMode,
@@ -79,6 +158,8 @@ pub struct Config {
     /// generates a fresh secret and logs the otpauth URL — the user must
     /// persist it before the next restart or they will be locked out of live mode.
     pub totp_secret: String,
+    /// Options Momentum Engine configuration (Phase 0a).
+    pub options: OptionsEngineConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,6 +343,75 @@ impl Config {
             return Err(anyhow!("FEATURE_WINDOW_SIZE must be > 0, got 0"));
         }
 
+        // Phase 0a: Options Momentum Engine config (OPT_ prefix)
+        let options = OptionsEngineConfig {
+            quota_tier: parse_env::<u32>("OPT_QUOTA_TIER", "20")
+                .context("OPT_QUOTA_TIER must be a positive integer")?,
+            recorder_quota_pct: parse_env::<f64>("OPT_RECORDER_QUOTA_PCT", "0.6")
+                .context("OPT_RECORDER_QUOTA_PCT must be a number")?,
+            bid_min: parse_env::<f64>("OPT_BID_MIN", "0.01")
+                .context("OPT_BID_MIN must be a number")?,
+            spread_cap_pct: parse_env::<f64>("OPT_SPREAD_CAP_PCT", "0.08")
+                .context("OPT_SPREAD_CAP_PCT must be a number")?,
+            oi_min: parse_env::<u32>("OPT_OI_MIN", "100")
+                .context("OPT_OI_MIN must be a positive integer")?,
+            dte_min: parse_env::<u32>("OPT_DTE_MIN", "30")
+                .context("OPT_DTE_MIN must be a positive integer")?,
+            dte_max: parse_env::<u32>("OPT_DTE_MAX", "45")
+                .context("OPT_DTE_MAX must be a positive integer")?,
+            delta_target: parse_env::<f64>("OPT_DELTA_TARGET", "0.45")
+                .context("OPT_DELTA_TARGET must be a number")?,
+            delta_drift_min: parse_env::<f64>("OPT_DELTA_DRIFT_MIN", "0.15")
+                .context("OPT_DELTA_DRIFT_MIN must be a number")?,
+            delta_drift_max: parse_env::<f64>("OPT_DELTA_DRIFT_MAX", "0.70")
+                .context("OPT_DELTA_DRIFT_MAX must be a number")?,
+            slippage_multiplier: parse_env::<f64>("OPT_SLIPPAGE_MULTIPLIER", "1.0")
+                .context("OPT_SLIPPAGE_MULTIPLIER must be a number")?,
+            slippage_premium_cap_pct: parse_env::<f64>("OPT_SLIPPAGE_PREMIUM_CAP_PCT", "0.05")
+                .context("OPT_SLIPPAGE_PREMIUM_CAP_PCT must be a number")?,
+            cooldown_seconds: parse_env::<u64>("OPT_COOLDOWN_SECONDS", "900")
+                .context("OPT_COOLDOWN_SECONDS must be a positive integer")?,
+            vix_level_gate: parse_env::<f64>("OPT_VIX_LEVEL_GATE", "30.0")
+                .context("OPT_VIX_LEVEL_GATE must be a number")?,
+            vix_slope_window: parse_env::<u32>("OPT_VIX_SLOPE_WINDOW", "5")
+                .context("OPT_VIX_SLOPE_WINDOW must be a positive integer")?,
+            risk_pct: parse_env::<f64>("OPT_RISK_PCT", "0.01")
+                .context("OPT_RISK_PCT must be a number")?,
+            max_premium_pct: parse_env::<f64>("OPT_MAX_PREMIUM_PCT", "0.05")
+                .context("OPT_MAX_PREMIUM_PCT must be a number")?,
+            deployed_cap_pct: parse_env::<f64>("OPT_DEPLOYED_CAP_PCT", "0.25")
+                .context("OPT_DEPLOYED_CAP_PCT must be a number")?,
+            contracts_cap: parse_env::<u32>("OPT_CONTRACTS_CAP", "10")
+                .context("OPT_CONTRACTS_CAP must be a positive integer")?,
+            positions_per_underlying: parse_env::<u32>("OPT_POSITIONS_PER_UNDERLYING", "1")
+                .context("OPT_POSITIONS_PER_UNDERLYING must be a positive integer")?,
+            max_positions: parse_env::<u32>("OPT_MAX_POSITIONS", "3")
+                .context("OPT_MAX_POSITIONS must be a positive integer")?,
+            mode: env_or("OPT_MODE", "paper"),
+        };
+
+        // Validate options config
+        if !matches!(options.mode.as_str(), "paper" | "micro" | "full") {
+            return Err(anyhow!(
+                "OPT_MODE must be 'paper', 'micro', or 'full', got '{}'",
+                options.mode
+            ));
+        }
+        if options.dte_min >= options.dte_max {
+            return Err(anyhow!(
+                "OPT_DTE_MIN ({}) must be < OPT_DTE_MAX ({})",
+                options.dte_min,
+                options.dte_max
+            ));
+        }
+        if options.delta_drift_min >= options.delta_drift_max {
+            return Err(anyhow!(
+                "OPT_DELTA_DRIFT_MIN ({}) must be < OPT_DELTA_DRIFT_MAX ({})",
+                options.delta_drift_min,
+                options.delta_drift_max
+            ));
+        }
+
         Ok(Self {
             trading_mode,
             zmq_endpoint,
@@ -287,6 +437,7 @@ impl Config {
             live_executor,
             moomoo_trd_env,
             totp_secret,
+            options,
         })
     }
 }
@@ -387,6 +538,29 @@ mod tests {
             "LIVE_EXECUTOR",
             "MOOMOO_TRD_ENV",
             "TOTP_SECRET",
+            // Options engine (OPT_ prefix)
+            "OPT_QUOTA_TIER",
+            "OPT_RECORDER_QUOTA_PCT",
+            "OPT_BID_MIN",
+            "OPT_SPREAD_CAP_PCT",
+            "OPT_OI_MIN",
+            "OPT_DTE_MIN",
+            "OPT_DTE_MAX",
+            "OPT_DELTA_TARGET",
+            "OPT_DELTA_DRIFT_MIN",
+            "OPT_DELTA_DRIFT_MAX",
+            "OPT_SLIPPAGE_MULTIPLIER",
+            "OPT_SLIPPAGE_PREMIUM_CAP_PCT",
+            "OPT_COOLDOWN_SECONDS",
+            "OPT_VIX_LEVEL_GATE",
+            "OPT_VIX_SLOPE_WINDOW",
+            "OPT_RISK_PCT",
+            "OPT_MAX_PREMIUM_PCT",
+            "OPT_DEPLOYED_CAP_PCT",
+            "OPT_CONTRACTS_CAP",
+            "OPT_POSITIONS_PER_UNDERLYING",
+            "OPT_MAX_POSITIONS",
+            "OPT_MODE",
         ] {
             env::remove_var(key);
         }
@@ -671,6 +845,94 @@ mod tests {
         let msg = format!("{:#}", err);
         assert!(
             msg.contains("SHORT_EXIT_THRESHOLD must be > SHORT_ENTRY_THRESHOLD"),
+            "msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn options_config_defaults_match_dtable() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_engine_env();
+        let cfg = Config::from_env().expect("defaults");
+        
+        // D-table values (verified via probe 2026-08-17)
+        assert_eq!(cfg.options.quota_tier, 20, "quota_tier should be 20");
+        assert!((cfg.options.recorder_quota_pct - 0.6).abs() < 1e-9, "recorder_quota_pct should be 0.6");
+        
+        // Liquidity floors (D18)
+        assert!((cfg.options.bid_min - 0.01).abs() < 1e-9, "bid_min should be 0.01");
+        assert!((cfg.options.spread_cap_pct - 0.08).abs() < 1e-9, "spread_cap_pct should be 0.08");
+        assert_eq!(cfg.options.oi_min, 100, "oi_min should be 100");
+        
+        // DTE window (D17)
+        assert_eq!(cfg.options.dte_min, 30, "dte_min should be 30");
+        assert_eq!(cfg.options.dte_max, 45, "dte_max should be 45");
+        assert!((cfg.options.delta_target - 0.45).abs() < 1e-9, "delta_target should be 0.45");
+        
+        // Delta drift band (D15)
+        assert!((cfg.options.delta_drift_min - 0.15).abs() < 1e-9, "delta_drift_min should be 0.15");
+        assert!((cfg.options.delta_drift_max - 0.70).abs() < 1e-9, "delta_drift_max should be 0.70");
+        
+        // Slippage (D8)
+        assert!((cfg.options.slippage_multiplier - 1.0).abs() < 1e-9, "slippage_multiplier should be 1.0");
+        assert!((cfg.options.slippage_premium_cap_pct - 0.05).abs() < 1e-9, "slippage_premium_cap_pct should be 0.05");
+        
+        // Cooldown (D9)
+        assert_eq!(cfg.options.cooldown_seconds, 900, "cooldown_seconds should be 900 (15 min)");
+        
+        // VIX gates (D6)
+        assert!((cfg.options.vix_level_gate - 30.0).abs() < 1e-9, "vix_level_gate should be 30.0");
+        assert_eq!(cfg.options.vix_slope_window, 5, "vix_slope_window should be 5");
+        
+        // Sizing caps (D20/D21)
+        assert!((cfg.options.risk_pct - 0.01).abs() < 1e-9, "risk_pct should be 0.01 (1%)");
+        assert!((cfg.options.max_premium_pct - 0.05).abs() < 1e-9, "max_premium_pct should be 0.05 (5%)");
+        assert!((cfg.options.deployed_cap_pct - 0.25).abs() < 1e-9, "deployed_cap_pct should be 0.25 (25%)");
+        assert_eq!(cfg.options.contracts_cap, 10, "contracts_cap should be 10");
+        assert_eq!(cfg.options.positions_per_underlying, 1, "positions_per_underlying should be 1");
+        assert_eq!(cfg.options.max_positions, 3, "max_positions should be 3");
+        
+        // Mode (D12)
+        assert_eq!(cfg.options.mode, "paper", "mode should default to 'paper'");
+    }
+
+    #[test]
+    fn options_config_invalid_mode_rejected() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_engine_env();
+        env::set_var("OPT_MODE", "aggressive");
+        let err = Config::from_env().expect_err("invalid OPT_MODE must fail");
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("OPT_MODE must be 'paper', 'micro', or 'full'"),
+            "msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn options_config_dte_validation() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_engine_env();
+        env::set_var("OPT_DTE_MIN", "50");
+        env::set_var("OPT_DTE_MAX", "40");
+        let err = Config::from_env().expect_err("OPT_DTE_MIN >= OPT_DTE_MAX must fail");
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("OPT_DTE_MIN") && msg.contains("OPT_DTE_MAX"),
+            "msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn options_config_delta_drift_validation() {
+        let _g = ENV_LOCK.lock().unwrap();
+        clear_engine_env();
+        env::set_var("OPT_DELTA_DRIFT_MIN", "0.80");
+        env::set_var("OPT_DELTA_DRIFT_MAX", "0.20");
+        let err = Config::from_env().expect_err("OPT_DELTA_DRIFT_MIN >= OPT_DELTA_DRIFT_MAX must fail");
+        let msg = format!("{:#}", err);
+        assert!(
+            msg.contains("OPT_DELTA_DRIFT_MIN") && msg.contains("OPT_DELTA_DRIFT_MAX"),
             "msg: {msg}"
         );
     }

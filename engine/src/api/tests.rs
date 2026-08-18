@@ -256,6 +256,7 @@ async fn router_serves_static_files_and_api() {
             live_executor: "paper".to_string(),
             moomoo_trd_env: "SIMULATE".to_string(),
             totp_secret: String::new(),
+            options: crate::config::OptionsEngineConfig::default(),
         };
 
         let app = {
