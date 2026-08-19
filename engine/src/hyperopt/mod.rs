@@ -8,6 +8,9 @@ pub mod promotion;
 pub mod tape_replay;
 pub mod runner;
 
+#[cfg(test)]
+mod integration_test;
+
 // Re-export commonly used types
 pub use candidate_store::CandidateStore;
 pub use promotion::PromotionPipeline;
