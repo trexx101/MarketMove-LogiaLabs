@@ -10,6 +10,7 @@ pub mod normalize;
 pub mod options;
 pub mod hyperopt;
 pub mod options_recorder;
+pub mod options_scheduler;
 pub mod parity;
 pub mod scheduler;
 pub mod strategy;
