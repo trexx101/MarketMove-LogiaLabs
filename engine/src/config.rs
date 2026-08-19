@@ -585,7 +585,7 @@ mod tests {
 
     #[test]
     fn defaults_load_when_env_unset() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
         let cfg = Config::from_env().expect("defaults should load");
         assert_eq!(cfg.trading_mode, TradingMode::Paper);
@@ -615,7 +615,7 @@ mod tests {
 
     #[test]
     fn totp_secret_loaded_from_env() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
         env::set_var("TOTP_SECRET", "JBSWY3DPEHPK3PXP");
         let cfg = Config::from_env().expect("config should load with TOTP_SECRET");
@@ -624,7 +624,7 @@ mod tests {
 
     #[test]
     fn paper_mode_ignores_missing_keys() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
         env::set_var("TRADING_MODE", "paper");
         let cfg = Config::from_env().expect("paper mode must not require keys");
@@ -633,7 +633,7 @@ mod tests {
 
     #[test]
     fn live_mode_falls_back_to_paper() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
         env::set_var("TRADING_MODE", "live");
         // Wave 5: Kraken retired; live execution is not yet wired to Binance, so
@@ -644,7 +644,7 @@ mod tests {
 
     #[test]
     fn live_mode_without_parity_marker_fails_fast() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
         env::set_var("TRADING_MODE", "live");
         // Point the engine at a path that does not exist.
@@ -659,7 +659,7 @@ mod tests {
 
     #[test]
     fn live_mode_with_stale_parity_marker_fails_fast() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
         // Marker verified 30 days ago, default max age is 7 days → stale.
         let marker_path = std::env::temp_dir().join("parity_marker_stale_test.json");
@@ -684,7 +684,7 @@ mod tests {
 
     #[test]
     fn paper_mode_does_not_check_parity_marker() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
         // Paper mode must not require a parity marker.
         env::set_var("TRADING_MODE", "paper");
@@ -697,7 +697,7 @@ mod tests {
 
     #[test]
     fn zero_parity_max_age_rejected() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
         env::set_var("PARITY_MAX_AGE_SECS", "0");
         let err = Config::from_env().expect_err("PARITY_MAX_AGE_SECS=0 must fail");
@@ -707,7 +707,7 @@ mod tests {
 
     #[test]
     fn empty_parity_marker_path_rejected() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
         env::set_var("PARITY_MARKER_PATH", "   ");
         let err = Config::from_env().expect_err("empty PARITY_MARKER_PATH must fail");
@@ -717,7 +717,7 @@ mod tests {
 
     #[test]
     fn non_numeric_threshold_rejected() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
         env::set_var("MAGNITUDE_THRESHOLD", "banana");
         let err = Config::from_env().expect_err("non-numeric MAGNITUDE_THRESHOLD must fail");
@@ -727,7 +727,7 @@ mod tests {
 
     #[test]
     fn non_positive_threshold_rejected() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
         env::set_var("MAGNITUDE_THRESHOLD", "-1");
         let err = Config::from_env().expect_err("non-positive MAGNITUDE_THRESHOLD must fail");
@@ -737,7 +737,7 @@ mod tests {
 
     #[test]
     fn negative_paper_fee_rejected() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
         env::set_var("PAPER_FEE", "-0.001");
         let err = Config::from_env().expect_err("negative PAPER_FEE must fail");
@@ -747,7 +747,7 @@ mod tests {
 
     #[test]
     fn zero_paper_fee_allowed() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
         env::set_var("PAPER_FEE", "0");
         let cfg = Config::from_env().expect("PAPER_FEE=0 must be allowed");
@@ -756,7 +756,7 @@ mod tests {
 
     #[test]
     fn zero_sma_rejected() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
         env::set_var("SMA_WINDOW", "0");
         let err = Config::from_env().expect_err("SMA_WINDOW=0 must fail");
@@ -766,7 +766,7 @@ mod tests {
 
     #[test]
     fn zero_port_rejected() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
         env::set_var("HTTP_PORT", "0");
         let err = Config::from_env().expect_err("HTTP_PORT=0 must fail");
@@ -776,7 +776,7 @@ mod tests {
 
     #[test]
     fn invalid_trading_mode_rejected() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
         env::set_var("TRADING_MODE", "sideways");
         let err = Config::from_env().expect_err("invalid TRADING_MODE must fail");
@@ -786,7 +786,7 @@ mod tests {
 
     #[test]
     fn empty_symbol_rejected() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
         env::set_var("SYMBOL", "   ");
         let err = Config::from_env().expect_err("empty SYMBOL must fail");
@@ -796,7 +796,7 @@ mod tests {
 
     #[test]
     fn invalid_enable_shorting_rejected() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
         env::set_var("ENABLE_SHORTING", "maybe");
         let err = Config::from_env().expect_err("invalid ENABLE_SHORTING must fail");
@@ -806,7 +806,7 @@ mod tests {
 
     #[test]
     fn shorting_default_is_disabled() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
         let cfg = Config::from_env().expect("defaults");
         assert!(!cfg.enable_shorting);
@@ -814,7 +814,7 @@ mod tests {
 
     #[test]
     fn shorting_enabled_via_env() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
         env::set_var("ENABLE_SHORTING", "true");
         let cfg = Config::from_env().expect("ENABLE_SHORTING=true should load");
@@ -823,7 +823,7 @@ mod tests {
 
     #[test]
     fn short_entry_threshold_must_be_negative() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
         env::set_var("SHORT_ENTRY_THRESHOLD", "0.001");
         let err = Config::from_env().expect_err("non-negative SHORT_ENTRY_THRESHOLD must fail");
@@ -836,7 +836,7 @@ mod tests {
 
     #[test]
     fn short_exit_must_exceed_short_entry() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
         env::set_var("SHORT_ENTRY_THRESHOLD", "-0.005");
         env::set_var("SHORT_EXIT_THRESHOLD", "-0.01");
@@ -851,7 +851,7 @@ mod tests {
 
     #[test]
     fn options_config_defaults_match_dtable() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
         let cfg = Config::from_env().expect("defaults");
         
@@ -898,7 +898,7 @@ mod tests {
 
     #[test]
     fn options_config_invalid_mode_rejected() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
         env::set_var("OPT_MODE", "aggressive");
         let err = Config::from_env().expect_err("invalid OPT_MODE must fail");
@@ -911,7 +911,7 @@ mod tests {
 
     #[test]
     fn options_config_dte_validation() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
         env::set_var("OPT_DTE_MIN", "50");
         env::set_var("OPT_DTE_MAX", "40");
@@ -925,7 +925,7 @@ mod tests {
 
     #[test]
     fn options_config_delta_drift_validation() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
         env::set_var("OPT_DELTA_DRIFT_MIN", "0.80");
         env::set_var("OPT_DELTA_DRIFT_MAX", "0.20");
