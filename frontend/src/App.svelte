@@ -3,9 +3,14 @@
   import Ledger from './views/Ledger.svelte';
   import StrategyLab from './views/StrategyLab.svelte';
   import AutoPilot from './views/AutoPilot.svelte';
+  import OptionsPositions from './views/OptionsPositions.svelte';
+  import OptionsTradeHistory from './views/OptionsTradeHistory.svelte';
+  import OptionsMonitor from './views/OptionsMonitor.svelte';
+  import OptionsSettings from './views/OptionsSettings.svelte';
+  import Events from './views/Events.svelte';
   import { status } from './lib/stores.js';
 
-  let currentView = 'dashboard';
+  let currentView = 'equities';
   let sidebarOpen = false;
 
   $: mode = $status?.mode || 'PAPER';
@@ -39,14 +44,14 @@
     </div>
     <ul>
       <li>
-        <button class="nav-btn" class:active={currentView === 'dashboard'} on:click={() => nav('dashboard')}>
+        <button class="nav-btn" class:active={currentView === 'equities'} on:click={() => nav('equities')}>
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
             <rect x="1.5" y="1.5" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.3"/>
             <rect x="9.5" y="1.5" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.3"/>
             <rect x="1.5" y="9.5" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.3"/>
             <rect x="9.5" y="9.5" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.3"/>
           </svg>
-          Dashboard
+          Equities
         </button>
       </li>
       <li>
@@ -66,6 +71,26 @@
           Ledger
         </button>
       </li>
+      <li class="section-label">OPTIONS</li>
+      <li>
+        <button class="nav-btn" class:active={currentView === 'opt-positions'} on:click={() => nav('opt-positions')}>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path d="M8 1.5l6.5 3.75v5.5L8 14.5l-6.5-3.75v-5.5L8 1.5z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/>
+            <path d="M8 8v6.5M8 8l6.5-3.75M8 8L1.5 4.25" stroke="currentColor" stroke-width="1.3"/>
+          </svg>
+          Positions
+        </button>
+      </li>
+      <li>
+        <button class="nav-btn" class:active={currentView === 'opt-trades'} on:click={() => nav('opt-trades')}>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path d="M2.5 10.5l3-3 2.5 2.5 5.5-5.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M10 4.5h3.5V8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M2.5 13.5h11" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+          </svg>
+          Trade History
+        </button>
+      </li>
       <li>
         <button class="nav-btn" class:active={currentView === 'autopilot'} on:click={() => nav('autopilot')}>
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
@@ -74,6 +99,32 @@
             <path d="M8 2v2M8 12v2M2 8h2M12 8h2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
           </svg>
           Auto-Pilot
+        </button>
+      </li>
+      <li>
+        <button class="nav-btn" class:active={currentView === 'opt-monitor'} on:click={() => nav('opt-monitor')}>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path d="M1.5 8h3l1.5-4 3 8 1.5-4h4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Monitor
+        </button>
+      </li>
+      <li>
+        <button class="nav-btn" class:active={currentView === 'opt-settings'} on:click={() => nav('opt-settings')}>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <circle cx="8" cy="8" r="2" stroke="currentColor" stroke-width="1.3"/>
+            <path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M12.6 3.4l-1.4 1.4M4.8 11.2l-1.4 1.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+          </svg>
+          Settings
+        </button>
+      </li>
+      <li class="section-label">SYSTEM</li>
+      <li>
+        <button class="nav-btn" class:active={currentView === 'events'} on:click={() => nav('events')}>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path d="M3 13V7M8 13V3M13 13V5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+          </svg>
+          Events
         </button>
       </li>
       <li>
@@ -100,14 +151,24 @@
   {/if}
 
   <main class="content">
-    {#if currentView === 'dashboard'}
+    {#if currentView === 'equities'}
       <Dashboard />
     {:else if currentView === 'strategy'}
       <StrategyLab />
     {:else if currentView === 'ledger'}
       <Ledger />
+    {:else if currentView === 'opt-positions'}
+      <OptionsPositions />
+    {:else if currentView === 'opt-trades'}
+      <OptionsTradeHistory />
     {:else if currentView === 'autopilot'}
       <AutoPilot />
+    {:else if currentView === 'opt-monitor'}
+      <OptionsMonitor />
+    {:else if currentView === 'opt-settings'}
+      <OptionsSettings />
+    {:else if currentView === 'events'}
+      <Events />
     {:else if currentView === 'advisor'}
       <div class="placeholder">
         <h1>AI Advisor</h1>
@@ -266,6 +327,16 @@
   .nav-btn svg {
     flex-shrink: 0;
     opacity: 0.8;
+  }
+
+  .section-label {
+    padding: 0.9rem 1.2rem 0.3rem;
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    list-style: none;
+    user-select: none;
   }
 
   .sidebar-footer {

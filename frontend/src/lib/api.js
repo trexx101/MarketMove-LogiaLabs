@@ -236,3 +236,112 @@ export async function saveStrategyConfig(params) {
   }
   return res.json();
 }
+
+// ── Options endpoints (Phase 7) ─────────────────────────────────────────────
+
+/**
+ * List option positions, optionally filtered by underlying and/or status.
+ * @param {object} [opts]
+ * @param {string} [opts.underlying] - e.g. "QQQ"
+ * @param {string} [opts.status] - e.g. "OPEN", "CLOSED"
+ * @param {number} [opts.limit=100]
+ * @returns {Promise<{positions: Array, count: number}>}
+ */
+export async function fetchOptionPositions({ underlying, status, limit = 100 } = {}) {
+  const params = new URLSearchParams();
+  if (underlying) params.set('underlying', underlying);
+  if (status) params.set('status', status);
+  params.set('limit', String(limit));
+  const res = await fetch(`${API_BASE}/options/positions?${params}`);
+  if (!res.ok) throw new Error(`options/positions: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * List closed option trades (trade history).
+ * @param {object} [opts]
+ * @param {string} [opts.underlying]
+ * @param {number} [opts.limit=100]
+ * @returns {Promise<{trades: Array, count: number}>}
+ */
+export async function fetchOptionTrades({ underlying, limit = 100 } = {}) {
+  const params = new URLSearchParams();
+  if (underlying) params.set('underlying', underlying);
+  params.set('limit', String(limit));
+  const res = await fetch(`${API_BASE}/options/trades?${params}`);
+  if (!res.ok) throw new Error(`options/trades: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Fetch the full options config registry with current values.
+ * @returns {Promise<{entries: Array, count: number}>}
+ */
+export async function fetchOptionsConfig() {
+  const res = await fetch(`${API_BASE}/options/config`);
+  if (!res.ok) throw new Error(`options/config GET: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Write one or more options config values.
+ * @param {Object<string, number>} values - key → value map
+ * @returns {Promise<{applied: number, rejected: string[]}>}
+ */
+export async function saveOptionsConfig(values) {
+  const res = await fetch(`${API_BASE}/options/config`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(values),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`options/config PUT rejected (${res.status}): ${text}`);
+  }
+  return res.json();
+}
+
+/**
+ * Fetch recent hyperopt runs.
+ * @param {number} [limit=20]
+ * @returns {Promise<{runs: Array, count: number}>}
+ */
+export async function fetchHyperoptRuns(limit = 20) {
+  const res = await fetch(`${API_BASE}/hyperopt/runs?limit=${limit}`);
+  if (!res.ok) throw new Error(`hyperopt/runs: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Fetch tape recorder status (heartbeat + quota accounting).
+ * @returns {Promise<{tapes: Array, count: number, healthy: number, stale: number, never_beat: number}>}
+ */
+export async function fetchTapeStatus() {
+  const res = await fetch(`${API_BASE}/options/tape/status`);
+  if (!res.ok) throw new Error(`options/tape/status: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Fetch engine events, searchable by category/mode/severity/equity.
+ * @param {object} [opts]
+ * @param {string} [opts.category] - trade | data | system | strategy | alert | advisor
+ * @param {string} [opts.mode] - paper | live
+ * @param {string} [opts.severity] - info | warn | error
+ * @param {string} [opts.equity] - e.g. "QQQ"
+ * @param {number} [opts.since] - ms epoch lower bound
+ * @param {number} [opts.limit=100]
+ * @returns {Promise<{events: Array, count: number}>}
+ */
+export async function fetchEvents({ category, mode, severity, equity, since, limit = 100 } = {}) {
+  const params = new URLSearchParams();
+  if (category) params.set('category', category);
+  if (mode) params.set('mode', mode);
+  if (severity) params.set('severity', severity);
+  if (equity) params.set('equity', equity);
+  if (since) params.set('since', String(since));
+  params.set('limit', String(limit));
+  const res = await fetch(`${API_BASE}/events?${params}`);
+  if (!res.ok) throw new Error(`events: ${res.status}`);
+  return res.json();
+}
