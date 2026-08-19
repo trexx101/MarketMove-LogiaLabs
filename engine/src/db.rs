@@ -180,6 +180,20 @@ CREATE TABLE IF NOT EXISTS strategy_versions (
     updated_at              INTEGER NOT NULL
 );
 
+-- D13: promotions are queued here and applied ONLY at the daily candle
+-- boundary for the equity, never mid-exit (checked again at apply time).
+CREATE TABLE IF NOT EXISTS pending_promotions (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    version_id         TEXT    NOT NULL,
+    equity             TEXT    NOT NULL,
+    target_status      TEXT    NOT NULL,
+    evidence_json      TEXT    NOT NULL DEFAULT '{}',  -- evidence validated at queue time
+    requested_at       INTEGER NOT NULL,
+    applied_at         INTEGER,          -- NULL until applied at boundary
+    applied_result     TEXT,             -- 'PROMOTED' | 'DENIED: <reason>'
+    UNIQUE(version_id, equity)           -- one pending request per candidate
+);
+
 CREATE TABLE IF NOT EXISTS option_positions (
     id                      TEXT    PRIMARY KEY,
     underlying              TEXT    NOT NULL,
@@ -527,6 +541,103 @@ pub async fn count_strategy_versions(pool: &DbPool, equity: &str) -> Result<i64>
     .await
     .context("count_strategy_versions")?;
     Ok(row.get::<i64, _>("n"))
+}
+
+/// A pending promotion request (D13 queue).
+#[derive(Debug, Clone)]
+pub struct PendingPromotion {
+    pub version_id: String,
+    pub equity: String,
+    pub target_status: String,
+    /// JSON-serialized PromotionEvidence validated at queue time.
+    pub evidence_json: String,
+    pub requested_at: i64,
+    pub applied_at: Option<i64>,
+    pub applied_result: Option<String>,
+}
+
+/// Queue a promotion request (D13). Replaces any existing pending request
+/// for the same candidate (UPSERT on (version_id, equity)).
+pub async fn queue_pending_promotion(
+    pool: &DbPool,
+    version_id: &str,
+    equity: &str,
+    target_status: &str,
+    evidence_json: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO pending_promotions (version_id, equity, target_status, evidence_json, requested_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(version_id, equity)
+         DO UPDATE SET target_status = ?3, evidence_json = ?4, requested_at = ?5,
+                       applied_at = NULL, applied_result = NULL",
+    )
+    .bind(version_id)
+    .bind(equity)
+    .bind(target_status)
+    .bind(evidence_json)
+    .bind(chrono::Utc::now().timestamp_millis())
+    .execute(pool)
+    .await
+    .context("queue_pending_promotion")?;
+    Ok(())
+}
+
+/// Fetch the pending (unapplied) promotion request for a candidate, if any.
+pub async fn fetch_pending_promotion(
+    pool: &DbPool,
+    version_id: &str,
+) -> Result<Option<PendingPromotion>> {
+    let row = sqlx::query(
+        "SELECT * FROM pending_promotions WHERE version_id = ?1 AND applied_at IS NULL",
+    )
+    .bind(version_id)
+    .fetch_optional(pool)
+    .await
+    .context("fetch_pending_promotion")?;
+    Ok(row.map(pending_promotion_from_row))
+}
+
+/// List all pending (unapplied) promotion requests.
+pub async fn list_pending_promotions(pool: &DbPool) -> Result<Vec<PendingPromotion>> {
+    let rows = sqlx::query(
+        "SELECT * FROM pending_promotions WHERE applied_at IS NULL ORDER BY requested_at ASC",
+    )
+    .fetch_all(pool)
+    .await
+    .context("list_pending_promotions")?;
+    Ok(rows.into_iter().map(pending_promotion_from_row).collect())
+}
+
+fn pending_promotion_from_row(row: sqlx::sqlite::SqliteRow) -> PendingPromotion {
+    PendingPromotion {
+        version_id: row.get("version_id"),
+        equity: row.get("equity"),
+        target_status: row.get("target_status"),
+        evidence_json: row.get("evidence_json"),
+        requested_at: row.get("requested_at"),
+        applied_at: row.get("applied_at"),
+        applied_result: row.get("applied_result"),
+    }
+}
+
+/// Mark a pending promotion request as applied with its outcome.
+pub async fn mark_pending_promotion_applied(
+    pool: &DbPool,
+    version_id: &str,
+    result: &str,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE pending_promotions SET applied_at = ?2, applied_result = ?3
+         WHERE version_id = ?1 AND applied_at IS NULL",
+    )
+    .bind(version_id)
+    .bind(chrono::Utc::now().timestamp_millis())
+    .bind(result)
+    .execute(pool)
+    .await
+    .context("mark_pending_promotion_applied")?;
+    Ok(())
 }
 
 /// Count strategy versions grouped by status for a given equity.

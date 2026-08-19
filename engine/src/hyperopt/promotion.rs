@@ -49,7 +49,7 @@ pub struct PromotionResult {
 }
 
 /// Promotion evidence
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromotionEvidence {
     pub n_trades: usize,
     pub ic: f64,
@@ -175,6 +175,27 @@ impl PromotionPipeline {
         }
     }
 
+    /// Map a candidate's persisted status to its promotion stage.
+    pub fn stage_for_status(&self, status: &CandidateStatus) -> PromotionStage {
+        match status {
+            CandidateStatus::New | CandidateStatus::Stable => PromotionStage::Candidate,
+            CandidateStatus::Paper => PromotionStage::Paper,
+            CandidateStatus::Micro => PromotionStage::Micro,
+            CandidateStatus::Live => PromotionStage::Live,
+            CandidateStatus::Unstable | CandidateStatus::Retired => PromotionStage::Rejected,
+        }
+    }
+
+    /// Dry-run gate check for a snapshot without any DB writes (D13).
+    /// Used by the promote endpoint to fail fast before queueing.
+    pub fn check_snapshot(
+        &self,
+        snapshot: &CandidateSnapshot,
+        evidence: &PromotionEvidence,
+    ) -> PromotionResult {
+        self.check_promotion(self.stage_for_status(&snapshot.status), evidence)
+    }
+
     /// Promote a candidate (DB-backed)
     ///
     /// Reads evidence from the candidate snapshot, checks gates, and updates status if promotion passes.
@@ -197,13 +218,7 @@ impl PromotionPipeline {
             }
         };
 
-        let current_stage = match snapshot.status {
-            CandidateStatus::New | CandidateStatus::Stable => PromotionStage::Candidate,
-            CandidateStatus::Paper => PromotionStage::Paper,
-            CandidateStatus::Micro => PromotionStage::Micro,
-            CandidateStatus::Live => PromotionStage::Live,
-            CandidateStatus::Unstable | CandidateStatus::Retired => PromotionStage::Rejected,
-        };
+        let current_stage = self.stage_for_status(&snapshot.status);
 
         let result = self.check_promotion(current_stage, evidence);
 
@@ -221,9 +236,241 @@ impl PromotionPipeline {
     }
 }
 
+/// D13 boundary applier: run at the daily candle close for an equity.
+///
+/// Applies queued promotion requests for that equity. Before flipping any
+/// status it RE-CHECKS the mid-exit gate (open positions may have been
+/// opened after queueing); positions present → request stays queued.
+///
+/// Returns (applied_count, skipped_count).
+pub async fn apply_pending_promotions(
+    pool: &crate::db::DbPool,
+    equity: &str,
+    pipeline: &PromotionPipeline,
+    store: &CandidateStore,
+) -> Result<(usize, usize)> {
+    let mut applied = 0usize;
+    let mut skipped = 0usize;
+
+    for pending in crate::db::list_pending_promotions(pool).await? {
+        if pending.equity != equity {
+            continue;
+        }
+
+        // Mid-exit re-check: never promote while a position is open.
+        let open = crate::db::list_option_positions(pool, Some(equity), Some("OPEN"), 1).await?;
+        if !open.is_empty() {
+            skipped += 1; // stays queued; retried at the next boundary
+            continue;
+        }
+
+        // Use the evidence validated at queue time (persisted with the request).
+        // Never fabricate evidence here — sharpe/days_observed have no live source yet.
+        let evidence: PromotionEvidence = match serde_json::from_str(&pending.evidence_json) {
+            Ok(e) => e,
+            Err(e) => {
+                crate::db::mark_pending_promotion_applied(
+                    pool,
+                    &pending.version_id,
+                    &format!("DENIED: corrupt evidence_json ({e})"),
+                )
+                .await?;
+                continue;
+            }
+        };
+
+        let result = pipeline.promote(store, &pending.version_id, &evidence).await?;
+        let outcome = if result.promoted {
+            applied += 1;
+            format!("PROMOTED to {:?}", result.to_stage)
+        } else {
+            format!("DENIED: {}", result.reason)
+        };
+        crate::db::mark_pending_promotion_applied(pool, &pending.version_id, &outcome).await?;
+    }
+
+    Ok((applied, skipped))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use crate::db::DbPool;
+
+    /// Test pool with the three tables the D13 flow touches.
+    async fn d13_pool() -> DbPool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS strategy_versions (
+                id                      TEXT    PRIMARY KEY,
+                equity                  TEXT    NOT NULL DEFAULT 'QQQ',
+                family                  TEXT    NOT NULL,
+                params_json             TEXT    NOT NULL,
+                status                  TEXT    NOT NULL DEFAULT 'NEW',
+                promotion_metadata_json TEXT    NOT NULL DEFAULT '{}',
+                created_at              INTEGER NOT NULL,
+                updated_at              INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS option_positions (
+                id                      TEXT    PRIMARY KEY,
+                underlying              TEXT    NOT NULL,
+                contract_code           TEXT    NOT NULL,
+                strategy_version_id     TEXT    NOT NULL,
+                entry_underlying_price  REAL    NOT NULL,
+                entry_premium           REAL    NOT NULL DEFAULT 0.0,
+                entry_spread            REAL    NOT NULL,
+                entry_slippage_budget   REAL    NOT NULL,
+                qty                     INTEGER NOT NULL,
+                qty_filled_residual     INTEGER NOT NULL DEFAULT 0,
+                status                  TEXT    NOT NULL DEFAULT 'OPEN',
+                dte_at_entry            INTEGER NOT NULL,
+                delta_at_entry          REAL    NOT NULL,
+                realized_pnl            REAL,
+                closed_at               INTEGER,
+                created_at              INTEGER NOT NULL,
+                updated_at              INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS pending_promotions (
+                id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+                version_id         TEXT    NOT NULL,
+                equity             TEXT    NOT NULL,
+                target_status      TEXT    NOT NULL,
+                evidence_json      TEXT    NOT NULL DEFAULT '{}',
+                requested_at       INTEGER NOT NULL,
+                applied_at         INTEGER,
+                applied_result     TEXT,
+                UNIQUE(version_id, equity)
+            );
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool
+    }
+
+    async fn insert_open_position(pool: &DbPool, underlying: &str) {
+        let now = chrono::Utc::now().timestamp_millis();
+        sqlx::query(
+            "INSERT INTO option_positions
+             (id, underlying, contract_code, strategy_version_id, entry_underlying_price,
+              entry_premium, entry_spread, entry_slippage_budget, qty, status,
+              dte_at_entry, delta_at_entry, created_at, updated_at)
+             VALUES (?1, ?2, 'TEST_CONTRACT', 'v-test', 450.0, 3.5, 0.05, 0.10, 1, 'OPEN',
+                     40, 0.45, ?3, ?3)",
+        )
+        .bind(format!("pos-{underlying}"))
+        .bind(underlying)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Evidence that passes the Candidate→Paper gate, serialized as stored.
+    fn passing_evidence_json() -> String {
+        serde_json::to_string(&PromotionEvidence {
+            n_trades: 150,
+            ic: 0.05,
+            sharpe: 1.5,
+            days_observed: 0,
+        })
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_apply_pending_promotions_promotes_at_boundary() {
+        let pool = d13_pool().await;
+        let store = CandidateStore::new(pool.clone());
+        let pipeline = PromotionPipeline::new();
+
+        // Candidate with passing evidence (n_trades >= 100, ic >= 0.03)
+        let version_id = store
+            .store("QQQ", "momentum", HashMap::new(), 0.05, 0.01, 150, vec![0.04, 0.05, 0.06])
+            .await
+            .unwrap();
+        crate::db::queue_pending_promotion(&pool, &version_id, "QQQ", "PAPER", &passing_evidence_json())
+            .await
+            .unwrap();
+
+        // No open positions → promotion applies at the boundary
+        let (applied, skipped) =
+            apply_pending_promotions(&pool, "QQQ", &pipeline, &store).await.unwrap();
+        assert_eq!(applied, 1);
+        assert_eq!(skipped, 0);
+
+        let snapshot = store.get(&version_id).await.unwrap().unwrap();
+        assert_eq!(snapshot.status, CandidateStatus::Paper);
+
+        // Request marked applied, no longer pending
+        assert!(crate::db::fetch_pending_promotion(&pool, &version_id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_apply_pending_promotions_blocked_by_open_position() {
+        let pool = d13_pool().await;
+        let store = CandidateStore::new(pool.clone());
+        let pipeline = PromotionPipeline::new();
+
+        let version_id = store
+            .store("QQQ", "momentum", HashMap::new(), 0.05, 0.01, 150, vec![0.04, 0.05, 0.06])
+            .await
+            .unwrap();
+        crate::db::queue_pending_promotion(&pool, &version_id, "QQQ", "PAPER", &passing_evidence_json())
+            .await
+            .unwrap();
+
+        // Open position → D13 mid-exit block: stays queued, status untouched
+        insert_open_position(&pool, "QQQ").await;
+        let (applied, skipped) =
+            apply_pending_promotions(&pool, "QQQ", &pipeline, &store).await.unwrap();
+        assert_eq!(applied, 0);
+        assert_eq!(skipped, 1);
+
+        let snapshot = store.get(&version_id).await.unwrap().unwrap();
+        assert_eq!(snapshot.status, CandidateStatus::New);
+        assert!(crate::db::fetch_pending_promotion(&pool, &version_id).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_queue_pending_promotion_upsert_replaces_previous() {
+        let pool = d13_pool().await;
+        crate::db::queue_pending_promotion(&pool, "v-1", "QQQ", "PAPER", "{}").await.unwrap();
+        crate::db::queue_pending_promotion(&pool, "v-1", "QQQ", "MICRO", "{}").await.unwrap();
+
+        let pending = crate::db::list_pending_promotions(&pool).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].target_status, "MICRO");
+    }
+
+    #[tokio::test]
+    async fn test_apply_pending_promotions_ignores_other_equities() {
+        let pool = d13_pool().await;
+        let store = CandidateStore::new(pool.clone());
+        let pipeline = PromotionPipeline::new();
+
+        let version_id = store
+            .store("SMH", "momentum", HashMap::new(), 0.05, 0.01, 150, vec![0.04, 0.05, 0.06])
+            .await
+            .unwrap();
+        crate::db::queue_pending_promotion(&pool, &version_id, "SMH", "PAPER", "{}")
+            .await
+            .unwrap();
+
+        // Boundary for QQQ must not touch SMH's queue
+        let (applied, skipped) =
+            apply_pending_promotions(&pool, "QQQ", &pipeline, &store).await.unwrap();
+        assert_eq!(applied, 0);
+        assert_eq!(skipped, 0);
+        let snapshot = store.get(&version_id).await.unwrap().unwrap();
+        assert_eq!(snapshot.status, CandidateStatus::New);
+    }
 
     #[test]
     fn test_promote_candidate_to_paper_pass() {

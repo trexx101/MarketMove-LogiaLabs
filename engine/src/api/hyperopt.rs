@@ -112,6 +112,10 @@ pub async fn get_candidate(
 }
 
 /// POST /api/hyperopt/:equity/promote/:id
+///
+/// D13: promotion never happens mid-exit. This endpoint only VALIDATES the
+/// gate and QUEUES the request; the actual status flip happens at the next
+/// daily candle boundary for the equity (see apply_pending_promotions).
 pub async fn promote_candidate(
     State(state): State<AppState>,
     Path((equity, id)): Path<(String, String)>,
@@ -132,31 +136,60 @@ pub async fn promote_candidate(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    // Build evidence from snapshot metadata
+    // Validate target status is a real stage
+    if !matches!(req.target_status.as_str(), "PAPER" | "MICRO" | "LIVE") {
+        return Ok(Json(PromoteResponse {
+            success: false,
+            message: "target_status must be one of PAPER, MICRO, LIVE".into(),
+        }));
+    }
+
+    // Gate 1 (request time): no open positions on this equity — never promote mid-exit
+    let open_positions = db::list_option_positions(pool, Some(&equity), Some("OPEN"), 1)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if !open_positions.is_empty() {
+        return Ok(Json(PromoteResponse {
+            success: false,
+            message: format!(
+                "Promotion blocked: {} has open positions (mid-exit promotion is forbidden). \
+                 Close or exit the position first.",
+                equity
+            ),
+        }));
+    }
+
+    // Gate 2 (request time): dry-run the stage gates so obviously-unready
+    // candidates fail fast with a useful message instead of queueing forever.
     let evidence = crate::hyperopt::promotion::PromotionEvidence {
         n_trades: candidate.n_trades,
         ic: candidate.mean_ic,
-        sharpe: 0.0, // Would come from backtest results
+        sharpe: 0.0,     // Would come from backtest results
         days_observed: 0, // Would come from timestamps
     };
-
-    // Attempt promotion
-    match pipeline.promote(&store, &id, &evidence).await {
-        Ok(result) => {
-            if result.promoted {
-                Ok(Json(PromoteResponse {
-                    success: true,
-                    message: format!("Promoted to {:?}", result.to_stage),
-                }))
-            } else {
-                Ok(Json(PromoteResponse {
-                    success: false,
-                    message: result.reason,
-                }))
-            }
-        }
-        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    let dry_run = pipeline.check_snapshot(&candidate, &evidence);
+    if !dry_run.promoted {
+        return Ok(Json(PromoteResponse {
+            success: false,
+            message: format!("Promotion gates not met: {}", dry_run.reason),
+        }));
     }
+
+    // Gates passed — queue for application at the next daily candle boundary.
+    // Persist the evidence that was validated NOW so the boundary applier
+    // applies exactly this evidence (never fabricates sharpe/days later).
+    let evidence_json = serde_json::to_string(&evidence).unwrap_or_else(|_| "{}".into());
+    db::queue_pending_promotion(pool, &id, &equity, &req.target_status, &evidence_json)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(PromoteResponse {
+        success: true,
+        message: format!(
+            "Queued for promotion to {} at the next daily candle boundary for {}",
+            req.target_status, equity
+        ),
+    }))
 }
 
 /// GET /api/hyperopt/:equity/status

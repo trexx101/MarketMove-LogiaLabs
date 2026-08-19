@@ -193,6 +193,22 @@ impl OptionsScheduler {
 
         info!(equity, candle_ts = latest_ts, "processing new candle");
 
+        // D13: apply queued promotions at the daily candle boundary,
+        // before the entry pipeline runs (mid-exit re-check inside).
+        let pipeline = crate::hyperopt::PromotionPipeline::new();
+        let cand_store = crate::hyperopt::CandidateStore::new(self.pool.clone());
+        match crate::hyperopt::promotion::apply_pending_promotions(
+            &self.pool, equity, &pipeline, &cand_store,
+        )
+        .await
+        {
+            Ok((applied, skipped)) if applied > 0 || skipped > 0 => {
+                info!(equity, applied, skipped, "applied pending promotions at candle boundary");
+            }
+            Err(e) => error!(equity, error = %e, "failed to apply pending promotions"),
+            _ => {}
+        }
+
         // Run entry pipeline
         *self.state.write().await = OptionsSchedulerState::EntryPipeline;
 
