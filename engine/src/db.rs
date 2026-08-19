@@ -232,6 +232,17 @@ CREATE TABLE IF NOT EXISTS exit_intent_log (
 );
 CREATE INDEX IF NOT EXISTS exit_intent_log_position_idx
     ON exit_intent_log (position_id, timestamp);
+
+CREATE TABLE IF NOT EXISTS option_fills (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_id   INTEGER NOT NULL,
+    stage         TEXT    NOT NULL,
+    price         REAL    NOT NULL,
+    quantity      REAL    NOT NULL,
+    timestamp     INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS option_fills_position_idx
+    ON option_fills (position_id, timestamp);
 "#;
 
 /// A single OHLCV + VWAP candle as stored in the database.

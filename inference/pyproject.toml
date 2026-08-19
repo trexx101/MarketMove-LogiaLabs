@@ -8,6 +8,7 @@ dependencies = [
     "torch>=2.0",
     "pyzmq>=25",
     "numpy>=1.24",
+    "moomoo-api>=10.10.7008",
 ]
 
 [project.optional-dependencies]

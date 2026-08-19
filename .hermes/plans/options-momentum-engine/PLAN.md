@@ -143,6 +143,12 @@ Phase ordering is dependency-driven. Phases 1–2 can run in parallel once Phase
 - Runtime: full 5y × parameter grid backtest < 30 min on VPS (vectorized).
 
 **Risks:** model fiction vs reality gap. That is *expected* and is exactly what the tape validation gate exists to catch — do not over-invest in pricing fidelity now.
+**Critic:**
+**1. The BSM Synthetic Pricing Fiction (Phase 2)** You correctly noted that the Black-Scholes-Merton (BSM) model is a fiction, but using a flat `realized vol × 1.1` for the IV assumption may cause your synthetic backtests to systematically fail the ±25% divergence gate (D12).
+
+- **The Risk:** BSM cannot model the "Volatility Smile" or IV crush around earnings. Because your models specifically target QQQ, SMH, and XLF, these underlying ETFs experience heavy skew (puts are systematically more expensive than calls due to downside protection demand).
+    
+- **The Fix:** In Phase 2, enrich your synthetic pricing model by introducing a static IV skew multiplier for puts vs. calls, or the ±25% divergence gate will permanently quarantine perfectly good strategies.
 
 ---
 
@@ -166,7 +172,13 @@ Phase ordering is dependency-driven. Phases 1–2 can run in parallel once Phase
 - Circuit breaker fires in a simulated thin-book scenario; entry halt + alert verified.
 
 **Risks:** OpenD order-modify latency on fast moves. Mitigation: stage timers are config; degrade path (deep-limit) is already designed in.
+**Critic:**
+Partial Fills in Stage 3 Exits (Phase 3)
+The staged exit ladder (D7) is an excellent execution degrade path, moving from BID + k×tick down to a deep limit of BID - max_slippage.
 
+The Risk: The plan states that an exit is only "complete" when flat or a breaker fires. If Stage 3 executes its deep limit order but the market flashes downward faster than the Moomoo matching engine can process it, you will receive a partial fill.
+
+The Fix: The ExitArbiter needs an explicit loop back to Stage 1 for the remaining residual quantity if Stage 3 expires without a 100% fill, recalculating a fresh BID from the tape rather than throwing a circuit breaker immediately.
 ---
 
 ### Phase 4 — Strategy Layer, Chain Selection & Sizing
@@ -217,6 +229,7 @@ Phase ordering is dependency-driven. Phases 1–2 can run in parallel once Phase
 4. Positions view: open options positions, entry basis, current delta vs entry, DTE countdown, exit-stage indicator (which stage is active, residual qty), circuit-breaker flags.
 5. Emergency controls: force-close per position (D16, deep-limit), force-close-all, manual breaker clear. Confirmation dialogs.
 6. Events feed: `SKIPPED_ENTRY` reasons, gate denials (macro blackout), promotion events, reconciliation events.
+Phase 6 (SvelteKit UI): Since you are building a complex trading dashboard, relying on standard REST polling will introduce lag. Ensure you prioritize the WebSocket or Server-Sent Events (SSE) implementation via the Rust Axum environment to push state transitions (like CIRCUIT_BREAKER triggers) directly to the frontend.
 
 **Acceptance criteria**
 - Every engine state (breaker, quarantine, stage, cooldown) is visible in UI without reading logs.

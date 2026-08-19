@@ -59,4 +59,5 @@ logs/
 /tests/fixtures/*.parquet
 /tests/fixtures/*.h5
 .omo/run-continuation/*
-moomoo_OpenD_10.9.6918_Ubuntu18.04/
+moomoo_OpenD_10.9.6918_Ubuntu18.04/*
+moomoo_OpenD_10.10.7008_Ubuntu18.04/*

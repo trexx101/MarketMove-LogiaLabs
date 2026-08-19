@@ -7,8 +7,12 @@
 //!
 //! Critic fix: partial fill on Stage 3 → loop back to Stage 1 with fresh BID
 
+pub mod state;
+
 #[cfg(test)]
 mod tests;
+
+pub use state::{ExitStage, StagedExitLadder};
 
 /// Staged exit ladder configuration
 pub struct StagedLadder {
