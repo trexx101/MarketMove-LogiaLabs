@@ -18,6 +18,10 @@ pub struct PaperExecutor {
     primary_symbol: String,
     /// Symbol traded for short positions via the inverse ETF (e.g. "PSQ").
     short_symbol: String,
+    /// Model id (registry UUID, or "bootstrap-default") for §8 telemetry attribution.
+    model_id: String,
+    /// Canonical "PRIMARY/INVERSE" label, e.g. "QQQ/PSQ".
+    pair: String,
     current_position: Position,
     entry_price: f64,
     qty: f64,
@@ -49,11 +53,50 @@ impl PaperExecutor {
             fee_rate,
             primary_symbol: primary_symbol.to_string(),
             short_symbol: short_symbol.to_string(),
+            // §8 back-compat: existing callers (legacy single-model tests,
+            // bootstrap path) don't supply model_id/pair. Stamp a default
+            // synthetic id and derive pair from the symbols.
+            model_id: "legacy".to_string(),
+            pair: format!("{}/{}", primary_symbol.to_uppercase(), short_symbol.to_uppercase()),
             current_position: Position::Flat,
             entry_price: 0.0,
             qty: 1.0,
             tx,
         }
+    }
+
+    /// Construct a paper executor bound to a specific model from the
+    /// registry (§8). Used by the per-model bootstrap loop in `main()`.
+    pub fn new_for_model(
+        pool: DbPool,
+        fee_rate: f64,
+        model_id: &str,
+        primary_symbol: &str,
+        inverse_symbol: &str,
+        tx: Option<TelemetrySender>,
+    ) -> Self {
+        Self {
+            pool,
+            fee_rate,
+            primary_symbol: primary_symbol.to_string(),
+            short_symbol: inverse_symbol.to_string(),
+            model_id: model_id.to_string(),
+            pair: format!("{}/{}", primary_symbol.to_uppercase(), inverse_symbol.to_uppercase()),
+            current_position: Position::Flat,
+            entry_price: 0.0,
+            qty: 1.0,
+            tx,
+        }
+    }
+
+    /// Read-only accessor used by tests + the WS publisher.
+    pub fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    /// Read-only accessor used by tests + the WS publisher.
+    pub fn pair(&self) -> &str {
+        &self.pair
     }
 
     /// Resolve the instrument symbol for a given position.
@@ -169,6 +212,8 @@ impl PaperExecutor {
     fn publish_fill(&self, side_str: &str, symbol: &str, fill: &FillResult) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(TelemetryEvent::TradeFill {
+                model_id: self.model_id.clone(),
+                pair: self.pair.clone(),
                 side: side_str.to_string(),
                 symbol: symbol.to_string(),
                 qty: fill.qty,

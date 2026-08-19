@@ -42,3 +42,5 @@ arrow = { version = "53", default-features = false }
 parquet = { version = "53", default-features = false, features = ["snap", "arrow"] }
 # Options backtester (P2)
 statrs = "0.17"
+strum = { version = "0.26", features = ["derive"] }
+flate2 = { version = "1", features = ["zlib"] }

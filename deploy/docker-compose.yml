@@ -110,10 +110,18 @@ services:
       PARITY_MAX_AGE_SECS: ${PARITY_MAX_AGE_SECS:-604800}
       RUST_LOG: ${RUST_LOG:-info}
       FRED_API_KEY: 40c2d3ff0753ace706d75a9e8355ab63
+      FINNHUB_API_KEY: ${FINNHUB_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      ADVISOR_API_BASE: https://openrouter.ai/api/v1/chat/completions
+      ADVISOR_MODEL: google/gemini-2.5-flash-lite
+      ADVISOR_FALLBACK_MODEL: google/gemini-2.5-flash-lite
+      EVENTS_RETENTION_DAYS: ${EVENTS_RETENTION_DAYS:-60}
       FUTU_OPEND_HOST: ${FUTU_OPEND_HOST:-127.0.0.1}
       FUTU_OPEND_PORT: ${FUTU_OPEND_PORT:-11111}
     networks:
       - mmn
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       inference:
         condition: service_healthy

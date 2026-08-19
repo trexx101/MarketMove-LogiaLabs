@@ -118,10 +118,6 @@ export async function fetchEquityTrades(symbol = 'QQQ', limit = 500) {
   return res.json();
 }
 
-/**
- * Fetch current market state.
- * @returns {Promise<object>} MarketStateResponse
- */
 export async function fetchMarketState() {
   const res = await fetch(`${API_BASE}/market_state`);
   if (!res.ok) throw new Error(`market_state: ${res.status}`);
@@ -211,10 +207,13 @@ export async function fetchQuote() {
 
 /**
  * Fetch current strategy configuration (Phase 3).
+ * @param {string|null} [modelId] - §8.6: if supplied, fetch per-model config.
  * @returns {Promise<object>} StrategyConfigResponse
  */
-export async function fetchStrategyConfig() {
-  const res = await fetch(`${API_BASE}/strategy-config`);
+export async function fetchStrategyConfig(modelId = null) {
+  let url = `${API_BASE}/strategy-config`;
+  if (modelId) url += `?model_id=${encodeURIComponent(modelId)}`;
+  const res = await fetch(url);
   if (!res.ok) throw new Error(`strategy-config: ${res.status}`);
   return res.json();
 }
@@ -222,10 +221,13 @@ export async function fetchStrategyConfig() {
 /**
  * Update strategy configuration at runtime (Phase 3).
  * @param {object} params - partial {entry_threshold?, exit_threshold?, sma_window?, pred_5d_filter?, enable_shorting?, short_entry_threshold?, short_exit_threshold?}
+ * @param {string|null} [modelId] - §8.6: if supplied, update per-model config.
  * @returns {Promise<object>} Updated strategy config
  */
-export async function saveStrategyConfig(params) {
-  const res = await fetch(`${API_BASE}/strategy-config`, {
+export async function saveStrategyConfig(params, modelId = null) {
+  let url = `${API_BASE}/strategy-config`;
+  if (modelId) url += `?model_id=${encodeURIComponent(modelId)}`;
+  const res = await fetch(url, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
@@ -257,6 +259,21 @@ export async function fetchOptionPositions({ underlying, status, limit = 100 } =
   return res.json();
 }
 
+// ---------------------------------------------------------------------------
+// §8 Models API
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetch all registered trading models.
+ * @returns {Promise<object[]>} Array of TradingModel
+ */
+export async function fetchModels() {
+  const res = await fetch(`${API_BASE}/models`);
+  if (!res.ok) throw new Error(`models: ${res.status}`);
+  return res.json();
+}
+
+/**
 /**
  * List closed option trades (trade history).
  * @param {object} [opts]
@@ -273,6 +290,22 @@ export async function fetchOptionTrades({ underlying, limit = 100 } = {}) {
   return res.json();
 }
 
+/**
+ * Register a new trading model.
+ * @param {object} body - { model_id, primary_symbol, inverse_symbol, model_path, norm_stats_path, budget_usd, notes? }
+ * @returns {Promise<object>} Created TradingModel
+ */
+export async function registerModel(body) {
+  const res = await fetch(`${API_BASE}/models`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`models POST: ${res.status}`);
+  return res.json();
+}
+
+/**
 /**
  * Fetch the full options config registry with current values.
  * @returns {Promise<{entries: Array, count: number}>}
@@ -343,5 +376,21 @@ export async function fetchEvents({ category, mode, severity, equity, since, lim
   params.set('limit', String(limit));
   const res = await fetch(`${API_BASE}/events?${params}`);
   if (!res.ok) throw new Error(`events: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Toggle the enabled flag for a model.
+ * @param {string} modelId
+ * @param {boolean} enabled
+ * @returns {Promise<object>} Updated TradingModel
+ */
+export async function setModelEnabled(modelId, enabled) {
+  const res = await fetch(`${API_BASE}/models/${encodeURIComponent(modelId)}/enabled`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) throw new Error(`models/${modelId}/enabled: ${res.status}`);
   return res.json();
 }

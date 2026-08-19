@@ -1,9 +1,12 @@
+mod advisor;
 mod api;
 mod bridge;
 mod config;
 mod data;
 mod db;
+mod event;
 mod exec;
+mod archive;
 mod features;
 mod hyperopt;
 mod normalize;
@@ -24,6 +27,8 @@ use std::process;
 
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
+
+use crate::db::TradingModel;
 
 #[tokio::main]
 async fn main() {
@@ -63,16 +68,6 @@ async fn main() {
         }
     };
 
-    // Load normalization statistics — fail fast if the file is missing.
-    // Wave C: loads the QQQ median/MAD norm stats (name-keyed JSON format).
-    let norm_stats = match features::equities_v2::EquityNormStats::load_named(&cfg.norm_stats_path) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("norm_stats error: {:#}", e);
-            process::exit(1);
-        }
-    };
-
     // Telemetry broadcast channel — published to by the scheduler and paper
     // executor, consumed by WebSocket clients at /api/v1/ws.
     let (tx, _rx) = tokio::sync::broadcast::channel(64);
@@ -106,28 +101,29 @@ async fn main() {
         info!("TOTP_SECRET loaded from env");
     }
 
-    // Construct executor based on trading mode.
-    // NOTE: Kraken is retired (Wave 5). The engine runs paper mode only by default.
-    // Live mode is now wired to Moomoo OpenD (Phase 3.3) for QQQ daily equities.
-    // Selected via LIVE_EXECUTOR=moomoo (default: paper fallback for safety).
-    //
-    // Phase 3.4: the executor is wrapped in `Arc<RwLock<...>>` so the runtime
-    // mode-toggle endpoint can swap Paper <-> Moomoo while the scheduler is
-    // running. The scheduler reads the current value at each cycle.
-    let executor = std::sync::Arc::new(tokio::sync::RwLock::new(
-        build_executor_for_mode(
-            cfg.trading_mode,
-            &cfg,
-            pool.clone(),
-            tx.clone(),
-        )
-        .await,
+    // Phase 3.4 — runtime mode toggle. Each scheduler holds its own
+    // `Arc<RwLock<ExecutorKind>>` (built per model in the loop below) and
+    // shares this `Arc<RwLock<TradingMode>>`. The `/api/mode` endpoint flips
+    // the mode value; each scheduler re-reads it at the start of its next
+    // cycle. (Live Moomoo swap is still single-model and gated behind
+    // explicit configuration; per-model live swap is a future story.)
+    let trading_mode = std::sync::Arc::new(tokio::sync::RwLock::new(cfg.trading_mode));
+
+    // Event logger — wraps DB + telemetry sender + mode ref for unified
+    // event persistence and broadcast.
+    let event_logger = std::sync::Arc::new(crate::event::EventLogger::new(
+        pool.clone(),
+        Some(tx.clone()),
+        trading_mode.clone(),
     ));
 
-    // Shared trading mode (Phase 3.4). The runtime mode toggle flips this
-    // value; the scheduler reads it at each cycle to decide which executor
-    // entry to use. Initial value mirrors Config::trading_mode.
-    let trading_mode = std::sync::Arc::new(tokio::sync::RwLock::new(cfg.trading_mode));
+    // Emit engine-started event.
+    event_logger
+        .emit(crate::event::EngineEvent::engine_started(
+            cfg.trading_mode,
+            &cfg.symbol,
+        ))
+        .await;
 
     // Run the equities REST backfill synchronously BEFORE spawning the
     // ingestion supervisor. This seeds QQQ + constituents + macro history so
@@ -136,6 +132,13 @@ async fn main() {
     if let Err(e) = data::backfill_equities(&pool, 3 * 24 * 3600).await {
         eprintln!("equities backfill fatal error: {:#}", e);
         process::exit(1);
+    }
+
+    // Seed sentiment cache (Phase 4 — Finnhub). Runs at startup so the
+    // advisor has sentiment data available from day one. Falls back to
+    // stub if FINNHUB_API_KEY is missing.
+    if let Err(e) = data::sentiment::seed_sentiment_cache(&pool, data::EQUITY_SYMBOLS).await {
+        eprintln!("sentiment seed warning: {:#}", e);
     }
 
     // Warn if the primary symbol's latest candle is significantly behind.
@@ -154,53 +157,184 @@ async fn main() {
         }
     }
 
-    // Spawn the daily equities scheduler (inference pipeline) as a background task.
-    // Wave C: replaces the crypto hourly scheduler with a daily QQQ pipeline.
-    let scheduler_pool = pool.clone();
-    let zmq_endpoint = cfg.zmq_endpoint.clone();
-    let feature_window_size = cfg.feature_window_size;
-    let symbol = cfg.symbol.clone();
-    let strategy_params = std::sync::Arc::new(tokio::sync::RwLock::new(
-        strategy::EquityStrategyParams {
-            entry_threshold: cfg.entry_threshold,
-            exit_threshold: cfg.exit_threshold,
-            sma_window: cfg.sma_window,
-            enable_shorting: cfg.enable_shorting,
-            short_entry_threshold: cfg.short_entry_threshold,
-            short_exit_threshold: cfg.short_exit_threshold,
-            pred_5d_filter: cfg.pred_5d_filter,
-        },
-    ));
-    let scheduler_tx = tx.clone();
-    let scheduler_trading_mode = trading_mode.clone();
-    let scheduler_executor = executor.clone();
-    let scheduler_strategy_params = strategy_params.clone();
-    tokio::spawn(async move {
-        match scheduler::EquityScheduler::new(
-            scheduler_pool,
-            symbol,
-            &zmq_endpoint,
-            norm_stats,
-            feature_window_size,
-            scheduler_strategy_params,
-            scheduler_trading_mode,
-            scheduler_executor,
-            Some(scheduler_tx),
-        ).await {
-            Ok(mut sched) => {
-                if let Err(e) = sched.run().await {
-                    error!("equity scheduler fatal error: {e:#}");
-                }
-            }
-            Err(e) => error!("equity scheduler init error: {e}"),
+    // Resolve the set of trading models this engine will run (§8).
+    //
+    // If the `trading_models` registry has at least one row, every enabled
+    // row becomes an independent (scheduler, executor) pair. If the
+    // registry is empty (cold start, fresh DB, or operator removed all
+    // rows), fall back to a single bootstrap model built from
+    // Config::symbol + Config::short_symbol + Config::norm_stats_path so
+    // existing paper-mode behavior survives unchanged.
+    let (active_models, _loaded_count) = match db::resolve_active_models(
+        &pool,
+        &cfg.symbol,
+        &cfg.short_symbol,
+        &cfg.norm_stats_path,
+    )
+    .await
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("trading_models resolver error: {:#}", e);
+            process::exit(1);
         }
-    });
+    };
+    if active_models.first().map(|m| m.model_id.as_str()) == Some("bootstrap-default") {
+        info!(
+            symbol = %cfg.symbol,
+            short_symbol = %cfg.short_symbol,
+            "trading_models registry is empty — bootstrapping a single model from Config defaults"
+        );
+    } else {
+        info!(
+            count = active_models.len(),
+            "loaded enabled models from trading_models registry"
+        );
+    }
+
+    // Per-model strategy params map (§8.6). Populated in the per-model
+    // loop below, then handed to the API router so PUT /api/strategy-config
+    // ?model_id=X can target a specific model's running scheduler.
+    let strategy_params_by_model: std::sync::Arc<
+        tokio::sync::RwLock<
+            std::collections::HashMap<String, std::sync::Arc<tokio::sync::RwLock<strategy::EquityStrategyParams>>>,
+        >,
+    > = std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+
+    // Spawn one daily equities scheduler per resolved model. Each model
+    // gets its own norm_stats file, its own paper executor (configured
+    // for that primary+short pair), and its own strategy_params handle
+    // so per-model threshold tuning can land in a follow-up without
+    // touching this loop. The executor variable still exists below for
+    // the legacy `/api/mode` flip path; we keep the FIRST model as the
+    // canonical handle that the API mutates.
+    for (idx, model) in active_models.iter().enumerate() {
+        let model_label = model.pair();
+        info!(
+            model_idx = idx,
+            model_id = %model.model_id,
+            primary = %model.primary_symbol,
+            inverse = %model.inverse_symbol,
+            budget_usd = model.budget_usd,
+            norm_stats = %model.norm_stats_path,
+            "bootstrapping scheduler"
+        );
+
+        // Per-model norm_stats — fail fast on missing file for any model.
+        let model_norm_stats =
+            match features::equities_v2::EquityNormStats::load_named(&model.norm_stats_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!(
+                        "norm_stats error for {model_label}: {:#}",
+                        e
+                    );
+                    process::exit(1);
+                }
+            };
+
+        // Per-model paper executor. Each executor holds its own position
+        // state keyed by primary_symbol, so two schedulers trade QQQ and
+        // NVDA independently without contention.
+        let model_tx_for_exec = tx.clone();
+        let model_executor = std::sync::Arc::new(tokio::sync::RwLock::new(
+            build_paper_executor_for_model(
+                &cfg,
+                pool.clone(),
+                &model.primary_symbol,
+                &model.inverse_symbol,
+                model_tx_for_exec,
+            ),
+        ));
+
+        let model_pool = pool.clone();
+        let zmq_endpoint = cfg.zmq_endpoint.clone();
+        let feature_window_size = cfg.feature_window_size;
+        let model_strategy_params = std::sync::Arc::new(tokio::sync::RwLock::new(
+            strategy::EquityStrategyParams {
+                entry_threshold: cfg.entry_threshold,
+                exit_threshold: cfg.exit_threshold,
+                sma_window: cfg.sma_window,
+                enable_shorting: cfg.enable_shorting,
+                short_entry_threshold: cfg.short_entry_threshold,
+                short_exit_threshold: cfg.short_exit_threshold,
+                pred_5d_filter: cfg.pred_5d_filter,
+                enable_sentiment_overlay: false,
+                sentiment_reduce_threshold: -0.5,
+                sentiment_exit_threshold: -0.8,
+                sentiment_min_articles: 15,
+            },
+        ));
+        // §8.6: register this model's params in the shared map so the
+        // API can target it via PUT /api/strategy-config?model_id=X.
+        strategy_params_by_model
+            .write()
+            .await
+            .insert(model.model_id.clone(), model_strategy_params.clone());
+        let model_trading_mode = trading_mode.clone();
+        let model_strategy_params_clone = model_strategy_params.clone();
+        let model_event_logger = event_logger.clone();
+        // Clone fields we need into owned strings so the spawned task
+        // doesn't borrow from `active_models`.
+        let model_primary = model.primary_symbol.clone();
+        let model_id_for_scheduler = model.model_id.clone();
+        let model_pair_for_scheduler = model.pair();
+        let model_tx = tx.clone();
+        tokio::spawn(async move {
+            match scheduler::EquityScheduler::new(
+                model_pool,
+                model_primary,
+                model_id_for_scheduler,
+                model_pair_for_scheduler,
+                &zmq_endpoint,
+                model_norm_stats,
+                feature_window_size,
+                model_strategy_params_clone,
+                model_trading_mode,
+                model_executor,
+                Some(model_tx),
+                Some(model_event_logger),
+            )
+            .await
+            {
+                Ok(mut sched) => {
+                    if let Err(e) = sched.run().await {
+                        error!(model = %model_label, "equity scheduler fatal error: {e:#}");
+                    }
+                }
+                Err(e) => error!(model = %model_label, "equity scheduler init error: {e}"),
+            }
+        });
+    }
 
     // Spawn the hourly LLM regime cache task (D4). Runs in background; never
     // blocks the per-bar path. If OPENROUTER_API_KEY is unset, it's a no-op
     // (reads 0.5 neutral). Configurable via LLM_MODEL, LLM_API_BASE, LLM_CACHE_TTL.
     let llm_cfg = features::llm::LlmRegimeConfig::from_env();
     features::llm::spawn_regime_cache_task(llm_cfg).await;
+
+    // Phase 4: Advisor — daily pre-market briefing task.
+    let advisor_cfg = advisor::AdvisorConfig::from_env(&cfg);
+    let advisor_state = if advisor_cfg.is_enabled() {
+        let state = std::sync::Arc::new(advisor::AdvisorState::new(advisor_cfg, tx.clone()));
+        let briefing_pool = pool.clone();
+        let briefing_symbol = cfg.symbol.clone();
+        let briefing_state = state.clone();
+        let notify = state.notify.clone();
+        tokio::spawn(async move {
+            advisor::briefing::run_briefing_loop(
+                briefing_state,
+                briefing_pool,
+                briefing_symbol,
+                notify,
+            ).await;
+        });
+        info!("advisor background task started");
+        Some(state)
+    } else {
+        info!("advisor disabled — no OPENROUTER_API_KEY or config");
+        None
+    };
 
     // Spawn the hourly actuals-computation task. Runs every hour with a 5-min
     // initial delay so it doesn't race the first scheduler tick. Follows the
@@ -224,7 +358,7 @@ async fn main() {
     // so the API endpoint can verify submitted codes.
     let mut cfg_for_api = cfg.clone();
     cfg_for_api.totp_secret = totp_secret.clone();
-    let app = api::router(pool.clone(), &cfg_for_api, tx);
+    let app = api::router(pool.clone(), &cfg_for_api, tx, advisor_state, event_logger, strategy_params_by_model);
     let bind_addr = format!("0.0.0.0:{}", cfg.http_port);
     match tokio::net::TcpListener::bind(&bind_addr).await {
         Ok(listener) => {
@@ -258,6 +392,38 @@ async fn main() {
 /// runtime swap (Paper -> Moomoo) happens via `POST /api/mode` while the
 /// engine is running, with the scheduler picking up the new executor at
 /// its next cycle.
+/// Build the paper executor for a specific resolved model (§8).
+///
+/// Each per-model loop iteration in `main()` calls this with the model's
+/// own `primary_symbol` and `inverse_symbol`, so QQQ and NVDA schedulers
+/// run independent paper executors. Currently always returns Paper;
+/// live-Moomoo execution stays single-model and operator-gated.
+fn build_paper_executor_for_model(
+    cfg: &config::Config,
+    pool: db::DbPool,
+    primary_symbol: &str,
+    inverse_symbol: &str,
+    tx: tokio::sync::broadcast::Sender<api::ws::TelemetryEvent>,
+) -> exec::ExecutorKind {
+    info!(
+        fee = cfg.paper_fee,
+        primary = %primary_symbol,
+        inverse = %inverse_symbol,
+        "using paper executor for model"
+    );
+    exec::ExecutorKind::Paper(exec::paper::PaperExecutor::new_for_symbol(
+        pool,
+        cfg.paper_fee,
+        primary_symbol,
+        inverse_symbol,
+        Some(tx),
+    ))
+}
+
+#[allow(dead_code)]
+/// Legacy helper retained for the Moomoo live execution path (§3.3).
+/// Not used by the per-model bootstrap loop in `main()`. Will be wired
+/// back in once the live execution path supports per-model routing.
 async fn build_executor_for_mode(
     mode: config::TradingMode,
     cfg: &config::Config,

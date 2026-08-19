@@ -3,11 +3,19 @@
 //! - `GET /api/strategy-config` — return current strategy params.
 //! - `PUT /api/strategy-config` — update strategy params at runtime.
 //!
-//! The PUT endpoint validates all fields, updates the shared
+//! Both endpoints accept an optional `?model_id=X` query param (§8.6).
+//! When supplied, the per-model params map is used; when omitted, the
+//! default (global) params are used.
+//!
+//! The PUT endpoint validates all fields, updates the resolved
 //! `Arc<RwLock<EquityStrategyParams>>`, broadcasts a `StrategyConfigChange`
 //! telemetry event, and appends an audit log to the database.
 
-use axum::{extract::State, http::StatusCode, response::Json};
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    response::Json,
+};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -15,8 +23,14 @@ use crate::strategy::EquityStrategyParams;
 
 use super::{internal_error, ApiResult, AppState};
 
+#[derive(Debug, Deserialize)]
+pub struct ModelIdQuery {
+    pub model_id: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct StrategyConfigResponse {
+    pub model_id: Option<String>,
     pub entry_threshold: f64,
     pub exit_threshold: f64,
     pub sma_window: usize,
@@ -24,6 +38,56 @@ pub struct StrategyConfigResponse {
     pub enable_shorting: bool,
     pub short_entry_threshold: f64,
     pub short_exit_threshold: f64,
+    pub enable_sentiment_overlay: bool,
+    pub sentiment_reduce_threshold: f64,
+    pub sentiment_exit_threshold: f64,
+    pub sentiment_min_articles: i64,
+}
+
+/// Resolve the `Arc<RwLock<EquityStrategyParams>>` for a given model_id.
+///
+/// If `model_id` is supplied and exists in the per-model map, return that
+/// entry. Otherwise fall back to the default (global) params.
+///
+/// Returns the resolved params handle and the model_id that was used
+/// (None means the default was used).
+async fn resolve_params(
+    state: &AppState,
+    model_id: &Option<String>,
+) -> (
+    std::sync::Arc<tokio::sync::RwLock<EquityStrategyParams>>,
+    Option<String>,
+) {
+    if let Some(id) = model_id {
+        let map = state.strategy_params_by_model.read().await;
+        if let Some(params) = map.get(id) {
+            return (params.clone(), Some(id.clone()));
+        }
+        // Fall through to default if model_id not found in map.
+    }
+    (state.strategy_params.clone(), None)
+}
+
+pub async fn handle_get(
+    State(state): State<AppState>,
+    Query(query): Query<ModelIdQuery>,
+) -> ApiResult<StrategyConfigResponse> {
+    let (params, resolved_model_id) = resolve_params(&state, &query.model_id).await;
+    let sp = params.read().await;
+    Ok(Json(StrategyConfigResponse {
+        model_id: resolved_model_id,
+        entry_threshold: sp.entry_threshold,
+        exit_threshold: sp.exit_threshold,
+        sma_window: sp.sma_window,
+        pred_5d_filter: sp.pred_5d_filter,
+        enable_shorting: sp.enable_shorting,
+        short_entry_threshold: sp.short_entry_threshold,
+        short_exit_threshold: sp.short_exit_threshold,
+        enable_sentiment_overlay: sp.enable_sentiment_overlay,
+        sentiment_reduce_threshold: sp.sentiment_reduce_threshold,
+        sentiment_exit_threshold: sp.sentiment_exit_threshold,
+        sentiment_min_articles: sp.sentiment_min_articles,
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -42,26 +106,26 @@ pub struct StrategyConfigUpdate {
     pub short_entry_threshold: Option<f64>,
     #[serde(default)]
     pub short_exit_threshold: Option<f64>,
-}
-
-pub async fn handle_get(State(state): State<AppState>) -> ApiResult<StrategyConfigResponse> {
-    let sp = state.strategy_params.read().await;
-    Ok(Json(StrategyConfigResponse {
-        entry_threshold: sp.entry_threshold,
-        exit_threshold: sp.exit_threshold,
-        sma_window: sp.sma_window,
-        pred_5d_filter: sp.pred_5d_filter,
-        enable_shorting: sp.enable_shorting,
-        short_entry_threshold: sp.short_entry_threshold,
-        short_exit_threshold: sp.short_exit_threshold,
-    }))
+    #[serde(default)]
+    pub enable_sentiment_overlay: Option<bool>,
+    #[serde(default)]
+    pub sentiment_reduce_threshold: Option<f64>,
+    #[serde(default)]
+    pub sentiment_exit_threshold: Option<f64>,
+    #[serde(default)]
+    pub sentiment_min_articles: Option<i64>,
 }
 
 pub async fn handle_put(
     State(state): State<AppState>,
+    Query(query): Query<ModelIdQuery>,
     Json(update): Json<StrategyConfigUpdate>,
 ) -> Result<Json<StrategyConfigResponse>, (StatusCode, String)> {
-    let mut sp = state.strategy_params.write().await;
+    let (params, resolved_model_id) = resolve_params(&state, &query.model_id).await;
+    let mut sp = params.write().await;
+
+    // Capture old params for event emission.
+    let old = sp.clone();
 
     // Validate and apply each field that was provided.
     if let Some(v) = update.entry_threshold {
@@ -125,7 +189,45 @@ pub async fn handle_put(
         sp.short_exit_threshold = v;
     }
 
+    if let Some(v) = update.enable_sentiment_overlay {
+        sp.enable_sentiment_overlay = v;
+    }
+
+    if let Some(v) = update.sentiment_reduce_threshold {
+        if v >= 0.0 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("sentiment_reduce_threshold must be < 0, got {v}"),
+            ));
+        }
+        sp.sentiment_reduce_threshold = v;
+    }
+
+    if let Some(v) = update.sentiment_exit_threshold {
+        if v >= 0.0 || v >= sp.sentiment_reduce_threshold {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "sentiment_exit_threshold must be < 0 and < sentiment_reduce_threshold ({}), got {v}",
+                    sp.sentiment_reduce_threshold
+                ),
+            ));
+        }
+        sp.sentiment_exit_threshold = v;
+    }
+
+    if let Some(v) = update.sentiment_min_articles {
+        if v < 0 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("sentiment_min_articles must be >= 0, got {v}"),
+            ));
+        }
+        sp.sentiment_min_articles = v;
+    }
+
     let response = StrategyConfigResponse {
+        model_id: resolved_model_id.clone(),
         entry_threshold: sp.entry_threshold,
         exit_threshold: sp.exit_threshold,
         sma_window: sp.sma_window,
@@ -133,6 +235,10 @@ pub async fn handle_put(
         enable_shorting: sp.enable_shorting,
         short_entry_threshold: sp.short_entry_threshold,
         short_exit_threshold: sp.short_exit_threshold,
+        enable_sentiment_overlay: sp.enable_sentiment_overlay,
+        sentiment_reduce_threshold: sp.sentiment_reduce_threshold,
+        sentiment_exit_threshold: sp.sentiment_exit_threshold,
+        sentiment_min_articles: sp.sentiment_min_articles,
     };
 
     // Drop the write lock before broadcasting (broadcast may re-read params).
@@ -147,9 +253,40 @@ pub async fn handle_put(
         enable_shorting: response.enable_shorting,
         short_entry_threshold: response.short_entry_threshold,
         short_exit_threshold: response.short_exit_threshold,
+        enable_sentiment_overlay: response.enable_sentiment_overlay,
+        sentiment_reduce_threshold: response.sentiment_reduce_threshold,
+        sentiment_exit_threshold: response.sentiment_exit_threshold,
+        sentiment_min_articles: response.sentiment_min_articles,
     });
 
+    // Emit event for the unified log — attribute to the model if resolved.
+    let event = crate::event::EngineEvent::strategy_config_changed(
+        &old,
+        &crate::strategy::EquityStrategyParams {
+            entry_threshold: response.entry_threshold,
+            exit_threshold: response.exit_threshold,
+            sma_window: response.sma_window,
+            pred_5d_filter: response.pred_5d_filter,
+            enable_shorting: response.enable_shorting,
+            short_entry_threshold: response.short_entry_threshold,
+            short_exit_threshold: response.short_exit_threshold,
+            enable_sentiment_overlay: response.enable_sentiment_overlay,
+            sentiment_reduce_threshold: response.sentiment_reduce_threshold,
+            sentiment_exit_threshold: response.sentiment_exit_threshold,
+            sentiment_min_articles: response.sentiment_min_articles,
+        },
+    );
+    if let Some(ref mid) = resolved_model_id {
+        state
+            .event_logger
+            .emit_for_model(event, mid, None)
+            .await;
+    } else {
+        state.event_logger.emit(event).await;
+    }
+
     info!(
+        model_id = ?resolved_model_id,
         entry_threshold = response.entry_threshold,
         exit_threshold = response.exit_threshold,
         sma_window = response.sma_window,

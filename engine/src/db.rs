@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::{sqlite::SqlitePoolOptions, FromRow, Row, SqlitePool};
 use tracing::{info, warn};
 
@@ -123,6 +123,17 @@ CREATE TABLE IF NOT EXISTS sentiment_cache (
     source       TEXT    NOT NULL DEFAULT 'stub',
     PRIMARY KEY (symbol, date)
 );
+
+CREATE TABLE IF NOT EXISTS advisor_chat_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           INTEGER NOT NULL,
+    question     TEXT    NOT NULL,
+    response     TEXT    NOT NULL,
+    model_used   TEXT    NOT NULL,
+    latency_ms   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS advisor_chat_log_ts_idx
+    ON advisor_chat_log (ts DESC);
 
 -- Control Room revamp: strategy configs, mode switches, advisor log, backtests.
 CREATE TABLE IF NOT EXISTS strategy_configs (
@@ -273,6 +284,24 @@ CREATE TABLE IF NOT EXISTS options_config_kv (
     tier        TEXT    NOT NULL DEFAULT 'strategy',
     updated_at  INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS trading_models (
+    model_id        TEXT    PRIMARY KEY,        -- uuid text, not a ticker
+    primary_symbol  TEXT    NOT NULL,           -- e.g. NVDA
+    inverse_symbol  TEXT    NOT NULL,           -- e.g. NVDD
+    model_path      TEXT    NOT NULL,           -- path to model bundle
+    norm_stats_path TEXT    NOT NULL,           -- path to norm stats json
+    budget_usd      REAL    NOT NULL DEFAULT 5000.0,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    deployed_at     INTEGER NOT NULL,
+    last_wf_ic      REAL,
+    last_wf_at      INTEGER,
+    notes           TEXT
+);
+CREATE INDEX IF NOT EXISTS trading_models_enabled_idx
+    ON trading_models (enabled);
+CREATE INDEX IF NOT EXISTS trading_models_primary_symbol_idx
+    ON trading_models (primary_symbol);
 
 CREATE TABLE IF NOT EXISTS hyperopt_runs (
     id                    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -839,6 +868,152 @@ pub async fn list_options_config(pool: &DbPool) -> Result<Vec<(String, String, S
         .collect())
 }
 
+// ── Trading models (§8 multi-model registry) ─────────────────────────────────
+
+/// Idempotent migration for the `trading_models` registry.
+pub async fn migrate_trading_models(pool: &DbPool) -> Result<()> {
+    let _ = pool;
+    Ok(())
+}
+
+/// Insert a new model into the `trading_models` registry.
+pub async fn register_model(
+    pool: &DbPool,
+    model_id: &str,
+    primary_symbol: &str,
+    inverse_symbol: &str,
+    model_path: &str,
+    norm_stats_path: &str,
+    budget_usd: f64,
+    notes: Option<&str>,
+) -> Result<TradingModel> {
+    let deployed_at = Utc::now().timestamp();
+    sqlx::query(
+        r#"INSERT INTO trading_models
+               (model_id, primary_symbol, inverse_symbol, model_path,
+                norm_stats_path, budget_usd, enabled, deployed_at,
+                last_wf_ic, last_wf_at, notes)
+           VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, NULL, ?)"#,
+    )
+    .bind(model_id)
+    .bind(primary_symbol)
+    .bind(inverse_symbol)
+    .bind(model_path)
+    .bind(norm_stats_path)
+    .bind(budget_usd)
+    .bind(deployed_at)
+    .bind(notes)
+    .execute(pool)
+    .await
+    .context("register_model: INSERT trading_models")?;
+
+    load_model_by_id(pool, model_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("register_model: row vanished after insert"))
+}
+
+/// Toggle the `enabled` flag for a registered model.
+pub async fn update_model_enabled(
+    pool: &DbPool,
+    model_id: &str,
+    enabled: bool,
+) -> Result<Option<TradingModel>> {
+    let rows = sqlx::query("UPDATE trading_models SET enabled = ? WHERE model_id = ?")
+        .bind(if enabled { 1_i64 } else { 0_i64 })
+        .bind(model_id)
+        .execute(pool)
+        .await
+        .context("update_model_enabled: UPDATE trading_models")?
+        .rows_affected();
+
+    if rows == 0 {
+        return Ok(None);
+    }
+    load_model_by_id(pool, model_id).await
+}
+
+/// Fetch a single model by id.
+pub async fn load_model_by_id(pool: &DbPool, model_id: &str) -> Result<Option<TradingModel>> {
+    let row: Option<(String, String, String, String, String, f64, i64, i64, Option<f64>, Option<i64>, Option<String>)> =
+        sqlx::query_as(
+            "SELECT model_id, primary_symbol, inverse_symbol, model_path, norm_stats_path, \
+             budget_usd, enabled, deployed_at, last_wf_ic, last_wf_at, notes \
+             FROM trading_models WHERE model_id = ?1",
+        )
+        .bind(model_id)
+        .fetch_optional(pool)
+        .await
+        .context("load_model_by_id")?;
+
+    Ok(row.map(|r| TradingModel {
+        model_id: r.0,
+        primary_symbol: r.1,
+        inverse_symbol: r.2,
+        model_path: r.3,
+        norm_stats_path: r.4,
+        budget_usd: r.5,
+        enabled: r.6 != 0,
+        deployed_at: r.7,
+        last_wf_ic: r.8,
+        last_wf_at: r.9,
+        notes: r.10,
+    }))
+}
+
+/// Load all registered models (regardless of enabled flag).
+pub async fn load_all_models(pool: &DbPool) -> Result<Vec<TradingModel>> {
+    let rows: Vec<(String, String, String, String, String, f64, i64, i64, Option<f64>, Option<i64>, Option<String>)> =
+        sqlx::query_as(
+            "SELECT model_id, primary_symbol, inverse_symbol, model_path, norm_stats_path, \
+             budget_usd, enabled, deployed_at, last_wf_ic, last_wf_at, notes \
+             FROM trading_models ORDER BY deployed_at DESC",
+        )
+        .fetch_all(pool)
+        .await
+        .context("load_all_models")?;
+
+    Ok(rows.into_iter().map(|r| TradingModel {
+        model_id: r.0,
+        primary_symbol: r.1,
+        inverse_symbol: r.2,
+        model_path: r.3,
+        norm_stats_path: r.4,
+        budget_usd: r.5,
+        enabled: r.6 != 0,
+        deployed_at: r.7,
+        last_wf_ic: r.8,
+        last_wf_at: r.9,
+        notes: r.10,
+    }).collect())
+}
+
+/// Load only enabled models.
+pub async fn load_enabled_models(pool: &DbPool) -> Result<Vec<TradingModel>> {
+    let rows: Vec<(String, String, String, String, String, f64, i64, i64, Option<f64>, Option<i64>, Option<String>)> =
+        sqlx::query_as(
+            "SELECT model_id, primary_symbol, inverse_symbol, model_path, norm_stats_path, \
+             budget_usd, enabled, deployed_at, last_wf_ic, last_wf_at, notes \
+             FROM trading_models WHERE enabled = 1 ORDER BY deployed_at DESC",
+        )
+        .fetch_all(pool)
+        .await
+        .context("load_enabled_models")?;
+
+    Ok(rows.into_iter().map(|r| TradingModel {
+        model_id: r.0,
+        primary_symbol: r.1,
+        inverse_symbol: r.2,
+        model_path: r.3,
+        norm_stats_path: r.4,
+        budget_usd: r.5,
+        enabled: r.6 != 0,
+        deployed_at: r.7,
+        last_wf_ic: r.8,
+        last_wf_at: r.9,
+        notes: r.10,
+    }).collect())
+}
+
 // ── Hyperopt runs ────────────────────────────────────────────────────────────
 
 /// Record the start of a hyperopt run. Returns the run id.
@@ -881,6 +1056,83 @@ pub async fn complete_hyperopt_run(
     .await
     .context("complete_hyperopt_run")?;
     Ok(())
+}
+
+/// A registered trading model (§8 multi-model expansion).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TradingModel {
+    pub model_id: String,
+    pub primary_symbol: String,
+    pub inverse_symbol: String,
+    pub model_path: String,
+    pub norm_stats_path: String,
+    pub budget_usd: f64,
+    pub enabled: bool,
+    pub deployed_at: i64,
+    pub last_wf_ic: Option<f64>,
+    pub last_wf_at: Option<i64>,
+    pub notes: Option<String>,
+}
+
+impl TradingModel {
+    /// Derived display label: `"<PRIMARY>/<INVERSE>"`, uppercase.
+    pub fn label(&self) -> String {
+        format!("{}/{}", self.primary_symbol, self.inverse_symbol).to_uppercase()
+    }
+
+    /// Pair string used by tests: `"<PRIMARY>/<INVERSE>"`.
+    pub fn pair(&self) -> String {
+        format!("{}/{}", self.primary_symbol, self.inverse_symbol)
+    }
+
+    /// Enabled flag accessor (matches test expectations).
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+}
+
+/// Bootstrap a single default model from Config defaults when the registry is empty.
+pub fn bootstrap_default_model(
+    primary_symbol: &str,
+    inverse_symbol: &str,
+    norm_stats_path: &str,
+) -> TradingModel {
+    TradingModel {
+        model_id: "bootstrap-default".to_string(),
+        primary_symbol: primary_symbol.to_string(),
+        inverse_symbol: inverse_symbol.to_string(),
+        model_path: "<bootstrap>".to_string(),
+        norm_stats_path: norm_stats_path.to_string(),
+        budget_usd: 0.0,
+        enabled: true,
+        deployed_at: Utc::now().timestamp(),
+        last_wf_ic: None,
+        last_wf_at: None,
+        notes: Some("bootstrap from Config defaults".to_string()),
+    }
+}
+
+/// Resolve the set of trading models the engine will run at startup (§8).
+pub async fn resolve_active_models(
+    pool: &DbPool,
+    primary_symbol: &str,
+    inverse_symbol: &str,
+    norm_stats_path: &str,
+) -> Result<(Vec<TradingModel>, usize)> {
+    let rows = load_enabled_models(pool).await?;
+    if rows.is_empty() {
+        Ok((
+            vec![bootstrap_default_model(
+                primary_symbol,
+                inverse_symbol,
+                norm_stats_path,
+            )],
+            0,
+        ))
+    } else {
+        let n = rows.len();
+        Ok((rows, n))
+    }
 }
 
 /// A hyperopt run row.
@@ -2288,6 +2540,178 @@ pub async fn fetch_strategy_configs(pool: &DbPool) -> Result<Vec<StrategyConfigR
     .await
     .context("fetch_strategy_configs")?;
     Ok(rows)
+}
+
+// ── Equity trade lookups (multi-model Dashboard) ──────────────────────────────
+
+pub async fn fetch_recent_all_equity_trades(
+    pool: &DbPool,
+    limit: usize,
+) -> Result<Vec<TradeRow>> {
+    let rows = sqlx::query(
+        "SELECT id, candle_ts, side, qty, price, fee, realized_pnl, created_at
+         FROM equity_trades
+         ORDER BY id DESC
+         LIMIT ?1",
+    )
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await
+    .context("fetch_recent_all_equity_trades")?;
+
+    Ok(rows
+        .iter()
+        .map(|row| TradeRow {
+            id: row.get(0),
+            candle_ts: row.get(1),
+            side: row.get(2),
+            qty: row.get(3),
+            price: row.get(4),
+            fee: row.get(5),
+            realized_pnl: row.get(6),
+            created_at: row.get(7),
+        })
+        .collect())
+}
+
+/// Return the most recent candle, or `None` if the table is empty.
+
+/// Fetch the price of the most recent entry (buy) trade for a given symbol.
+/// Used to compute entry_price for open positions (Long=QQQ, Short=PSQ).
+pub async fn fetch_equity_entry_trade_price(
+    pool: &DbPool,
+    symbol: &str,
+) -> Result<Option<f64>> {
+    let row: Option<(f64,)> = sqlx::query_as(
+        "SELECT price FROM equity_trades
+         WHERE symbol = ?1 AND side = 'buy'
+         ORDER BY id DESC LIMIT 1",
+    )
+    .bind(symbol)
+    .fetch_optional(pool)
+    .await
+    .context("fetch_equity_entry_trade_price")?;
+    Ok(row.map(|r| r.0))
+}
+
+/// Fetch the timestamp of the most recent entry (buy) trade for a symbol.
+pub async fn fetch_equity_entry_trade_ts(
+    pool: &DbPool,
+    symbol: &str,
+) -> Result<Option<i64>> {
+    let row: Option<(i64,)> = sqlx::query_as(
+        "SELECT candle_ts FROM equity_trades
+         WHERE symbol = ?1 AND side = 'buy'
+         ORDER BY id DESC LIMIT 1",
+    )
+    .bind(symbol)
+    .fetch_optional(pool)
+    .await
+    .context("fetch_equity_entry_trade_ts")?;
+    Ok(row.map(|r| r.0))
+}
+
+/// Fetch the close price at a specific timestamp (or the nearest prior close).
+pub async fn fetch_equity_close_at_ts(
+    pool: &DbPool,
+    symbol: &str,
+    ts: i64,
+) -> Result<Option<f64>> {
+    let row: Option<(f64,)> = sqlx::query_as(
+        "SELECT close FROM equity_candles
+         WHERE symbol = ?1 AND ts <= ?2
+         ORDER BY ts DESC LIMIT 1",
+    )
+    .bind(symbol)
+    .bind(ts)
+    .fetch_optional(pool)
+    .await
+    .context("fetch_equity_close_at_ts")?;
+    Ok(row.map(|r| r.0))
+}
+
+// ── Sentiment cache ───────────────────────────────────────────────────────────
+
+/// Latest cached sentiment for a symbol, if any.
+pub async fn latest_sentiment(pool: &DbPool, symbol: &str) -> Result<Option<(f64, i64)>> {
+    let row: Option<(f64, i64)> = sqlx::query_as(
+        "SELECT score, buzz FROM sentiment_cache WHERE symbol = ?1 ORDER BY date DESC LIMIT 1"
+    )
+    .bind(symbol)
+    .fetch_optional(pool)
+    .await
+    .context("latest_sentiment")?;
+    Ok(row)
+}
+
+// ── Advisor chat log ──────────────────────────────────────────────────────────
+
+/// Insert a briefing log entry. Returns the new row id.
+pub async fn insert_advisor_briefing_log(
+    pool: &DbPool,
+    summary: &str,
+) -> Result<i64> {
+    let ts = chrono::Utc::now().timestamp();
+    let row = sqlx::query(
+        "INSERT INTO advisor_chat_log (ts, question, response, model_used, latency_ms) \
+         VALUES (?1, '', ?2, 'briefing', 0)",
+    )
+    .bind(ts)
+    .bind(summary)
+    .execute(pool)
+    .await
+    .context("insert_advisor_briefing_log")?;
+    Ok(row.last_insert_rowid())
+}
+
+/// Insert a chat interaction into the log.
+pub async fn insert_advisor_chat_log(
+    pool: &DbPool,
+    question: &str,
+    response: &str,
+    model_used: &str,
+    latency_ms: i64,
+) -> Result<i64> {
+    let ts = chrono::Utc::now().timestamp();
+    let row = sqlx::query(
+        "INSERT INTO advisor_chat_log (ts, question, response, model_used, latency_ms) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )
+    .bind(ts)
+    .bind(question)
+    .bind(response)
+    .bind(model_used)
+    .bind(latency_ms)
+    .execute(pool)
+    .await
+    .context("insert_advisor_chat_log")?;
+    Ok(row.last_insert_rowid())
+}
+
+/// Fetch the most recent N chat turns (question, response) pairs, oldest first.
+pub async fn fetch_recent_chat_turns(
+    pool: &DbPool,
+    limit: usize,
+) -> Result<Vec<(String, String)>> {
+    let rows = sqlx::query(
+        "SELECT question, response FROM advisor_chat_log \
+         ORDER BY id DESC LIMIT ?1",
+    )
+    .bind(limit as i64)
+    .fetch_all(pool)
+    .await
+    .context("fetch_recent_chat_turns")?;
+
+    let mut turns: Vec<(String, String)> = rows
+        .iter()
+        .map(|r| {
+            let q: String = r.get(0);
+            let a: String = r.get(1);
+            (q, a)
+        })
+        .collect();
+    turns.reverse();
+    Ok(turns)
 }
 
 #[cfg(test)]

@@ -7,6 +7,7 @@
   import OptionsTradeHistory from './views/OptionsTradeHistory.svelte';
   import OptionsMonitor from './views/OptionsMonitor.svelte';
   import OptionsSettings from './views/OptionsSettings.svelte';
+  import Advisor from './views/Advisor.svelte';
   import Events from './views/Events.svelte';
   import { status } from './lib/stores.js';
 
@@ -40,7 +41,7 @@
   <nav class="sidebar" class:open={sidebarOpen}>
     <div class="logo">
       <span class="logo-mark">M</span>
-      <span class="logo-text">MarketMoves</span>
+      <span class="logo-text">MM - By LogiaLabs</span>
     </div>
     <ul>
       <li>
@@ -170,10 +171,7 @@
     {:else if currentView === 'events'}
       <Events />
     {:else if currentView === 'advisor'}
-      <div class="placeholder">
-        <h1>AI Advisor</h1>
-        <p>Coming in Phase 4.</p>
-      </div>
+      <Advisor />
     {/if}
   </main>
 </div>

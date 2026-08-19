@@ -33,7 +33,7 @@ pub struct EventsListResponse {
 }
 
 /// GET /api/events
-pub async fn handle_list_events(
+pub async fn handle_events(
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<EventsListResponse>, StatusCode> {
@@ -82,6 +82,11 @@ pub async fn handle_list_events(
     }))
 }
 
+/// GET /api/events/archive — placeholder until archive API is implemented.
+pub async fn handle_archives() -> &'static str {
+    "event archive API not yet implemented"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,8 +122,14 @@ mod tests {
 
     fn events_state(pool: db::DbPool) -> State<AppState> {
         let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let pool_clone = pool.clone();
+        let event_logger = std::sync::Arc::new(crate::event::EventLogger::new(
+            pool.clone(),
+            None,
+            std::sync::Arc::new(tokio::sync::RwLock::new(crate::config::TradingMode::Paper)),
+        ));
         State(AppState {
-            pool,
+            pool: pool_clone,
             trading_mode: std::sync::Arc::new(tokio::sync::RwLock::new(
                 crate::config::TradingMode::Paper,
             )),
@@ -132,6 +143,16 @@ mod tests {
             totp_secret: String::new(),
             zmq_endpoint: String::new(),
             norm_stats_path: String::new(),
+            short_symbol: "PSQ".into(),
+            event_logger: std::sync::Arc::new(crate::event::EventLogger::new(
+                pool.clone(),
+                None,
+                std::sync::Arc::new(tokio::sync::RwLock::new(crate::config::TradingMode::Paper)),
+            )),
+            advisor: None,
+            strategy_params_by_model: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
         })
     }
 
@@ -145,7 +166,7 @@ mod tests {
         state: State<AppState>,
         query: std::collections::HashMap<String, String>,
     ) -> EventsListResponse {
-        let Json(resp) = handle_list_events(state, axum::extract::Query(query))
+        let Json(resp) = handle_events(state, axum::extract::Query(query))
             .await
             .unwrap();
         resp

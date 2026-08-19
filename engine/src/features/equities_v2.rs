@@ -34,6 +34,28 @@ pub const EQ_FEATURE_NAMES: [&str; EQ_FEATURE_DIM] = [
     "drawdown_from_50d_high",
 ];
 
+/// Per-feature MAD floors — matches notebook cell 10 `MAD_FLOORS`.
+///
+/// These floors "match the long-run empirical MADs of each feature" (per
+/// notebook comment). Without them, a live regime with unusually low
+/// per-feature dispersion (e.g. a quiet tape for `gap_pct`) would let the
+/// 1.4826 * MAD scale collapse toward zero, producing extreme z-scores
+/// that the trained model has never seen. The floor guarantees a
+/// sensible scale regardless of training-window quirks.
+///
+/// Applied inside `EquityNormStats::normalize` by replacing
+/// `1.4826 * mad` with `1.4826 * max(mad, floor)` per dimension.
+pub const EQ_MAD_FLOORS: [f64; EQ_FEATURE_DIM] = [
+    0.005,  // trend_slope
+    5.0,    // trend_adx
+    14.0,   // rsi_14
+    1.0,    // vix_regime
+    0.10,   // tlt_corr_20d
+    0.10,   // rvol_20d
+    0.001,  // gap_pct
+    0.01,   // drawdown_from_50d_high
+];
+
 /// Feature row for the equities pipeline.
 /// Fields map 1:1 to the `EQ_FEATURE_DIM` array ordering above.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -88,6 +110,7 @@ pub fn compute_equity_features(
     let closes: Vec<f64> = qqq.iter().map(|c| c.close).collect();
     let volumes: Vec<i64> = qqq.iter().map(|c| c.volume).collect();
     let opens: Vec<f64> = qqq.iter().map(|c| c.open).collect();
+    let highs: Vec<f64> = qqq.iter().map(|c| c.high).collect();
 
     // SMA50 for trend slope: slope = ln(sma50[t]) - ln(sma50[t-20])
     let sma50 = rolling_sma(&closes, 50);
@@ -129,8 +152,9 @@ pub fn compute_equity_features(
     // Overnight gap.
     let gaps = gap_pct(&opens, &closes);
 
-    // Drawdown from 50d high.
-    let dd = drawdown_from_high(&closes, 50);
+    // Drawdown from 50d high — rolling max over `highs` (not closes),
+    // matching notebook `df['high'].rolling(50).max()`.
+    let dd = drawdown_from_high(&highs, &closes, 50);
 
     // Assemble rows.
     let mut rows = Vec::with_capacity(n);
@@ -153,6 +177,22 @@ pub fn compute_equity_features(
             drawdown_from_50d_high: dd[i],
         });
     }
+
+    // Clip extreme edges for robustness (matches notebook cell 8:
+    // `f[clip_cols] = f[clip_cols].clip(lower=-5.0, upper=5.0)`).
+    // Only the 4 unbounded features are clipped; bounded ones (ADX,
+    // RSI, VIX-regime categorical, TLT correlation in [-1, 1]) are
+    // untouched because they cannot produce extreme outliers in normal
+    // market data.
+    const CLIP_LOWER: f64 = -5.0;
+    const CLIP_UPPER: f64 = 5.0;
+    for row in &mut rows {
+        row.trend_slope = row.trend_slope.clamp(CLIP_LOWER, CLIP_UPPER);
+        row.rvol_20d = row.rvol_20d.clamp(CLIP_LOWER, CLIP_UPPER);
+        row.gap_pct = row.gap_pct.clamp(CLIP_LOWER, CLIP_UPPER);
+        row.drawdown_from_50d_high = row.drawdown_from_50d_high.clamp(CLIP_LOWER, CLIP_UPPER);
+    }
+
     rows
 }
 
@@ -190,11 +230,27 @@ impl EquityNormStats {
     /// Normalize a feature row to a robust z-score vector.
     /// Uses (x - median) / (1.4826 * MAD) where 1.4826 scales MAD to std.
     /// If MAD is ~0, returns 0.0 for that dimension.
+    ///
+    /// MAD_FLOORS (notebook cell 10) are applied: scale =
+    /// `1.4826 * max(mad, floor)`. This prevents extreme z-scores in live
+    /// regimes where per-feature dispersion drops below the long-run
+    /// empirical MAD.
     pub fn normalize(&self, row: &EquityFeatureRow) -> [f64; EQ_FEATURE_DIM] {
         let raw = row.to_array();
         let mut out = [0.0; EQ_FEATURE_DIM];
         for i in 0..EQ_FEATURE_DIM {
-            let scale = 1.4826 * self.mad[i];
+            let raw_mad = self.mad[i];
+            let floor = EQ_MAD_FLOORS[i];
+            // Apply floor: use raw MAD unless it underflows below the floor.
+            // If even the floor is ~0 (pathological), fall back to 0.0 output.
+            let effective_mad = if raw_mad >= floor {
+                raw_mad
+            } else if floor > 1e-12 {
+                floor
+            } else {
+                0.0
+            };
+            let scale = 1.4826 * effective_mad;
             out[i] = if scale < 1e-12 {
                 0.0
             } else {
@@ -415,14 +471,25 @@ fn gap_pct(opens: &[f64], closes: &[f64]) -> Vec<f64> {
 
 /// Drawdown from rolling N-day high: (close[t] - max(high[t-N..t])) / max(...).
 /// Returns negative or zero values.
-fn drawdown_from_high(closes: &[f64], window: usize) -> Vec<f64> {
+///
+/// Matches notebook `df['high'].rolling(50).max()` semantics — the rolling
+/// maximum is taken over the `highs` series, not `closes`. Pre-fix the Rust
+/// implementation used `closes` for the max, which systematically produced
+/// less-negative values because intraday highs were ignored.
+///
+/// Parity fix 1A (2026-08-05): separate `highs` argument, rolling max over
+/// `highs`. The deployed QQQ model was trained on the `close`-based feature
+/// and continues to operate on it; the fix takes effect for new symbols
+/// (NVDA pipeline) and after the next QQQ retrain.
+fn drawdown_from_high(highs: &[f64], closes: &[f64], window: usize) -> Vec<f64> {
     let n = closes.len();
+    debug_assert_eq!(highs.len(), n, "drawdown_from_high: highs/closes length mismatch");
     let mut out = vec![0.0; n];
     if n < window + 1 {
         return out;
     }
     for i in window..n {
-        let high = closes[i - window..=i].iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let high = highs[i - window..=i].iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         if high > 0.0 {
             out[i] = (closes[i] - high) / high;
         }
@@ -720,5 +787,163 @@ mod tests {
         assert_eq!(arr[5], 6.0); // rvol_20d
         assert_eq!(arr[6], 7.0); // gap_pct
         assert_eq!(arr[7], 8.0); // drawdown_from_50d_high
+    }
+
+    // ---- parity fixes 1A / 1B / 1D verification tests (2026-08-05) ----
+
+    fn mk_candle_for(ts: i64, o: f64, h: f64, l: f64, c: f64) -> EquityCandle {
+        EquityCandle {
+            symbol: "QQQ".to_string(),
+            ts,
+            open: o,
+            high: h,
+            low: l,
+            close: c,
+            volume: 1_000_000,
+            source: "test".to_string(),
+        }
+    }
+
+    /// 1A: `drawdown_from_50d_high` must use rolling max of `high`, not `close`.
+    /// Pre-fix Rust used closes; post-fix uses highs.
+    #[test]
+    fn parity_1a_drawdown_uses_high_not_close() {
+        // 60-bar series where high is consistently above close by 10.
+        // First 50 bars: close=100, high=110. Bars 50..60: close=95, high=100.
+        let mut candles = Vec::with_capacity(60);
+        for i in 0..60 {
+            let (o, h, l, c) = if i < 50 {
+                (100.0, 110.0, 95.0, 100.0)
+            } else {
+                (95.0, 100.0, 90.0, 95.0)
+            };
+            candles.push(mk_candle_for(i as i64, o, h, l, c));
+        }
+        let rows = compute_equity_features(&candles, None, None);
+        let dd_59 = rows[59].drawdown_from_50d_high;
+        // New (high-based): max(highs[10..=59]) = 110, dd = (95 - 110) / 110 ≈ -0.1364
+        // Old (close-based): max(closes[10..=59]) = 100, dd = (95 - 100) / 100 = -0.05
+        let expected_new = (95.0 - 110.0) / 110.0;
+        let diff_new = (dd_59 - expected_new).abs();
+        assert!(
+            diff_new < 1e-9,
+            "1A FAIL: dd@59={dd_59} should match high-based {expected_new}, diff={diff_new}"
+        );
+        assert!(
+            dd_59 < -0.05 - 1e-3,
+            "1A FAIL: dd@59={dd_59} must be strictly more negative than the old close-based -0.05"
+        );
+    }
+
+    /// 1B: 4 unbounded features (trend_slope, rvol_20d, gap_pct, drawdown_from_50d_high)
+    /// are clipped to [-5.0, 5.0] before returning. Bounded features untouched.
+    #[test]
+    fn parity_1b_clipping_applied_to_unbounded_features() {
+        // Construct a 10^12 ramp from 1.0 to push trend_slope well past 5.0.
+        // 80 bars: enough that trend_slope is computable (needs sma50 at i-20,
+        // so i >= 69) and that the ramp is extreme enough to exceed 5.0.
+        const N: usize = 80;
+        let mut candles = Vec::with_capacity(N);
+        for i in 0..N {
+            let t = i as f64;
+            let price = 1.0 * (1.0e12_f64).powf(t / (N as f64 - 1.0));
+            let (o, h, l, c) = (price * 0.999, price * 1.001, price * 0.998, price);
+            candles.push(mk_candle_for(i as i64, o, h, l, c));
+        }
+        let rows = compute_equity_features(&candles, None, None);
+
+        // All 4 unbounded features must be within the clip range for all rows.
+        for (i, r) in rows.iter().enumerate() {
+            assert!(
+                r.trend_slope >= -5.0 && r.trend_slope <= 5.0,
+                "1B FAIL: trend_slope@row {i} = {} outside [-5, 5]",
+                r.trend_slope
+            );
+            assert!(
+                r.rvol_20d >= -5.0 && r.rvol_20d <= 5.0,
+                "1B FAIL: rvol_20d@row {i} = {} outside [-5, 5]",
+                r.rvol_20d
+            );
+            assert!(
+                r.gap_pct >= -5.0 && r.gap_pct <= 5.0,
+                "1B FAIL: gap_pct@row {i} = {} outside [-5, 5]",
+                r.gap_pct
+            );
+            assert!(
+                r.drawdown_from_50d_high >= -5.0 && r.drawdown_from_50d_high <= 5.0,
+                "1B FAIL: dd@row {i} = {} outside [-5, 5]",
+                r.drawdown_from_50d_high
+            );
+        }
+
+        // At the tail of a 10^12 ramp, trend_slope unclipped would be
+        // ln(sma50[79]/sma50[59]) ≈ ln(1e12 * 79/(60+79)) ≈ 11.5 — far past
+        // the clip bound. With clipping it must equal exactly 5.0.
+        let trend_at_79 = rows[79].trend_slope;
+        assert!(
+            (trend_at_79 - 5.0).abs() < 1e-9,
+            "1B FAIL: trend_slope@79 = {trend_at_79} should be clipped to exactly 5.0"
+        );
+
+        // Bounded features must NOT be modified by the clip pass.
+        assert!(rows[79].rsi_14 >= 0.0 && rows[79].rsi_14 <= 100.0);
+        assert!(rows[79].trend_adx >= 0.0 && rows[79].trend_adx <= 100.0);
+        assert!(rows[79].tlt_corr_20d >= -1.0 && rows[79].tlt_corr_20d <= 1.0);
+    }
+
+    /// 1D: `EquityNormStats::normalize` applies per-feature MAD floors
+    /// (notebook cell 10 MAD_FLOORS). When MAD < floor, scale uses the floor.
+    #[test]
+    fn parity_1d_mad_floors_prevent_extreme_z_scores() {
+        // All MADs = 0 — every dimension must hit the floor, not collapse.
+        let zero_mad_stats = EquityNormStats {
+            median: [0.0; 8],
+            mad: [0.0; 8],
+        };
+        let row = EquityFeatureRow {
+            timestamp: 0,
+            trend_slope: 1.0,
+            trend_adx: 50.0,
+            rsi_14: 70.0,
+            vix_regime: 1.0,
+            tlt_corr_20d: 0.5,
+            rvol_20d: 2.0,
+            gap_pct: 0.05,
+            drawdown_from_50d_high: -0.1,
+        };
+        let out = zero_mad_stats.normalize(&row);
+        for (i, v) in out.iter().enumerate() {
+            assert!(v.is_finite(), "1D FAIL: normalized[{i}] = {v} is NaN/Inf");
+        }
+        // Upper bound on |z|: |raw_i| / (1.4826 * floor_i).
+        let raw = row.to_array();
+        let mut max_expected = 0.0_f64;
+        for i in 0..8 {
+            let scale = 1.4826 * EQ_MAD_FLOORS[i];
+            if scale > 1e-12 {
+                let z = raw[i].abs() / scale;
+                if z > max_expected {
+                    max_expected = z;
+                }
+            }
+        }
+        let actual_max = out.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        assert!(
+            actual_max <= max_expected + 1e-9,
+            "1D FAIL: max |z| = {actual_max} exceeds floor-bound {max_expected}"
+        );
+
+        // Sanity: when MAD > floor, the raw MAD is used (floor is ignored).
+        let big_mad_stats = EquityNormStats {
+            median: [0.0; 8],
+            mad: [1.0; 8],
+        };
+        let out2 = big_mad_stats.normalize(&row);
+        let trend_z = out2[0];
+        let expected = 1.0 / (1.4826 * 1.0);
+        assert!(
+            (trend_z - expected).abs() < 1e-9,
+            "1D FAIL: when MAD=1.0 > floor=0.005, scale must use MAD. got {trend_z}, expected {expected}"
+        );
     }
 }

@@ -32,6 +32,10 @@ use crate::strategy::{self, EquityStrategyParams, EquitySignalInput, Position};
 pub struct EquityScheduler {
     pool: DbPool,
     symbol: String,
+    /// Model id (registry UUID, or "bootstrap-default") for §8 telemetry attribution.
+    model_id: String,
+    /// Canonical "PRIMARY/INVERSE" label, e.g. "QQQ/PSQ".
+    pair: String,
     bridge: Option<ZmqBridge>,
     norm_stats: EquityNormStats,
     feature_window_size: usize,
@@ -44,12 +48,17 @@ pub struct EquityScheduler {
     /// lock between cycles.
     executor: Arc<RwLock<ExecutorKind>>,
     tx: Option<TelemetrySender>,
+    /// Event logger for unified event persistence.
+    event_logger: Option<std::sync::Arc<crate::event::EventLogger>>,
 }
 
 impl EquityScheduler {
+    #[allow(clippy::too_many_arguments)]
     pub async fn new(
         pool: DbPool,
         symbol: String,
+        model_id: String,
+        pair: String,
         zmq_endpoint: &str,
         norm_stats: EquityNormStats,
         feature_window_size: usize,
@@ -57,11 +66,14 @@ impl EquityScheduler {
         trading_mode: Arc<RwLock<TradingMode>>,
         executor: Arc<RwLock<ExecutorKind>>,
         tx: Option<TelemetrySender>,
+        event_logger: Option<std::sync::Arc<crate::event::EventLogger>>,
     ) -> Result<Self> {
         let bridge = ZmqBridge::connect(zmq_endpoint).await?;
         Ok(Self {
             pool,
             symbol,
+            model_id,
+            pair,
             bridge: Some(bridge),
             norm_stats,
             feature_window_size,
@@ -70,7 +82,18 @@ impl EquityScheduler {
             trading_mode,
             executor,
             tx,
+            event_logger,
         })
+    }
+
+    /// Read-only accessor used by tests + the executor wiring.
+    pub fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    /// Read-only accessor used by tests + the executor wiring.
+    pub fn pair(&self) -> &str {
+        &self.pair
     }
 
     /// Poll loop — checks for new daily candles every 5 minutes.
@@ -203,9 +226,24 @@ impl EquityScheduler {
             "equity prediction persisted"
         );
 
+        // Emit unified event.
+        if let Some(logger) = &self.event_logger {
+            logger
+                .emit_for_model(
+                    crate::event::EngineEvent::prediction_persisted(
+                        pred.pred_1d, pred.pred_5d, pred.pred_21d, regime,
+                    ),
+                    &self.model_id,
+                    Some(&self.pair),
+                )
+                .await;
+        }
+
         // Publish telemetry event for any connected control-room clients.
         if let Some(tx) = &self.tx {
             let _ = tx.send(TelemetryEvent::PredictionUpdate {
+                model_id: self.model_id.clone(),
+                pair: self.pair.clone(),
                 pred_1d: Some(pred.pred_1d),
                 pred_5d: Some(pred.pred_5d),
                 pred_21d: Some(pred.pred_21d),
@@ -214,6 +252,20 @@ impl EquityScheduler {
         }
 
         self.last_processed_ts = Some(candle_ts);
+
+        // --- Sentiment refresh (§3B) ---
+        // Fetch the latest sentiment for the primary symbol and persist it
+        // to the cache. This is best-effort: failures are logged but do not
+        // block strategy evaluation.
+        if let Err(e) = crate::data::sentiment::fetch_sentiment(&self.pool, &self.symbol).await {
+            warn!(
+                model_id = %self.model_id,
+                pair = %self.pair,
+                symbol = %self.symbol,
+                error = %e,
+                "sentiment refresh failed"
+            );
+        }
 
         // --- Strategy evaluation ---
         if let Err(e) = self.evaluate_and_execute_strategy(candle_ts, pred, &closes, sma, sma_valid).await {
@@ -251,7 +303,32 @@ impl EquityScheduler {
         };
 
         let params = self.strategy_params.read().await;
-        let new_pos = strategy::next_equity_position(current_pos, &input, &params);
+        let raw_pos = strategy::next_equity_position(current_pos, &input, &params);
+
+        // Fetch the latest sentiment for the primary symbol. If the cache is
+        // empty or the query fails, fall back to a neutral stub so the
+        // overlay is a no-op.
+        let (sentiment_score, article_count) = match db::latest_sentiment(&self.pool, &self.symbol).await {
+            Ok(Some((score, buzz))) => (score, buzz),
+            Ok(None) => (0.5, 0),
+            Err(e) => {
+                warn!(
+                    model_id = %self.model_id,
+                    pair = %self.pair,
+                    symbol = %self.symbol,
+                    error = %e,
+                    "failed to read latest sentiment"
+                );
+                (0.5, 0)
+            }
+        };
+
+        let new_pos = strategy::apply_sentiment_overlay(
+            raw_pos,
+            sentiment_score,
+            article_count,
+            &params,
+        );
         drop(params);
 
         let regime: i64 = if sma_valid {
@@ -269,8 +346,6 @@ impl EquityScheduler {
             regime,
             sma,
         ).await?;
-
-        db::save_position(&self.pool, new_pos.as_i64()).await?;
 
         if new_pos != current_pos {
             // Phase 3.4: read the current trading mode + executor at the start
@@ -295,11 +370,37 @@ impl EquityScheduler {
                                     pnl = fill.realized_pnl,
                                     "equity trade executed"
                                 );
+                                // Emit unified event.
+                                if let Some(logger) = &self.event_logger {
+                                    let side_str = match fill.side {
+                                        crate::exec::TradeSide::Buy => "buy",
+                                        crate::exec::TradeSide::Sell => "sell",
+                                    };
+                                    logger
+                                        .emit_for_model(
+                                            crate::event::EngineEvent::trade_fill(
+                                                side_str,
+                                                &fill.symbol,
+                                                fill.qty,
+                                                fill.price,
+                                                fill.fee,
+                                                fill.realized_pnl,
+                                            ),
+                                            &self.model_id,
+                                            Some(&self.pair),
+                                        )
+                                        .await;
+                                }
                             }
+
+                            // Commit position only after trade record succeeds.
+                            db::save_position(&self.pool, new_pos.as_i64()).await?;
 
                             // Publish PnL tick after trade execution.
                             if let Some(tx) = &self.tx {
                                 let _ = tx.send(TelemetryEvent::PnlTick {
+                                    model_id: self.model_id.clone(),
+                                    pair: self.pair.clone(),
                                     realized_pnl: total_pnl,
                                     unrealized_pnl: 0.0,
                                     position: format!("{}", new_pos).to_lowercase(),
@@ -335,9 +436,35 @@ impl EquityScheduler {
                                     pnl = fill.realized_pnl,
                                     "equity LIVE trade executed"
                                 );
+                                // Emit unified event.
+                                if let Some(logger) = &self.event_logger {
+                                    let side_str = match fill.side {
+                                        crate::exec::TradeSide::Buy => "buy",
+                                        crate::exec::TradeSide::Sell => "sell",
+                                    };
+                                    logger
+                                        .emit_for_model(
+                                            crate::event::EngineEvent::trade_fill(
+                                                side_str,
+                                                &fill.symbol,
+                                                fill.qty,
+                                                fill.price,
+                                                fill.fee,
+                                                fill.realized_pnl,
+                                            ),
+                                            &self.model_id,
+                                            Some(&self.pair),
+                                        )
+                                        .await;
+                                }
                             }
+
+                            // Commit position only after trade record succeeds.
+                            db::save_position(&self.pool, new_pos.as_i64()).await?;
                             if let Some(tx) = &self.tx {
                                 let _ = tx.send(TelemetryEvent::PnlTick {
+                                    model_id: self.model_id.clone(),
+                                    pair: self.pair.clone(),
                                     realized_pnl: total_pnl,
                                     unrealized_pnl: 0.0,
                                     position: format!("{}", new_pos).to_lowercase(),
@@ -454,6 +581,8 @@ mod tests {
         EquityScheduler {
             pool,
             symbol: "QQQ".to_string(),
+            model_id: "test-legacy".to_string(),
+            pair: "QQQ/PSQ".to_string(),
             bridge: None,
             norm_stats: test_norm_stats(),
             feature_window_size: 10,
@@ -462,6 +591,7 @@ mod tests {
             trading_mode: Arc::new(RwLock::new(TradingMode::Paper)),
             executor: Arc::new(RwLock::new(executor)),
             tx: None,
+            event_logger: None,
         }
     }
 

@@ -1,18 +1,24 @@
 pub mod cboe;
+pub mod finnhub;
 pub mod fred;
 pub mod moomoo;
 pub mod sentiment;
 pub mod yahoo;
 
 use anyhow::{Context, Result};
+use chrono::Timelike;
 use tracing::{debug, info, warn};
 
 use crate::db::DbPool;
 
 /// Symbols pulled from Yahoo Finance / Moomoo for the equities engine.
-/// QQQ (the trade target) + key constituents + cross-asset ETFs.
+/// QQQ (the trade target) + its inverse (PSQ) + key constituents +
+/// cross-asset ETFs. NVDA + NVDD (DailyNVDA Bear ETF, the short leg for
+/// the NVDA model) are included so both model pairs have data.
 pub const EQUITY_SYMBOLS: &[&str] = &[
-    "QQQ", "AAPL", "MSFT", "NVDA", "GOOG", "AMZN", "META", "TSLA", "TLT", "GLD", "UUP",
+    "QQQ", "PSQ",
+    "NVDA", "NVDD",
+    "AAPL", "MSFT", "GOOG", "AMZN", "META", "TSLA", "TLT", "GLD", "UUP",
 ];
 
 /// Macro series (stored in `equity_candles` with `$` prefixes).
@@ -97,16 +103,63 @@ pub async fn backfill_equities(pool: &DbPool, stale_threshold_secs: i64) -> Resu
 ///
 /// Daily cadence is appropriate for daily bars — no streaming feed needed.
 pub async fn run_equities_ingestion(pool: DbPool) -> Result<()> {
-    // --- 1. Daily equities top-up (02:00 local-ish, every 24h) ---
+    // --- 1. Daily equities top-up (dual cadence) ---
+    //
+    // US equity markets close at 21:30 UTC (16:00 ET). Two runs per day
+    // ensures the Friday close is captured before the weekend gap and the
+    // Monday pre-market has fresh data:
+    //
+    //   22:00 UTC  — post-market catchup (30 min after close, captures today's bar)
+    //   07:00 UTC  — pre-market safety net (2.5h before open)
+    //
+    // On startup the first tick fires after a short settling delay so the
+    // initial backfill can complete without racing. Subsequent ticks run at
+    // the UTC-wall-clock targets above.
+    //
+    // 22:00 UTC / 07:00 UTC in seconds from midnight: 79200 / 25200
+    const POST_CLOSE_SECS: u64 = 22 * 3600; // 22:00 UTC
+    const PRE_OPEN_SECS: u64 = 7 * 3600;    // 07:00 UTC
+
     let topup_pool = pool.clone();
     tokio::spawn(async move {
-        // Initial short delay so the startup backfill settles first.
-        let start =
-            tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        // Initial delay so startup backfill settles first.
+        let start = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(60);
         let mut interval =
             tokio::time::interval_at(start, std::time::Duration::from_secs(24 * 3_600));
+        let mut ticks_since_start = 0u64;
+
         loop {
             interval.tick().await;
+            ticks_since_start += 1;
+
+            // On the first tick just run immediately (covers cold-start).
+            // After that, gate on UTC wall-clock so we always land near
+            // the intended post-close / pre-open windows regardless of
+            // when the engine was started.
+            if ticks_since_start == 1 {
+                tracing::info!("equities top-up: cold-start run");
+            } else {
+                let now = chrono::Utc::now();
+                let secs_from_midnight = (now.hour() * 3600 + now.minute() * 60) as u64;
+                let post_close_diff = (secs_from_midnight as i64
+                    - POST_CLOSE_SECS as i64).abs();
+                let pre_open_diff = (secs_from_midnight as i64
+                    - PRE_OPEN_SECS as i64).abs();
+                // Only run if within 30 min of a target window
+                if post_close_diff > 1800 && pre_open_diff > 1800 {
+                    tracing::debug!(
+                        secs_from_midnight,
+                        "equities top-up: outside target window, skipping"
+                    );
+                    continue;
+                }
+                tracing::info!(
+                    now = %now.format("%H:%M UTC"),
+                    "equities top-up: scheduled run"
+                );
+            }
+
             if let Err(e) = backfill_equities(&topup_pool, 18 * 3600).await {
                 tracing::error!(error = %e, "equities daily top-up failed");
             }
@@ -114,21 +167,42 @@ pub async fn run_equities_ingestion(pool: DbPool) -> Result<()> {
     });
 
     // --- 2. Daily retention prune (keep 5y of daily bars) ---
-    let retention_pool = pool.clone();
-    tokio::spawn(async move {
-        let start =
-            tokio::time::Instant::now() + std::time::Duration::from_secs(300);
-        let mut interval =
-            tokio::time::interval_at(start, std::time::Duration::from_secs(24 * 3_600));
-        loop {
-            interval.tick().await;
-            match prune_equity_history(&retention_pool).await {
-                Ok(n) if n > 0 => info!(pruned = n, "equity retention: removed old rows"),
-                Ok(_) => {}
-                Err(e) => tracing::warn!("equity retention prune error: {e:#}"),
+        let retention_pool = pool.clone();
+        tokio::spawn(async move {
+            let start =
+                tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+            let mut interval =
+                tokio::time::interval_at(start, std::time::Duration::from_secs(24 * 3600));
+            loop {
+                interval.tick().await;
+                match prune_equity_history(&retention_pool).await {
+                    Ok(n) if n > 0 => info!(pruned = n, "equity retention: removed old rows"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("equity retention prune error: {e:#}"),
+                }
             }
-        }
-    });
+        });
+
+        // --- 3. Daily event archival (keep retention_days of active events) ---
+        let archive_pool = pool.clone();
+        let events_retention_days = std::env::var("EVENTS_RETENTION_DAYS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(60);
+        tokio::spawn(async move {
+            let start =
+                tokio::time::Instant::now() + std::time::Duration::from_secs(600);
+            let mut interval =
+                tokio::time::interval_at(start, std::time::Duration::from_secs(24 * 3600));
+            loop {
+                interval.tick().await;
+                match crate::archive::archive_old_events(&archive_pool, events_retention_days).await {
+                    Ok(n) if n > 0 => info!(archived = n, "event archival complete"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "event archival failed"),
+                }
+            }
+        });
 
     // Block the process on an inert future so the supervisor owns the main thread.
     // A Ctrl-C / process kill is the intended shutdown.

@@ -20,6 +20,14 @@ async fn test_pool() -> db::DbPool {
 
 fn test_state(pool: db::DbPool) -> State<AppState> {
     let (tx, _rx) = tokio::sync::broadcast::channel(64);
+    let trading_mode = std::sync::Arc::new(tokio::sync::RwLock::new(
+        crate::config::TradingMode::Paper,
+    ));
+    let event_logger = std::sync::Arc::new(crate::event::EventLogger::new(
+        pool.clone(),
+        Some(tx.clone()),
+        trading_mode.clone(),
+    ));
     let strategy_params = std::sync::Arc::new(tokio::sync::RwLock::new(
         strategy::EquityStrategyParams {
             entry_threshold: 0.005,
@@ -29,16 +37,23 @@ fn test_state(pool: db::DbPool) -> State<AppState> {
             short_entry_threshold: -0.004,
             short_exit_threshold: 0.001,
             pred_5d_filter: true,
+            enable_sentiment_overlay: false,
+            sentiment_reduce_threshold: -0.5,
+            sentiment_exit_threshold: -0.8,
+            sentiment_min_articles: 15,
         },
     ));
     State(AppState {
         pool,
-        trading_mode: std::sync::Arc::new(tokio::sync::RwLock::new(
-            crate::config::TradingMode::Paper,
-        )),
+        trading_mode,
         strategy_params,
+        strategy_params_by_model: std::sync::Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashMap::new(),
+        )),
         symbol: "BTC/USD".to_string(),
+        short_symbol: "PSQ".to_string(),
         tx,
+        event_logger,
         parity_marker_path: std::env::temp_dir()
             .join("parity_marker_test_default.json")
             .to_string_lossy()
@@ -47,6 +62,7 @@ fn test_state(pool: db::DbPool) -> State<AppState> {
         totp_secret: String::new(),
         zmq_endpoint: "tcp://127.0.0.1:5555".to_string(),
         norm_stats_path: String::new(),
+        advisor: None,
     })
 }
 
@@ -59,8 +75,8 @@ async fn status_returns_empty_state() {
     assert_eq!(status.symbol, "BTC/USD");
     assert_eq!(status.position, "flat");
     assert_eq!(status.realized_pnl, 0.0);
-    assert!(status.entry_price.is_none());
-    assert!(status.unrealized_pnl.is_none());
+    assert_eq!(status.entry_price, 0.0);
+    assert_eq!(status.unrealized_pnl, 0.0);
     assert!(status.last_candle_ts.is_none());
     assert!(status.pred_1d.is_none());
     assert_eq!(status.staleness_secs, u64::MAX);
@@ -191,7 +207,7 @@ async fn status_reports_unrealized_pnl_for_open_position() {
     db::save_position(&pool, strategy::Position::Long.as_i64())
         .await
         .unwrap();
-    db::insert_trade(&pool, 1_000_000, "buy", 1.0, 100.0, 0.0, 0.0)
+    db::insert_equity_trade(&pool, "BTC/USD", 1_000_000, "buy", 1.0, 100.0, 0.0, 0.0)
         .await
         .unwrap();
     db::upsert_equity_candle(
@@ -212,8 +228,8 @@ async fn status_reports_unrealized_pnl_for_open_position() {
 
     let Json(status) = status::handle_status(test_state(pool)).await.unwrap();
     assert_eq!(status.position, "long");
-    assert!((status.entry_price.unwrap() - 100.0).abs() < 1e-9);
-    assert!((status.unrealized_pnl.unwrap() - 10.0).abs() < 1e-9);
+    assert!((status.entry_price - 100.0).abs() < 1e-9);
+    assert!((status.unrealized_pnl - 10.0).abs() < 1e-9);
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -253,6 +269,7 @@ async fn router_serves_static_files_and_api() {
             parity_max_age_secs: 7 * 24 * 60 * 60,
             moomoo_creds_path: "~/.moomoo/credentials.json".to_string(),
             fred_api_key: "".to_string(),
+            finnhub_api_key: "".to_string(),
             live_executor: "paper".to_string(),
             moomoo_trd_env: "SIMULATE".to_string(),
             totp_secret: String::new(),
@@ -261,7 +278,15 @@ async fn router_serves_static_files_and_api() {
 
         let app = {
             let (tx, _rx) = tokio::sync::broadcast::channel(64);
-            router(pool, &config, tx)
+            let trading_mode = std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::config::TradingMode::Paper,
+            ));
+            let event_logger = std::sync::Arc::new(crate::event::EventLogger::new(
+                pool.clone(),
+                Some(tx.clone()),
+                trading_mode.clone(),
+            ));
+            router(pool, &config, tx, None, event_logger, std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())))
         };
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -314,4 +339,320 @@ async fn router_serves_static_files_and_api() {
 
     std::env::set_current_dir(original_cwd).unwrap();
     result
+}
+
+// ---------------------------------------------------------------------------
+// §8 Models API tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn list_models_returns_empty_when_registry_empty() {
+    let pool = test_pool().await;
+    let Json(models) = models::handle_list_models(test_state(pool)).await.unwrap();
+    assert!(models.is_empty(), "fresh registry should have no models");
+}
+
+#[tokio::test]
+async fn register_then_list_model() {
+    let pool = test_pool().await;
+    let state = test_state(pool.clone());
+
+    let body = models::RegisterModelBody {
+        model_id: "qqq-v1".to_string(),
+        primary_symbol: "QQQ".to_string(),
+        inverse_symbol: "PSQ".to_string(),
+        model_path: "models/qqq_v1.txt".to_string(),
+        norm_stats_path: "models/norm_stats_qqq.json".to_string(),
+        budget_usd: 10_000.0,
+        notes: Some("test model".to_string()),
+    };
+    let (status, Json(model)) =
+        models::handle_register_model(state, axum::Json(body)).await.unwrap();
+    assert_eq!(status, axum::http::StatusCode::CREATED);
+    assert_eq!(model.model_id, "qqq-v1");
+    assert_eq!(model.primary_symbol, "QQQ");
+    assert_eq!(model.inverse_symbol, "PSQ");
+    assert!(model.enabled);
+
+    // List should now contain 1 model.
+    let Json(models) = models::handle_list_models(test_state(pool)).await.unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].model_id, "qqq-v1");
+}
+
+#[tokio::test]
+async fn set_enabled_toggles_flag() {
+    let pool = test_pool().await;
+    let state = test_state(pool.clone());
+
+    let body = models::RegisterModelBody {
+        model_id: "nvda-v1".to_string(),
+        primary_symbol: "NVDA".to_string(),
+        inverse_symbol: "NVDD".to_string(),
+        model_path: "models/nvda_v1.txt".to_string(),
+        norm_stats_path: "models/norm_stats_nvda.json".to_string(),
+        budget_usd: 5_000.0,
+        notes: None,
+    };
+    models::handle_register_model(state, axum::Json(body))
+        .await
+        .unwrap();
+
+    // Disable it.
+    let Json(model) = models::handle_set_enabled(
+        test_state(pool.clone()),
+        axum::extract::Path("nvda-v1".to_string()),
+        axum::Json(models::SetEnabledBody { enabled: false }),
+    )
+    .await
+    .unwrap();
+    assert!(!model.enabled);
+
+    // Re-enable.
+    let Json(model) = models::handle_set_enabled(
+        test_state(pool.clone()),
+        axum::extract::Path("nvda-v1".to_string()),
+        axum::Json(models::SetEnabledBody { enabled: true }),
+    )
+    .await
+    .unwrap();
+    assert!(model.enabled);
+}
+
+#[tokio::test]
+async fn set_enabled_returns_404_for_unknown_model() {
+    let pool = test_pool().await;
+    let result = models::handle_set_enabled(
+        test_state(pool),
+        axum::extract::Path("nonexistent".to_string()),
+        axum::Json(models::SetEnabledBody { enabled: true }),
+    )
+    .await;
+    assert!(result.is_err());
+    let (status, _msg) = result.unwrap_err();
+    assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// §8.6 Per-model strategy-config tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn strategy_config_get_without_model_id_uses_default() {
+    let pool = test_pool().await;
+    let state = test_state(pool);
+    let Json(resp) = strategy_config::handle_get(
+        state,
+        axum::extract::Query(strategy_config::ModelIdQuery { model_id: None }),
+    )
+    .await
+    .unwrap();
+    assert!(resp.model_id.is_none(), "no model_id should resolve to default");
+    assert_eq!(resp.entry_threshold, 0.005);
+}
+
+#[tokio::test]
+async fn strategy_config_get_with_unknown_model_id_falls_back_to_default() {
+    let pool = test_pool().await;
+    let state = test_state(pool);
+    let Json(resp) = strategy_config::handle_get(
+        state,
+        axum::extract::Query(strategy_config::ModelIdQuery {
+            model_id: Some("nonexistent".to_string()),
+        }),
+    )
+    .await
+    .unwrap();
+    // Should fall back to default, model_id in response should be None.
+    assert!(resp.model_id.is_none());
+}
+
+#[tokio::test]
+async fn strategy_config_get_with_known_model_id_returns_per_model_params() {
+    let pool = test_pool().await;
+    let state = test_state(pool);
+
+    // Register a model and insert a per-model params entry with a custom threshold.
+    db::register_model(
+        &state.pool,
+        "test-q",
+        "QQQ",
+        "PSQ",
+        "models/q.txt",
+        "models/norm_q.json",
+        10_000.0,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let custom_params = std::sync::Arc::new(tokio::sync::RwLock::new(
+        crate::strategy::EquityStrategyParams {
+            entry_threshold: 0.015,
+            exit_threshold: -0.005,
+            sma_window: 5,
+            enable_shorting: true,
+            short_entry_threshold: -0.008,
+            short_exit_threshold: 0.002,
+            pred_5d_filter: false,
+            enable_sentiment_overlay: false,
+            sentiment_reduce_threshold: -0.5,
+            sentiment_exit_threshold: -0.8,
+            sentiment_min_articles: 15,
+        },
+    ));
+    state
+        .strategy_params_by_model
+        .write()
+        .await
+        .insert("test-q".to_string(), custom_params);
+
+    let Json(resp) = strategy_config::handle_get(
+        state,
+        axum::extract::Query(strategy_config::ModelIdQuery {
+            model_id: Some("test-q".to_string()),
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(resp.model_id, Some("test-q".to_string()));
+    assert_eq!(resp.entry_threshold, 0.015);
+    assert_eq!(resp.sma_window, 5);
+    assert!(resp.enable_shorting);
+}
+
+#[tokio::test]
+async fn strategy_config_put_with_model_id_updates_per_model_params() {
+    let pool = test_pool().await;
+    let state = test_state(pool.clone());
+
+    db::register_model(
+        &state.pool,
+        "test-nvda",
+        "NVDA",
+        "NVDD",
+        "models/nvda.txt",
+        "models/norm_nvda.json",
+        5_000.0,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Insert default per-model params.
+    let custom_params = std::sync::Arc::new(tokio::sync::RwLock::new(
+        crate::strategy::EquityStrategyParams {
+            entry_threshold: 0.005,
+            exit_threshold: -0.0017,
+            sma_window: 3,
+            enable_shorting: false,
+            short_entry_threshold: -0.004,
+            short_exit_threshold: 0.001,
+            pred_5d_filter: true,
+            enable_sentiment_overlay: false,
+            sentiment_reduce_threshold: -0.5,
+            sentiment_exit_threshold: -0.8,
+            sentiment_min_articles: 15,
+        },
+    ));
+    state
+        .strategy_params_by_model
+        .write()
+        .await
+        .insert("test-nvda".to_string(), custom_params.clone());
+
+    // PUT to change entry_threshold for this model only.
+    let update = strategy_config::StrategyConfigUpdate {
+        entry_threshold: Some(0.012),
+        exit_threshold: None,
+        sma_window: None,
+        pred_5d_filter: None,
+        enable_shorting: None,
+        short_entry_threshold: None,
+        short_exit_threshold: None,
+        enable_sentiment_overlay: None,
+        sentiment_reduce_threshold: None,
+        sentiment_exit_threshold: None,
+        sentiment_min_articles: None,
+    };
+    let Json(resp) = strategy_config::handle_put(
+        state.clone(),
+        axum::extract::Query(strategy_config::ModelIdQuery {
+            model_id: Some("test-nvda".to_string()),
+        }),
+        axum::Json(update),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(resp.model_id, Some("test-nvda".to_string()));
+    assert_eq!(resp.entry_threshold, 0.012);
+
+    // Verify the underlying Arc<RwLock<>> was updated (the one the scheduler holds).
+    let sp = custom_params.read().await;
+    assert_eq!(sp.entry_threshold, 0.012);
+}
+
+#[tokio::test]
+async fn strategy_config_sentiment_overlay_update_isolated_per_model() {
+    let pool = test_pool().await;
+    let state = test_state(pool);
+
+    // Insert default per-model params.
+    let custom_params = std::sync::Arc::new(tokio::sync::RwLock::new(
+        crate::strategy::EquityStrategyParams {
+            entry_threshold: 0.005,
+            exit_threshold: -0.0017,
+            sma_window: 3,
+            enable_shorting: false,
+            short_entry_threshold: -0.004,
+            short_exit_threshold: 0.001,
+            pred_5d_filter: true,
+            enable_sentiment_overlay: false,
+            sentiment_reduce_threshold: -0.5,
+            sentiment_exit_threshold: -0.8,
+            sentiment_min_articles: 15,
+        },
+    ));
+    state
+        .strategy_params_by_model
+        .write()
+        .await
+        .insert("test-sentiment".to_string(), custom_params.clone());
+
+    let update = strategy_config::StrategyConfigUpdate {
+        entry_threshold: None,
+        exit_threshold: None,
+        sma_window: None,
+        pred_5d_filter: None,
+        enable_shorting: None,
+        short_entry_threshold: None,
+        short_exit_threshold: None,
+        enable_sentiment_overlay: Some(true),
+        sentiment_reduce_threshold: Some(-0.55),
+        sentiment_exit_threshold: Some(-0.85),
+        sentiment_min_articles: Some(20),
+    };
+    let Json(resp) = strategy_config::handle_put(
+        state.clone(),
+        axum::extract::Query(strategy_config::ModelIdQuery {
+            model_id: Some("test-sentiment".to_string()),
+        }),
+        axum::Json(update),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(resp.model_id, Some("test-sentiment".to_string()));
+    assert!(resp.enable_sentiment_overlay);
+    assert_eq!(resp.sentiment_reduce_threshold, -0.55);
+    assert_eq!(resp.sentiment_exit_threshold, -0.85);
+    assert_eq!(resp.sentiment_min_articles, 20);
+
+    let sp = custom_params.read().await;
+    assert!(sp.enable_sentiment_overlay);
+    assert_eq!(sp.sentiment_reduce_threshold, -0.55);
+    assert_eq!(sp.sentiment_exit_threshold, -0.85);
+    assert_eq!(sp.sentiment_min_articles, 20);
 }

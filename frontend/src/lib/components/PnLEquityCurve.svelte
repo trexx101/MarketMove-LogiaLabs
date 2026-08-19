@@ -1,11 +1,20 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
-  import { status } from '../stores.js';
+  import { status, activeModelId, models } from '../stores.js';
+  import { fetchEquityTrades } from '../api.js';
 
   let canvas;
   let container;
   let pnlHistory = [];
   let resizeObserver;
+  let lastModelId = null;
+
+  $: if ($activeModelId && $activeModelId !== lastModelId) {
+    lastModelId = $activeModelId;
+    pnlHistory = [];
+    loadHistory();
+    draw();
+  }
 
   $: if ($status && $status.realized_pnl != null) {
     const ts = $status.last_candle_ts || Date.now();
@@ -17,7 +26,31 @@
     }
   }
 
+  async function loadHistory() {
+    try {
+      const m = $models.find((mm) => mm.model_id === $activeModelId);
+      const sym = m?.primary_symbol || '*';
+      const td = await fetchEquityTrades(sym, 200);
+      if (td.trades && td.trades.length > 0) {
+        const sorted = [...td.trades].reverse();
+        let cum = 0;
+        const points = [];
+        for (const t of sorted) {
+          cum += (t.realized_pnl || 0);
+          points.push({ ts: t.ts, pnl: cum });
+        }
+        if (points.length > 0) {
+          pnlHistory = points;
+          draw();
+        }
+      }
+    } catch (e) {
+      console.error('Failed to load PnL history:', e);
+    }
+  }
+
   onMount(() => {
+    loadHistory();
     draw();
     resizeObserver = new ResizeObserver(() => draw());
     if (container) resizeObserver.observe(container);
