@@ -46,7 +46,8 @@
   function fmtTime(ts) {
     if (!ts) return '—';
     try {
-      return new Date(ts).toLocaleString();
+      // API returns seconds; normalize to ms
+      return new Date(ts < 1e12 ? ts * 1000 : ts).toLocaleString();
     } catch {
       return String(ts);
     }
@@ -55,7 +56,7 @@
   function fmtTimeShort(ts) {
     if (!ts) return '—';
     try {
-      const d = new Date(ts);
+      const d = new Date(ts < 1e12 ? ts * 1000 : ts);
       return d.toLocaleDateString().slice(0, 5) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     } catch {
       return String(ts);
