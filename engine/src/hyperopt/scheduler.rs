@@ -2,17 +2,22 @@
 //!
 //! Runs post-market, CPU-throttled, hard-stop before next open.
 //! Never runs during market hours.
+//!
+//! Supports timezone-aware scheduling: configure local market hours and timezone offset,
+//! and the scheduler handles UTC conversion internally.
 
 use chrono::{DateTime, Duration, NaiveTime, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Scheduler configuration
+/// Scheduler configuration (timezone-aware)
 #[derive(Debug, Clone)]
 pub struct SchedulerConfig {
-    /// Market open time (ET) as UTC offset
-    pub market_open_utc: NaiveTime,
-    /// Market close time (ET) as UTC offset
-    pub market_close_utc: NaiveTime,
+    /// Timezone offset in hours (e.g., +8 for Malaysia, -5 for ET)
+    pub timezone_offset_hours: i32,
+    /// Market open time in local timezone
+    pub market_open_local: NaiveTime,
+    /// Market close time in local timezone
+    pub market_close_local: NaiveTime,
     /// Post-market buffer (minutes after close)
     pub post_market_buffer_mins: i64,
     /// Pre-market buffer (minutes before open)
@@ -23,16 +28,42 @@ pub struct SchedulerConfig {
 
 impl Default for SchedulerConfig {
     fn default() -> Self {
-        // ET is UTC-5 (simplified; DST handling would use proper timezone)
-        // 9:30 AM ET = 14:30 UTC
-        // 4:00 PM ET = 21:00 UTC
+        // Default: Malaysia timezone (UTC+8)
+        // US market hours in Malaysia: 9:30 PM - 4:00 AM local
         Self {
-            market_open_utc: NaiveTime::from_hms_opt(14, 30, 0).unwrap(),
-            market_close_utc: NaiveTime::from_hms_opt(21, 0, 0).unwrap(),
+            timezone_offset_hours: 8,
+            market_open_local: NaiveTime::from_hms_opt(21, 30, 0).unwrap(),
+            market_close_local: NaiveTime::from_hms_opt(4, 0, 0).unwrap(),
             post_market_buffer_mins: 30,
             pre_market_buffer_mins: 30,
             max_run_hours: 8,
         }
+    }
+}
+
+impl SchedulerConfig {
+    /// Convert local time to UTC
+    pub fn local_to_utc(&self, local: NaiveTime) -> NaiveTime {
+        let offset_seconds = (self.timezone_offset_hours as i64) * 3600;
+        let local_seconds = local.signed_duration_since(
+            NaiveTime::from_hms_opt(0, 0, 0).unwrap()
+        ).num_seconds();
+        let utc_seconds = (local_seconds - offset_seconds).rem_euclid(24 * 3600);
+        NaiveTime::from_hms_opt(
+            (utc_seconds / 3600) as u32,
+            ((utc_seconds % 3600) / 60) as u32,
+            (utc_seconds % 60) as u32,
+        ).unwrap()
+    }
+
+    /// Get market open in UTC
+    pub fn market_open_utc(&self) -> NaiveTime {
+        self.local_to_utc(self.market_open_local)
+    }
+
+    /// Get market close in UTC
+    pub fn market_close_utc(&self) -> NaiveTime {
+        self.local_to_utc(self.market_close_local)
     }
 }
 
@@ -64,9 +95,11 @@ impl NightlyScheduler {
         // Convert times to seconds since midnight for easier arithmetic
         let midnight = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
         let current_secs = time_of_day.signed_duration_since(midnight).num_seconds();
-        let earliest_start_secs = self.config.market_close_utc.signed_duration_since(midnight).num_seconds()
+        let market_close_utc = self.config.market_close_utc();
+        let market_open_utc = self.config.market_open_utc();
+        let earliest_start_secs = market_close_utc.signed_duration_since(midnight).num_seconds()
             + self.config.post_market_buffer_mins * 60;
-        let latest_start_secs = self.config.market_open_utc.signed_duration_since(midnight).num_seconds()
+        let latest_start_secs = market_open_utc.signed_duration_since(midnight).num_seconds()
             - self.config.pre_market_buffer_mins * 60;
 
         // Check if we're in the run window (handles midnight wrap)
@@ -109,7 +142,15 @@ impl NightlyScheduler {
     /// Check if current time is during market hours
     pub fn is_market_hours(&self, now: DateTime<Utc>) -> bool {
         let time_of_day = now.time();
-        time_of_day >= self.config.market_open_utc && time_of_day < self.config.market_close_utc
+        let market_open_utc = self.config.market_open_utc();
+        let market_close_utc = self.config.market_close_utc();
+        
+        // Handle midnight wrap: if open > close, market spans midnight
+        if market_open_utc > market_close_utc {
+            time_of_day >= market_open_utc || time_of_day < market_close_utc
+        } else {
+            time_of_day >= market_open_utc && time_of_day < market_close_utc
+        }
     }
 
     /// Get next eligible run time
@@ -119,7 +160,8 @@ impl NightlyScheduler {
         // Convert to seconds since midnight
         let midnight = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
         let current_secs = time_of_day.signed_duration_since(midnight).num_seconds();
-        let earliest_start_secs = self.config.market_close_utc.signed_duration_since(midnight).num_seconds()
+        let market_close_utc = self.config.market_close_utc();
+        let earliest_start_secs = market_close_utc.signed_duration_since(midnight).num_seconds()
             + self.config.post_market_buffer_mins * 60;
 
         // Calculate the earliest start time as seconds since midnight
@@ -148,87 +190,151 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_can_run_post_market() {
-        let scheduler = NightlyScheduler::new(SchedulerConfig::default());
+    fn test_timezone_conversion_malaysia() {
+        // Malaysia (UTC+8): 9:30 PM local = 1:30 PM UTC
+        let config = SchedulerConfig {
+            timezone_offset_hours: 8,
+            market_open_local: NaiveTime::from_hms_opt(21, 30, 0).unwrap(),
+            market_close_local: NaiveTime::from_hms_opt(4, 0, 0).unwrap(),
+            ..Default::default()
+        };
         
-        // 5:00 PM ET (1 hour after close) = 22:00 UTC
-        // Window is 21:30 UTC to 14:00 UTC (wraps midnight)
-        let now = Utc.with_ymd_and_hms(2026, 8, 19, 22, 0, 0).unwrap();
+        let open_utc = config.market_open_utc();
+        assert_eq!(open_utc, NaiveTime::from_hms_opt(13, 30, 0).unwrap());
+        
+        let close_utc = config.market_close_utc();
+        assert_eq!(close_utc, NaiveTime::from_hms_opt(20, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn test_timezone_conversion_et() {
+        // ET (UTC-5): 9:30 AM local = 2:30 PM UTC
+        let config = SchedulerConfig {
+            timezone_offset_hours: -5,
+            market_open_local: NaiveTime::from_hms_opt(9, 30, 0).unwrap(),
+            market_close_local: NaiveTime::from_hms_opt(16, 0, 0).unwrap(),
+            ..Default::default()
+        };
+        
+        let open_utc = config.market_open_utc();
+        assert_eq!(open_utc, NaiveTime::from_hms_opt(14, 30, 0).unwrap());
+        
+        let close_utc = config.market_close_utc();
+        assert_eq!(close_utc, NaiveTime::from_hms_opt(21, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn test_can_run_post_market_malaysia() {
+        // Malaysia (UTC+8): market closes 4:00 AM local = 8:00 PM UTC
+        // Post-market buffer: 30 min → window starts 8:30 PM UTC
+        let scheduler = NightlyScheduler::new(SchedulerConfig {
+            timezone_offset_hours: 8,
+            market_open_local: NaiveTime::from_hms_opt(21, 30, 0).unwrap(),
+            market_close_local: NaiveTime::from_hms_opt(4, 0, 0).unwrap(),
+            post_market_buffer_mins: 30,
+            pre_market_buffer_mins: 30,
+            max_run_hours: 8,
+        });
+        
+        // 9:00 PM UTC = 5:00 AM Malaysia (1 hour after close)
+        let now = Utc.with_ymd_and_hms(2026, 8, 19, 21, 0, 0).unwrap();
         let state = scheduler.check_state(now);
         assert_eq!(state, SchedulerState::CanRun);
     }
 
     #[test]
-    fn test_cannot_run_during_market_hours() {
-        let scheduler = NightlyScheduler::new(SchedulerConfig::default());
+    fn test_cannot_run_during_market_hours_malaysia() {
+        // Malaysia (UTC+8): market hours 9:30 PM - 4:00 AM local = 1:30 PM - 8:00 PM UTC
+        let scheduler = NightlyScheduler::new(SchedulerConfig {
+            timezone_offset_hours: 8,
+            market_open_local: NaiveTime::from_hms_opt(21, 30, 0).unwrap(),
+            market_close_local: NaiveTime::from_hms_opt(4, 0, 0).unwrap(),
+            post_market_buffer_mins: 30,
+            pre_market_buffer_mins: 30,
+            max_run_hours: 8,
+        });
         
-        // 12:00 PM ET = 17:00 UTC (during market hours)
-        let now = Utc.with_ymd_and_hms(2026, 8, 19, 17, 0, 0).unwrap();
-        let state = scheduler.check_state(now);
-        assert_eq!(state, SchedulerState::CannotRun);
-    }
-
-    #[test]
-    fn test_cannot_run_pre_market() {
-        let scheduler = NightlyScheduler::new(SchedulerConfig::default());
-        
-        // 10:00 AM ET = 15:00 UTC (during market hours, between market open and post-market window)
+        // 3:00 PM UTC = 11:00 PM Malaysia (during market hours)
         let now = Utc.with_ymd_and_hms(2026, 8, 19, 15, 0, 0).unwrap();
         let state = scheduler.check_state(now);
         assert_eq!(state, SchedulerState::CannotRun);
     }
 
     #[test]
-    fn test_hard_stop_after_max_duration() {
+    fn test_is_market_hours_malaysia() {
         let scheduler = NightlyScheduler::new(SchedulerConfig {
-            max_run_hours: 4,
-            ..Default::default()
+            timezone_offset_hours: 8,
+            market_open_local: NaiveTime::from_hms_opt(21, 30, 0).unwrap(),
+            market_close_local: NaiveTime::from_hms_opt(4, 0, 0).unwrap(),
+            post_market_buffer_mins: 30,
+            pre_market_buffer_mins: 30,
+            max_run_hours: 8,
         });
         
-        // 2:00 AM ET next day = 07:00 UTC (10 hours after window opens at 21:30)
-        // Hard stop = 21:30 + 4h = 01:30 UTC next day
-        // 07:00 UTC > 01:30 UTC → HardStop
-        let now = Utc.with_ymd_and_hms(2026, 8, 20, 7, 0, 0).unwrap();
+        // 3:00 PM UTC = 11:00 PM Malaysia (during market)
+        let during_market = Utc.with_ymd_and_hms(2026, 8, 19, 15, 0, 0).unwrap();
+        assert!(scheduler.is_market_hours(during_market));
+        
+        // 9:00 PM UTC = 5:00 AM Malaysia (after market)
+        let after_market = Utc.with_ymd_and_hms(2026, 8, 19, 21, 0, 0).unwrap();
+        assert!(!scheduler.is_market_hours(after_market));
+    }
+
+    #[test]
+    fn test_hard_stop_after_max_duration() {
+        let scheduler = NightlyScheduler::new(SchedulerConfig {
+            timezone_offset_hours: 8,
+            market_open_local: NaiveTime::from_hms_opt(21, 30, 0).unwrap(),
+            market_close_local: NaiveTime::from_hms_opt(4, 0, 0).unwrap(),
+            post_market_buffer_mins: 30,
+            pre_market_buffer_mins: 30,
+            max_run_hours: 4,
+        });
+        
+        // Window starts 8:30 PM UTC, hard stop = 8:30 PM + 4h = 12:30 AM UTC next day
+        // 2:00 AM UTC > 12:30 AM UTC → HardStop
+        let now = Utc.with_ymd_and_hms(2026, 8, 20, 2, 0, 0).unwrap();
         let state = scheduler.check_state(now);
         assert_eq!(state, SchedulerState::HardStop);
     }
 
     #[test]
-    fn test_is_market_hours() {
-        let scheduler = NightlyScheduler::new(SchedulerConfig::default());
-        
-        // 12:00 PM ET = 17:00 UTC
-        let during_market = Utc.with_ymd_and_hms(2026, 8, 19, 17, 0, 0).unwrap();
-        assert!(scheduler.is_market_hours(during_market));
-        
-        // 6:00 PM ET = 23:00 UTC
-        let after_market = Utc.with_ymd_and_hms(2026, 8, 19, 23, 0, 0).unwrap();
-        assert!(!scheduler.is_market_hours(after_market));
-    }
-
-    #[test]
     fn test_next_run_time_before_window() {
-        let scheduler = NightlyScheduler::new(SchedulerConfig::default());
+        let scheduler = NightlyScheduler::new(SchedulerConfig {
+            timezone_offset_hours: 8,
+            market_open_local: NaiveTime::from_hms_opt(21, 30, 0).unwrap(),
+            market_close_local: NaiveTime::from_hms_opt(4, 0, 0).unwrap(),
+            post_market_buffer_mins: 30,
+            pre_market_buffer_mins: 30,
+            max_run_hours: 8,
+        });
         
-        // 12:00 PM ET = 17:00 UTC (during market)
-        let now = Utc.with_ymd_and_hms(2026, 8, 19, 17, 0, 0).unwrap();
+        // 3:00 PM UTC (during market)
+        let now = Utc.with_ymd_and_hms(2026, 8, 19, 15, 0, 0).unwrap();
         let next = scheduler.next_run_time(now);
         
-        // Should be today at 4:30 PM ET = 21:30 UTC
-        let expected = Utc.with_ymd_and_hms(2026, 8, 19, 21, 30, 0).unwrap();
+        // Should be today at 8:30 PM UTC (30 min after 8:00 PM close)
+        let expected = Utc.with_ymd_and_hms(2026, 8, 19, 20, 30, 0).unwrap();
         assert_eq!(next, expected);
     }
 
     #[test]
     fn test_next_run_time_after_window() {
-        let scheduler = NightlyScheduler::new(SchedulerConfig::default());
+        let scheduler = NightlyScheduler::new(SchedulerConfig {
+            timezone_offset_hours: 8,
+            market_open_local: NaiveTime::from_hms_opt(21, 30, 0).unwrap(),
+            market_close_local: NaiveTime::from_hms_opt(4, 0, 0).unwrap(),
+            post_market_buffer_mins: 30,
+            pre_market_buffer_mins: 30,
+            max_run_hours: 8,
+        });
         
-        // 11:00 PM ET = 04:00 UTC next day (after window, but still in run window)
-        let now = Utc.with_ymd_and_hms(2026, 8, 20, 04, 0, 0).unwrap();
+        // 11:00 PM UTC (after earliest_start at 8:30 PM UTC)
+        let now = Utc.with_ymd_and_hms(2026, 8, 19, 23, 0, 0).unwrap();
         let next = scheduler.next_run_time(now);
         
-        // Should be today at 4:30 PM ET = 21:30 UTC (since we're still in the window)
-        let expected = Utc.with_ymd_and_hms(2026, 8, 20, 21, 30, 0).unwrap();
+        // Should be tomorrow at 8:30 PM UTC (since we're past earliest_start)
+        let expected = Utc.with_ymd_and_hms(2026, 8, 20, 20, 30, 0).unwrap();
         assert_eq!(next, expected);
     }
 }

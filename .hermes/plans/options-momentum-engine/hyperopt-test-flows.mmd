@@ -1,0 +1,90 @@
+flowchart TB
+    subgraph "P5/P6 Hyperopt Pipeline"
+        direction TB
+        
+        subgraph "Scheduler (8 tests)"
+            S1[Timezone Conversion<br/>UTC↔Local]
+            S2[Window Checking<br/>CanRun/CannotRun/HardStop]
+            S3[Market Hours Guard<br/>Never run during trading]
+            S4[Next Run Time<br/>Calculate eligible start]
+        end
+        
+        subgraph "Optimizer (5 tests)"
+            O1[Walk-Forward Splits<br/>Train/Test with embargo]
+            O2[Grid Generation<br/>Single/Multi-param]
+            O3[Parameter Search<br/>Evaluate combinations]
+        end
+        
+        subgraph "Stability (5 tests)"
+            ST1[Neighbor Generation<br/>±10% perturbation]
+            ST2[Stability Check<br/>70% degradation threshold]
+        end
+        
+        subgraph "Candidate Store (5 tests)"
+            CS1[Store Candidate<br/>DB INSERT with equity scope]
+            CS2[Query Candidates<br/>List by equity/status]
+            CS3[Update Status<br/>DB UPDATE]
+            CS4[Get Best<br/>SELECT by IC]
+        end
+        
+        subgraph "Promotion (10 tests)"
+            P1[State Machine<br/>CANDIDATE→PAPER→MICRO→LIVE]
+            P2[Evidence Gates<br/>Trades, IC, Sharpe, Days]
+            P3[DB-Backed Promotion<br/>Read evidence, update status]
+        end
+        
+        subgraph "Tape Replay (5 tests)"
+            TR1[Replay Against Tape<br/>Historical validation]
+            TR2[Metrics Calculation<br/>Drawdown, Sharpe, Win%]
+        end
+        
+        subgraph "Runner (2 tests)"
+            R1[Nightly Orchestration<br/>Scheduler→Optimizer→Store]
+            R2[Multi-Equity Iteration<br/>QQQ, SMH, XLF]
+        end
+    end
+    
+    S1 --> S2
+    S2 --> R1
+    O1 --> O2
+    O2 --> O3
+    O3 --> R1
+    ST1 --> ST2
+    ST2 --> R1
+    R1 --> CS1
+    CS1 --> CS2
+    CS2 --> CS3
+    CS3 --> P1
+    P1 --> P2
+    P2 --> P3
+    TR1 --> TR2
+    TR2 -.->|Pre-MICRO check| P1
+    
+    R2 -.->|Iterates| R1
+    
+    style S1 fill:#e1f5ff
+    style S2 fill:#e1f5ff
+    style S3 fill:#e1f5ff
+    style S4 fill:#e1f5ff
+    
+    style O1 fill:#fff4e1
+    style O2 fill:#fff4e1
+    style O3 fill:#fff4e1
+    
+    style ST1 fill:#ffe1f5
+    style ST2 fill:#ffe1f5
+    
+    style CS1 fill:#e1ffe1
+    style CS2 fill:#e1ffe1
+    style CS3 fill:#e1ffe1
+    style CS4 fill:#e1ffe1
+    
+    style P1 fill:#ffe1e1
+    style P2 fill:#ffe1e1
+    style P3 fill:#ffe1e1
+    
+    style TR1 fill:#f5e1ff
+    style TR2 fill:#f5e1ff
+    
+    style R1 fill:#ffffe1
+    style R2 fill:#ffffe1

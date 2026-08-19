@@ -171,6 +171,7 @@ CREATE TABLE IF NOT EXISTS backtest_results (
 
 CREATE TABLE IF NOT EXISTS strategy_versions (
     id                      TEXT    PRIMARY KEY,
+    equity                  TEXT    NOT NULL DEFAULT 'QQQ',
     family                  TEXT    NOT NULL,
     params_json             TEXT    NOT NULL,
     status                  TEXT    NOT NULL DEFAULT 'CANDIDATE',
@@ -332,9 +333,65 @@ pub async fn open(database_url: &str) -> Result<DbPool> {
     }
 
     migrate_predictions(&pool).await?;
+    migrate_strategy_versions(&pool).await?;
 
     info!("database ready at {database_url}");
     Ok(pool)
+}
+
+/// Add `equity` column to strategy_versions if it doesn't exist.
+pub async fn migrate_strategy_versions(pool: &DbPool) -> Result<()> {
+    let rows = sqlx::query("PRAGMA table_info(strategy_versions)")
+        .fetch_all(pool)
+        .await
+        .context("PRAGMA table_info(strategy_versions)")?;
+
+    let existing: Vec<String> = rows.iter().map(|r| r.get::<String, _>(1)).collect();
+
+    if !existing.iter().any(|name| name == "equity") {
+        let sql = "ALTER TABLE strategy_versions ADD COLUMN equity TEXT NOT NULL DEFAULT 'QQQ'";
+        sqlx::query(sql)
+            .execute(pool)
+            .await
+            .context("adding column equity")?;
+        info!("migrated strategy_versions: added column equity");
+    }
+
+    Ok(())
+}
+
+/// Count strategy versions for a given equity.
+pub async fn count_strategy_versions(pool: &DbPool, equity: &str) -> Result<i64> {
+    let row = sqlx::query(
+        "SELECT COUNT(*) AS n FROM strategy_versions WHERE equity = ?1",
+    )
+    .bind(equity)
+    .fetch_one(pool)
+    .await
+    .context("count_strategy_versions")?;
+    Ok(row.get::<i64, _>("n"))
+}
+
+/// Count strategy versions grouped by status for a given equity.
+pub async fn count_strategy_versions_by_status(
+    pool: &DbPool,
+    equity: &str,
+) -> Result<std::collections::HashMap<String, i64>> {
+    let rows = sqlx::query(
+        "SELECT status, COUNT(*) AS n FROM strategy_versions WHERE equity = ?1 GROUP BY status",
+    )
+    .bind(equity)
+    .fetch_all(pool)
+    .await
+    .context("count_strategy_versions_by_status")?;
+
+    let mut result = std::collections::HashMap::new();
+    for row in rows {
+        let status: String = row.get("status");
+        let count: i64 = row.get("n");
+        result.insert(status, count);
+    }
+    Ok(result)
 }
 
 /// Add nullable `actual_*` columns to the predictions table if they don't exist.

@@ -192,6 +192,7 @@ The Fix: The ExitArbiter needs an explicit loop back to Stage 1 for the remainin
 4. Position sizing module (D20): formula + three caps. Emits `SKIPPED_ENTRY` with reason when any cap binds.
 5. Entry execution: limit at ask (buys), staged analog of the exit ladder (2 stages max — entries are not emergencies; unfilled entry simply cancels).
 6. Wire everything to ExitArbiter ownership at fill: position row created with full entry-basis snapshot (underlying px, spread, slippage budget).
+7. externalize configuration
 
 **Acceptance criteria**
 - Paper trade placed on QQQ through the full pipeline: signal → gate → chain → size → fill → arbiter takes ownership.

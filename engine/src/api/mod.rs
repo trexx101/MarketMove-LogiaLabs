@@ -84,6 +84,10 @@ pub fn router(pool: db::DbPool, config: &Config, tx: ws::TelemetrySender) -> Rou
         .route("/api/strategies", post(crate::strategy_lab::api::handle_save_strategy))
         .route("/api/strategy-config", get(strategy_config::handle_get))
         .route("/api/strategy-config", put(strategy_config::handle_put))
+        .route("/api/hyperopt/:equity/candidates", get(hyperopt::list_candidates))
+        .route("/api/hyperopt/:equity/candidates/:id", get(hyperopt::get_candidate))
+        .route("/api/hyperopt/:equity/promote/:id", post(hyperopt::promote_candidate))
+        .route("/api/hyperopt/:equity/status", get(hyperopt::get_status))
         .route("/api/mode", get(mode::handle_get_mode))
         .route("/api/mode", post(mode::handle_set_mode))
         .route("/api/v1/ws", get(ws::ws_handler))
@@ -117,6 +121,7 @@ mod chart;
 mod equity;
 mod backtest;
 pub mod mode;
+pub mod hyperopt;
 mod quote;
 mod strategy_config;
 
