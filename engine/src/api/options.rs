@@ -191,10 +191,26 @@ pub async fn handle_list_runs(
 
 // ── Tape status ──────────────────────────────────────────────────────────────
 
+/// A heartbeat older than this is considered stale (recorder is supposed to
+/// beat on every healthy tick; Phase 0 recorder beats at least once/minute).
+const HEARTBEAT_STALE_AFTER_SECS: i64 = 120;
+
+#[derive(Serialize)]
+pub struct TapeStatusEntry {
+    #[serde(flatten)]
+    pub meta: db::TapeMeta,
+    /// Seconds since last heartbeat; None if the recorder never beat.
+    pub heartbeat_age_secs: Option<i64>,
+    pub heartbeat_stale: bool,
+}
+
 #[derive(Serialize)]
 pub struct TapeStatusResponse {
-    pub tapes: Vec<db::TapeMeta>,
+    pub tapes: Vec<TapeStatusEntry>,
     pub count: usize,
+    pub healthy: usize,
+    pub stale: usize,
+    pub never_beat: usize,
 }
 
 /// GET /api/options/tape/status
@@ -206,9 +222,30 @@ pub async fn handle_tape_status(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
+    let now = chrono::Utc::now().timestamp_millis();
+    let entries: Vec<TapeStatusEntry> = tapes
+        .into_iter()
+        .map(|meta| {
+            let age = meta.last_heartbeat_ts.map(|ts| (now - ts) / 1000);
+            let stale = age.map(|a| a > HEARTBEAT_STALE_AFTER_SECS).unwrap_or(true);
+            TapeStatusEntry {
+                meta,
+                heartbeat_age_secs: age,
+                heartbeat_stale: stale,
+            }
+        })
+        .collect();
+
+    let never_beat = entries.iter().filter(|e| e.meta.last_heartbeat_ts.is_none()).count();
+    let stale = entries.iter().filter(|e| e.heartbeat_stale).count();
+    let healthy = entries.len() - stale;
+
     Ok(Json(TapeStatusResponse {
-        count: tapes.len(),
-        tapes,
+        count: entries.len(),
+        healthy,
+        stale,
+        never_beat,
+        tapes: entries,
     }))
 }
 
@@ -382,5 +419,91 @@ mod tests {
         let state = options_state(pool);
         let Json(resp) = handle_tape_status(state).await.unwrap();
         assert_eq!(resp.count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_touch_and_staleness() {
+        let pool = options_pool().await;
+
+        // Touch creates the row with a fresh heartbeat
+        db::touch_tape_heartbeat(&pool, "tape-1", "QQQ", "QQQ250919P00450000", r#"{"used": 3}"#)
+            .await
+            .unwrap();
+        let metas = db::list_tape_meta(&pool).await.unwrap();
+        assert_eq!(metas.len(), 1);
+        assert!(metas[0].last_heartbeat_ts.is_some());
+        assert_eq!(metas[0].quota_accounting_json, r#"{"used": 3}"#);
+
+        // Touch again updates in place (no duplicate row)
+        db::touch_tape_heartbeat(&pool, "tape-1", "QQQ", "QQQ250919P00450000", r#"{"used": 4}"#)
+            .await
+            .unwrap();
+        assert_eq!(db::list_tape_meta(&pool).await.unwrap().len(), 1);
+
+        let state = options_state(pool.clone());
+        let Json(resp) = handle_tape_status(state).await.unwrap();
+        assert_eq!(resp.count, 1);
+        assert_eq!(resp.healthy, 1);
+        assert_eq!(resp.stale, 0);
+        assert_eq!(resp.never_beat, 0);
+        assert!(resp.tapes[0].heartbeat_age_secs.unwrap() <= 1);
+
+        // Age the heartbeat past the stale threshold directly
+        let stale_ts = chrono::Utc::now().timestamp_millis() - 300_000; // 5 min ago
+        sqlx::query("UPDATE option_tape_meta SET last_heartbeat_ts = ?1 WHERE id = 'tape-1'")
+            .bind(stale_ts)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let state = options_state(pool);
+        let Json(resp) = handle_tape_status(state).await.unwrap();
+        assert_eq!(resp.stale, 1);
+        assert_eq!(resp.healthy, 0);
+        assert!(resp.tapes[0].heartbeat_stale);
+    }
+
+    #[tokio::test]
+    async fn test_never_beat_counts_as_stale() {
+        let pool = options_pool().await;
+        let now = chrono::Utc::now().timestamp_millis();
+        sqlx::query(
+            "INSERT INTO option_tape_meta (id, underlying, chain_code, quota_accounting_json, created_at)
+             VALUES ('tape-x', 'SMH', 'C', '{}', ?1)",
+        )
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let state = options_state(pool);
+        let Json(resp) = handle_tape_status(state).await.unwrap();
+        assert_eq!(resp.count, 1);
+        assert_eq!(resp.never_beat, 1);
+        assert_eq!(resp.stale, 1);
+    }
+
+    #[tokio::test]
+    async fn test_migrate_option_tape_meta_idempotent() {
+        // Pre-existing table WITHOUT the heartbeat column (the live-db case)
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE option_tape_meta (
+                id TEXT PRIMARY KEY, underlying TEXT NOT NULL, chain_code TEXT NOT NULL,
+                quota_accounting_json TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        db::migrate_option_tape_meta(&pool).await.unwrap();
+        db::migrate_option_tape_meta(&pool).await.unwrap(); // second run must be a no-op
+
+        db::touch_tape_heartbeat(&pool, "t", "QQQ", "C", "{}").await.unwrap();
+        assert!(db::list_tape_meta(&pool).await.unwrap()[0].last_heartbeat_ts.is_some());
     }
 }

@@ -234,7 +234,8 @@ CREATE TABLE IF NOT EXISTS option_tape_meta (
     underlying            TEXT    NOT NULL,
     chain_code            TEXT    NOT NULL,
     quota_accounting_json TEXT    NOT NULL DEFAULT '{}',
-    created_at            INTEGER NOT NULL
+    created_at            INTEGER NOT NULL,
+    last_heartbeat_ts     INTEGER          -- ms epoch of last recorder heartbeat (NULL = never beat)
 );
 CREATE INDEX IF NOT EXISTS option_tape_meta_underlying_chain_idx
     ON option_tape_meta (underlying, chain_code);
@@ -385,6 +386,7 @@ pub async fn open(database_url: &str) -> Result<DbPool> {
     migrate_predictions(&pool).await?;
     migrate_strategy_versions(&pool).await?;
     migrate_option_positions(&pool).await?;
+    migrate_option_tape_meta(&pool).await?;
     migrate_engine_events(&pool).await?;
 
     info!("database ready at {database_url}");
@@ -1036,12 +1038,14 @@ pub struct TapeMeta {
     pub chain_code: String,
     pub quota_accounting_json: String,
     pub created_at: i64,
+    /// Last recorder heartbeat (ms epoch); NULL until the recorder ever beats.
+    pub last_heartbeat_ts: Option<i64>,
 }
 
 /// List tape recorder meta rows (heartbeat + quota accounting).
 pub async fn list_tape_meta(pool: &DbPool) -> Result<Vec<TapeMeta>> {
     let rows = sqlx::query(
-        "SELECT id, underlying, chain_code, quota_accounting_json, created_at FROM option_tape_meta ORDER BY created_at DESC",
+        "SELECT id, underlying, chain_code, quota_accounting_json, created_at, last_heartbeat_ts FROM option_tape_meta ORDER BY created_at DESC",
     )
     .fetch_all(pool)
     .await
@@ -1054,8 +1058,55 @@ pub async fn list_tape_meta(pool: &DbPool) -> Result<Vec<TapeMeta>> {
             chain_code: r.get("chain_code"),
             quota_accounting_json: r.get("quota_accounting_json"),
             created_at: r.get("created_at"),
+            last_heartbeat_ts: r.get("last_heartbeat_ts"),
         })
         .collect())
+}
+
+/// Idempotently add `last_heartbeat_ts` to a pre-existing option_tape_meta table.
+/// (CREATE TABLE IF NOT EXISTS does not alter an existing table.)
+pub async fn migrate_option_tape_meta(pool: &DbPool) -> Result<()> {
+    let has_col = sqlx::query(
+        "SELECT COUNT(*) AS n FROM pragma_table_info('option_tape_meta') WHERE name = 'last_heartbeat_ts'",
+    )
+    .fetch_one(pool)
+    .await
+    .context("migrate_option_tape_meta probe")?
+    .get::<i64, _>("n")
+        > 0;
+    if !has_col {
+        sqlx::query("ALTER TABLE option_tape_meta ADD COLUMN last_heartbeat_ts INTEGER")
+            .execute(pool)
+            .await
+            .context("migrate_option_tape_meta add column")?;
+    }
+    Ok(())
+}
+
+/// Touch the recorder heartbeat for one tape row (insert the row if missing).
+/// Called by the recorder on every healthy tick.
+pub async fn touch_tape_heartbeat(
+    pool: &DbPool,
+    id: &str,
+    underlying: &str,
+    chain_code: &str,
+    quota_accounting_json: &str,
+) -> Result<()> {
+    let now = chrono::Utc::now().timestamp_millis();
+    sqlx::query(
+        "INSERT INTO option_tape_meta (id, underlying, chain_code, quota_accounting_json, created_at, last_heartbeat_ts)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+         ON CONFLICT(id) DO UPDATE SET last_heartbeat_ts = ?5",
+    )
+    .bind(id)
+    .bind(underlying)
+    .bind(chain_code)
+    .bind(quota_accounting_json)
+    .bind(now)
+    .execute(pool)
+    .await
+    .context("touch_tape_heartbeat")?;
+    Ok(())
 }
 
 /// Add nullable `actual_*` columns to the predictions table if they don't exist.
