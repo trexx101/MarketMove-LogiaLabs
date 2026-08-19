@@ -12,6 +12,9 @@ use std::sync::Arc;
 #[cfg(test)]
 mod tests;
 
+pub mod bsm;
+pub mod synthesis;
+
 /// Build the parquet schema for the tape (D2).
 pub fn build_tape_schema() -> Schema {
     Schema::new(vec![

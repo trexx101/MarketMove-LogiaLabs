@@ -40,3 +40,5 @@ totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
 # Options tape recorder (P1)
 arrow = { version = "53", default-features = false }
 parquet = { version = "53", default-features = false, features = ["snap", "arrow"] }
+# Options backtester (P2)
+statrs = "0.17"

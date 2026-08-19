@@ -33,6 +33,7 @@ uuid = { workspace = true }
 totp-rs = { workspace = true }
 arrow = { workspace = true }
 parquet = { workspace = true }
+statrs = { workspace = true }
 async-trait = "0.1"
 
 [[bin]]
