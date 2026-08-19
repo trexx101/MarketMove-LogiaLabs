@@ -39,4 +39,4 @@ uuid = { version = "1", features = ["v4"] }
 totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
 # Options tape recorder (P1)
 arrow = { version = "53", default-features = false }
-parquet = { version = "53", default-features = false, features = ["snap"] }
+parquet = { version = "53", default-features = false, features = ["snap", "arrow"] }
