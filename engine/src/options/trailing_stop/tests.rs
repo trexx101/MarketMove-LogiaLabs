@@ -148,3 +148,22 @@ fn test_trailing_stop_boundary_put() {
     // Should trigger (current_price >= stop_price)
     assert!(signal.is_some());
 }
+
+#[test]
+fn test_trailing_stop_with_config_changes_trail_and_band() {
+    // 10% trail instead of default 5%
+    let mut stop = TrailingStop::with_config(
+        100.0,
+        2.0,
+        true,
+        TrailingStopConfig { trail_pct: 0.10, rearm_band_atr: 1.0 },
+    );
+    // Stop should be at 90.0 (10% trail), not 95.0
+    assert!((stop.stop_price - 90.0).abs() < 1e-9);
+    // Recovery threshold = 1.0 × ATR, not 0.5
+    assert!((stop.recovery_threshold - 2.0).abs() < 1e-9);
+
+    // New high trails with the configured pct
+    stop.update(110.0, true);
+    assert!((stop.stop_price - 99.0).abs() < 1e-9);
+}

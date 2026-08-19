@@ -16,10 +16,53 @@ use tracing::{error, info, warn};
 
 use crate::db::{self, DbPool};
 use crate::options::chain_selector::{CandidateChain, ChainSelector, ChainSelectorConfig};
+use crate::options::config_store::OptionsConfigStore;
 use crate::options::entry_executor::EntryExecutor;
 use crate::options::entry_integration::EntryPipeline;
 use crate::options::macro_gate::{MacroGate, MacroGateConfig};
 use crate::options::sizing::{PositionSizer, SizingConfig};
+
+/// Build runtime configs from the DB-backed options config store.
+/// Values missing from the store fall back to the boot-time scheduler config,
+/// then to registry defaults inside the store itself.
+async fn configs_from_store(
+    store: &OptionsConfigStore,
+    boot: &OptionsSchedulerConfig,
+) -> (MacroGateConfig, ChainSelectorConfig, SizingConfig) {
+    macro_rules! f64_or {
+        ($key:expr, $default:expr) => {
+            store.get_f64($key).await.unwrap_or($default)
+        };
+    }
+    macro_rules! i64_or {
+        ($key:expr, $default:expr) => {
+            store.get_i64($key).await.unwrap_or($default)
+        };
+    }
+
+    let macro_gate_config = MacroGateConfig {
+        vix_level_threshold: f64_or!("vix_level_gate", boot.macro_gate_config.vix_level_threshold),
+        vix_slope_threshold: f64_or!("vix_slope_threshold", boot.macro_gate_config.vix_slope_threshold),
+        blackout_hours: f64_or!("blackout_hours", boot.macro_gate_config.blackout_hours),
+    };
+
+    let chain_selector_config = ChainSelectorConfig {
+        min_dte: i64_or!("dte_min", boot.chain_selector_config.min_dte as i64) as u32,
+        max_dte: i64_or!("dte_max", boot.chain_selector_config.max_dte as i64) as u32,
+        target_delta: f64_or!("delta_target", boot.chain_selector_config.target_delta),
+        max_spread_pct: f64_or!("spread_cap_pct", boot.chain_selector_config.max_spread_pct),
+        min_open_interest: i64_or!("oi_min", boot.chain_selector_config.min_open_interest),
+    };
+
+    let sizing_config = SizingConfig {
+        risk_per_trade: f64_or!("risk_pct", boot.sizing_config.risk_per_trade),
+        max_premium_per_position: f64_or!("max_premium_pct", boot.sizing_config.max_premium_per_position),
+        max_contracts_per_position: i64_or!("contracts_cap", boot.sizing_config.max_contracts_per_position as i64) as u32,
+        max_portfolio_premium: f64_or!("deployed_cap_pct", boot.sizing_config.max_portfolio_premium),
+    };
+
+    (macro_gate_config, chain_selector_config, sizing_config)
+}
 
 /// Options scheduler configuration
 #[derive(Debug, Clone)]
@@ -34,6 +77,8 @@ pub struct OptionsSchedulerConfig {
     pub chain_selector_config: ChainSelectorConfig,
     /// Sizing configuration
     pub sizing_config: SizingConfig,
+    /// Trading mode — used for event attribution ("paper" | "live")
+    pub mode: String,
 }
 
 impl Default for OptionsSchedulerConfig {
@@ -44,6 +89,7 @@ impl Default for OptionsSchedulerConfig {
             macro_gate_config: MacroGateConfig::default(),
             chain_selector_config: ChainSelectorConfig::default(),
             sizing_config: SizingConfig::default(),
+            mode: "paper".to_string(),
         }
     }
 }
@@ -51,39 +97,35 @@ impl Default for OptionsSchedulerConfig {
 /// Options scheduler state
 #[derive(Debug, Clone, PartialEq)]
 pub enum OptionsSchedulerState {
-    /// Idle, waiting for next poll
+    /// Idle, waiting for next candle
     Idle,
-    /// Processing a new candle
+    /// Processing new candle(s)
     Processing,
-    /// Entry pipeline running
+    /// Running entry pipeline
     EntryPipeline,
     /// Error state
     Error(String),
 }
 
-/// Options scheduler
+/// Options scheduler — manages the daily entry pipeline
 pub struct OptionsScheduler {
     pool: DbPool,
     config: OptionsSchedulerConfig,
-    macro_gate: MacroGate,
-    chain_selector: ChainSelector,
-    position_sizer: PositionSizer,
+    /// DB-backed config store; runtime configs are rebuilt from it each tick
+    /// so UI edits take effect without a restart.
+    config_store: OptionsConfigStore,
     state: Arc<RwLock<OptionsSchedulerState>>,
     last_processed_ts: Arc<RwLock<Option<i64>>>,
 }
 
 impl OptionsScheduler {
     pub fn new(pool: DbPool, config: OptionsSchedulerConfig) -> Self {
-        let macro_gate = MacroGate::new(config.macro_gate_config.clone());
-        let chain_selector = ChainSelector::new(config.chain_selector_config.clone());
-        let position_sizer = PositionSizer::new(config.sizing_config.clone());
-
+        let mode = config.mode.clone();
+        let config_store = OptionsConfigStore::new(pool.clone(), &mode);
         Self {
             pool,
             config,
-            macro_gate,
-            chain_selector,
-            position_sizer,
+            config_store,
             state: Arc::new(RwLock::new(OptionsSchedulerState::Idle)),
             last_processed_ts: Arc::new(RwLock::new(None)),
         }
@@ -172,20 +214,59 @@ impl OptionsScheduler {
         Ok(())
     }
 
+    /// Record a SKIPPED_ENTRY event and return the not-entered result.
+    async fn skipped_entry(
+        &self,
+        equity: &str,
+        reason: &str,
+        detail: serde_json::Value,
+    ) -> EntryPipelineResult {
+        let payload = serde_json::json!({ "reason": reason, "detail": detail });
+        if let Err(e) = db::insert_event(
+            &self.pool,
+            "strategy",
+            "info",
+            &self.config.mode,
+            "options::entry",
+            &format!("SKIPPED_ENTRY {equity}: {reason}"),
+            &payload.to_string(),
+            Some(equity),
+        )
+        .await
+        {
+            error!(equity, error = %e, "failed to record SKIPPED_ENTRY event");
+        }
+        EntryPipelineResult {
+            entry_initiated: false,
+            reason: Some(reason.to_string()),
+        }
+    }
+
     /// Run the full entry pipeline for an equity
     async fn run_entry_pipeline(&self, equity: &str, candle_ts: i64) -> Result<EntryPipelineResult> {
+        // Rebuild runtime configs from the DB-backed store each pipeline run,
+        // so Settings-page edits take effect without a restart.
+        let (macro_cfg, chain_cfg, sizing_cfg) =
+            configs_from_store(&self.config_store, &self.config).await;
+        let macro_gate = MacroGate::new(macro_cfg);
+        let chain_selector = ChainSelector::new(chain_cfg);
+        let position_sizer = PositionSizer::new(sizing_cfg);
+
         // 1. Macro gate check
         let vix = self.fetch_vix().await?;
         let now = Utc::now();
-        let gate_result = self.macro_gate.evaluate(vix, vix, now, &[]);
+        let gate_result = macro_gate.evaluate(vix, vix, now, &[]);
 
         match gate_result {
             crate::options::macro_gate::MacroGateDecision::Denied(reason) => {
                 info!(equity, ?reason, "macro gate denied entry");
-                return Ok(EntryPipelineResult {
-                    entry_initiated: false,
-                    reason: Some(format!("Macro gate denied: {:?}", reason)),
-                });
+                return Ok(self
+                    .skipped_entry(
+                        equity,
+                        &format!("Macro gate denied: {reason:?}"),
+                        serde_json::json!({ "vix": vix }),
+                    )
+                    .await);
             }
             crate::options::macro_gate::MacroGateDecision::Allowed => {
                 // Continue to chain selection
@@ -197,28 +278,30 @@ impl OptionsScheduler {
 
         if candidates.is_empty() {
             info!(equity, "no candidate chains available");
-            return Ok(EntryPipelineResult {
-                entry_initiated: false,
-                reason: Some("No candidate chains".to_string()),
-            });
+            return Ok(self
+                .skipped_entry(equity, "No candidate chains", serde_json::json!({}))
+                .await);
         }
 
         // 3. Chain selection
-        let chain_result = self.chain_selector.select(&candidates);
+        let chain_result = chain_selector.select(&candidates);
         let selected_chain = match chain_result {
             crate::options::chain_selector::ChainSelectionResult::Selected(chain) => chain,
             crate::options::chain_selector::ChainSelectionResult::Skipped(reason) => {
                 info!(equity, ?reason, "chain selection skipped");
-                return Ok(EntryPipelineResult {
-                    entry_initiated: false,
-                    reason: Some(format!("Chain selection skipped: {:?}", reason)),
-                });
+                return Ok(self
+                    .skipped_entry(
+                        equity,
+                        &format!("Chain selection skipped: {reason:?}"),
+                        serde_json::json!({}),
+                    )
+                    .await);
             }
         };
 
         // 4. Position sizing
         let account_equity = self.fetch_account_equity().await?;
-        let sizing_result = self.position_sizer.size(
+        let sizing_result = position_sizer.size(
             account_equity,
             0.0, // stop_distance — would come from strategy
             selected_chain.delta,
@@ -230,10 +313,13 @@ impl OptionsScheduler {
             crate::options::sizing::SizingResult::Sized(decision) => decision,
             crate::options::sizing::SizingResult::Skipped(reason) => {
                 info!(equity, ?reason, "sizing denied");
-                return Ok(EntryPipelineResult {
-                    entry_initiated: false,
-                    reason: Some(format!("Sizing denied: {:?}", reason)),
-                });
+                return Ok(self
+                    .skipped_entry(
+                        equity,
+                        &format!("Sizing denied: {reason:?}"),
+                        serde_json::json!({ "account_equity": account_equity }),
+                    )
+                    .await);
             }
         };
 
@@ -323,6 +409,20 @@ mod tests {
         .await
         .unwrap();
 
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS engine_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL,
+                category TEXT NOT NULL, severity TEXT NOT NULL, mode TEXT NOT NULL,
+                source TEXT NOT NULL, message TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}', equity TEXT
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
         pool
     }
 
@@ -368,6 +468,7 @@ mod tests {
     #[tokio::test]
     async fn test_entry_pipeline_macro_gate_denied() {
         let pool = test_pool().await;
+        let check_pool = pool.clone();
         let config = OptionsSchedulerConfig {
             equities: vec!["QQQ".to_string()],
             macro_gate_config: MacroGateConfig {
@@ -382,6 +483,14 @@ mod tests {
         let result = scheduler.run_entry_pipeline("QQQ", 0).await.unwrap();
         assert!(!result.entry_initiated);
         assert!(result.reason.unwrap().contains("Macro gate denied"));
+
+        // SKIPPED_ENTRY event must be recorded (per item 5)
+        let events = db::search_events(&check_pool, Some("strategy"), None, None, Some("QQQ"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "expected exactly one SKIPPED_ENTRY event");
+        assert!(events[0].message.contains("SKIPPED_ENTRY QQQ"));
+        assert!(events[0].message.contains("Macro gate denied"));
     }
 
     #[tokio::test]

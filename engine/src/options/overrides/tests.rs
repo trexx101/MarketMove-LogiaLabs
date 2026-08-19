@@ -108,3 +108,28 @@ fn test_all_overrides_return_correct_priority() {
         assert_eq!(signal.priority, 3);
     }
 }
+
+#[test]
+fn test_overrides_with_config_changes_thresholds() {
+    // Rail values come from the options config store in production;
+    // with_config must actually move the thresholds.
+    let overrides = HardcodedOverrides::with_config(OverridesConfig {
+        dte_exit_min: 10,
+        delta_drift_min: 0.20,
+        delta_drift_max: 0.60,
+        earnings_blackout_days: 5,
+    });
+
+    // DTE 8 fires now (was <7 with defaults)
+    assert!(overrides.check_dte(8).is_some());
+    // Delta 0.18 is below the raised min (0.20) → fires
+    assert!(overrides.check_delta_drift(0.18).is_some());
+    // Delta 0.19 still fires; 0.25 inside band does not
+    assert!(overrides.check_delta_drift(0.25).is_none());
+    // Delta 0.65 above the lowered max (0.60) → fires
+    assert!(overrides.check_delta_drift(0.65).is_some());
+
+    // Earnings in 4 days fires with 5-day blackout
+    let today = Utc::now().date_naive();
+    assert!(overrides.check_earnings_blackout(today + Duration::days(4), today).is_some());
+}

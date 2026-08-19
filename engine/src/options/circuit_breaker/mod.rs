@@ -32,10 +32,22 @@ pub struct CircuitBreaker {
     halt_duration: Duration,
     consecutive_losses: u32,
     max_consecutive_losses: u32,
+    /// IV spike multiplier: trip when current_iv > baseline_iv × this
+    iv_spike_multiplier: f64,
 }
 
 impl CircuitBreaker {
+    /// Create with the original defaults: 2.0× IV spike multiplier.
     pub fn new(halt_duration_secs: i64, max_consecutive_losses: u32) -> Self {
+        Self::with_iv_multiplier(halt_duration_secs, max_consecutive_losses, 2.0)
+    }
+
+    /// Create with an explicit IV spike multiplier (from the options config store).
+    pub fn with_iv_multiplier(
+        halt_duration_secs: i64,
+        max_consecutive_losses: u32,
+        iv_spike_multiplier: f64,
+    ) -> Self {
         Self {
             triggered: false,
             trigger_reason: None,
@@ -43,6 +55,7 @@ impl CircuitBreaker {
             halt_duration: Duration::seconds(halt_duration_secs),
             consecutive_losses: 0,
             max_consecutive_losses,
+            iv_spike_multiplier,
         }
     }
 
@@ -77,8 +90,8 @@ impl CircuitBreaker {
     }
 
     pub fn check_volatility(&mut self, current_iv: f64, baseline_iv: f64) -> Option<ExitSignal> {
-        // Trigger if IV is 2x baseline (abnormal volatility)
-        if current_iv > baseline_iv * 2.0 {
+        // Trigger if IV exceeds iv_spike_multiplier × baseline (abnormal volatility)
+        if current_iv > baseline_iv * self.iv_spike_multiplier {
             Some(self.trigger(CircuitBreakerTrigger::AbnormalVolatility))
         } else {
             None

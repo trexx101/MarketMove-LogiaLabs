@@ -13,3 +13,4 @@ pub mod chain_selector;
 pub mod sizing;
 pub mod entry_executor;
 pub mod entry_integration;
+pub mod config_store;
