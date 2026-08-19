@@ -8,6 +8,9 @@ mod features;
 mod hyperopt;
 mod normalize;
 mod market_hours;
+mod options;
+mod options_recorder;
+mod options_scheduler;
 // `parity` is referenced indirectly through `config::Config::from_env` (the
 // live-mode guard). The bin doesn't use any parity items directly.
 #[allow(dead_code)]
