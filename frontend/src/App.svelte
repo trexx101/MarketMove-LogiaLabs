@@ -2,6 +2,7 @@
   import Dashboard from './views/Dashboard.svelte';
   import Ledger from './views/Ledger.svelte';
   import StrategyLab from './views/StrategyLab.svelte';
+  import AutoPilot from './views/AutoPilot.svelte';
   import { status } from './lib/stores.js';
 
   let currentView = 'dashboard';
@@ -66,6 +67,16 @@
         </button>
       </li>
       <li>
+        <button class="nav-btn" class:active={currentView === 'autopilot'} on:click={() => nav('autopilot')}>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.3"/>
+            <circle cx="8" cy="8" r="2" fill="currentColor"/>
+            <path d="M8 2v2M8 12v2M2 8h2M12 8h2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+          </svg>
+          Auto-Pilot
+        </button>
+      </li>
+      <li>
         <button class="nav-btn" class:active={currentView === 'advisor'} on:click={() => nav('advisor')}>
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
             <circle cx="8" cy="6" r="3" stroke="currentColor" stroke-width="1.3"/>
@@ -95,6 +106,8 @@
       <StrategyLab />
     {:else if currentView === 'ledger'}
       <Ledger />
+    {:else if currentView === 'autopilot'}
+      <AutoPilot />
     {:else if currentView === 'advisor'}
       <div class="placeholder">
         <h1>AI Advisor</h1>

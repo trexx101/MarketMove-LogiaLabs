@@ -1,6 +1,45 @@
 const API_BASE = '/api';
 
 /**
+ * List hyperopt candidates for an equity.
+ * @param {string} equity - e.g. "QQQ", "SMH", "XLF"
+ * @returns {Promise<{equity: string, candidates: Array}>}
+ */
+export async function fetchHyperoptCandidates(equity) {
+  const res = await fetch(`${API_BASE}/hyperopt/${equity}/candidates`);
+  if (!res.ok) throw new Error(`hyperopt candidates: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Fetch hyperopt pipeline status for an equity.
+ * @param {string} equity - e.g. "QQQ", "SMH", "XLF"
+ * @returns {Promise<{equity: string, pipeline_state: string, total_candidates: number, by_status: Object}>}
+ */
+export async function fetchHyperoptStatus(equity) {
+  const res = await fetch(`${API_BASE}/hyperopt/${equity}/status`);
+  if (!res.ok) throw new Error(`hyperopt status: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * Promote a candidate to the next stage (CANDIDATE -> PAPER -> MICRO -> LIVE).
+ * Gated: promotion only succeeds if the candidate meets evidence requirements.
+ * @param {string} equity - equity the candidate belongs to
+ * @param {string} id - candidate version id
+ * @returns {Promise<{success: boolean, message: string}>}
+ */
+export async function promoteCandidate(equity, id) {
+  const res = await fetch(`${API_BASE}/hyperopt/${equity}/promote/${id}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ target_status: 'AUTO' }),
+  });
+  if (!res.ok) throw new Error(`promote: ${res.status}`);
+  return res.json();
+}
+
+/**
  * Fetch current system status.
  * @returns {Promise<object>} StatusResponse
  */

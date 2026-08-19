@@ -12,4 +12,10 @@ export default defineConfig({
       '/api': 'http://localhost:3000',
     },
   },
+  preview: {
+    proxy: {
+      // `npm run preview` serves frontend/dist; proxy API to the local engine.
+      '/api': 'http://localhost:8080',
+    },
+  },
 });

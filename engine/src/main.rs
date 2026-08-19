@@ -5,6 +5,7 @@ mod data;
 mod db;
 mod exec;
 mod features;
+mod hyperopt;
 mod normalize;
 mod market_hours;
 // `parity` is referenced indirectly through `config::Config::from_env` (the
