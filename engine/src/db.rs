@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::Serialize;
 use sqlx::{sqlite::SqlitePoolOptions, FromRow, Row, SqlitePool};
-use tracing::info;
+use tracing::{info, warn};
 
 pub type DbPool = SqlitePool;
 
@@ -186,6 +186,7 @@ CREATE TABLE IF NOT EXISTS option_positions (
     contract_code           TEXT    NOT NULL,
     strategy_version_id     TEXT    NOT NULL,
     entry_underlying_price  REAL    NOT NULL,
+    entry_premium           REAL    NOT NULL DEFAULT 0.0,
     entry_spread            REAL    NOT NULL,
     entry_slippage_budget   REAL    NOT NULL,
     qty                     INTEGER NOT NULL,
@@ -193,6 +194,8 @@ CREATE TABLE IF NOT EXISTS option_positions (
     status                  TEXT    NOT NULL DEFAULT 'OPEN',
     dte_at_entry            INTEGER NOT NULL,
     delta_at_entry          REAL    NOT NULL,
+    realized_pnl            REAL,
+    closed_at               INTEGER,
     created_at              INTEGER NOT NULL,
     updated_at              INTEGER NOT NULL
 );
@@ -224,7 +227,7 @@ CREATE INDEX IF NOT EXISTS option_tape_meta_underlying_chain_idx
 
 CREATE TABLE IF NOT EXISTS exit_intent_log (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    position_id   INTEGER NOT NULL,
+    position_id   TEXT    NOT NULL,
     stage         TEXT    NOT NULL,
     order_id      TEXT,
     limit_price   REAL    NOT NULL,
@@ -234,9 +237,42 @@ CREATE TABLE IF NOT EXISTS exit_intent_log (
 CREATE INDEX IF NOT EXISTS exit_intent_log_position_idx
     ON exit_intent_log (position_id, timestamp);
 
+CREATE TABLE IF NOT EXISTS engine_events (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           INTEGER NOT NULL,
+    category     TEXT    NOT NULL,  -- trade | data | system | strategy | alert | advisor
+    severity     TEXT    NOT NULL,  -- info | warn | error
+    mode         TEXT    NOT NULL,  -- paper | live
+    source       TEXT    NOT NULL,  -- scheduler, data::yahoo, exec::paper, api::mode, etc.
+    message      TEXT    NOT NULL,
+    payload_json TEXT    NOT NULL DEFAULT '{}',
+    equity       TEXT
+);
+CREATE INDEX IF NOT EXISTS engine_events_ts_idx ON engine_events (ts DESC);
+CREATE INDEX IF NOT EXISTS engine_events_category_ts_idx ON engine_events (category, ts DESC);
+CREATE INDEX IF NOT EXISTS engine_events_mode_idx ON engine_events (mode);
+
+CREATE TABLE IF NOT EXISTS options_config_kv (
+    key         TEXT    PRIMARY KEY,
+    value_json  TEXT    NOT NULL,
+    tier        TEXT    NOT NULL DEFAULT 'strategy',
+    updated_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS hyperopt_runs (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at            INTEGER NOT NULL,
+    finished_at           INTEGER,
+    status                TEXT    NOT NULL DEFAULT 'RUNNING',
+    equities_processed    INTEGER NOT NULL DEFAULT 0,
+    candidates_stored     INTEGER NOT NULL DEFAULT 0,
+    candidates_promoted   INTEGER NOT NULL DEFAULT 0,
+    error                 TEXT
+);
+
 CREATE TABLE IF NOT EXISTS option_fills (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    position_id   INTEGER NOT NULL,
+    position_id   TEXT    NOT NULL,
     stage         TEXT    NOT NULL,
     price         REAL    NOT NULL,
     quantity      REAL    NOT NULL,
@@ -334,6 +370,8 @@ pub async fn open(database_url: &str) -> Result<DbPool> {
 
     migrate_predictions(&pool).await?;
     migrate_strategy_versions(&pool).await?;
+    migrate_option_positions(&pool).await?;
+    migrate_engine_events(&pool).await?;
 
     info!("database ready at {database_url}");
     Ok(pool)
@@ -357,6 +395,125 @@ pub async fn migrate_strategy_versions(pool: &DbPool) -> Result<()> {
         info!("migrated strategy_versions: added column equity");
     }
 
+    Ok(())
+}
+
+/// Migrate `option_positions` for existing databases: add columns introduced
+/// in Phase 7 (`entry_premium`, `realized_pnl`, `closed_at`). Also rebuilds
+/// `option_fills` / `exit_intent_log` if their `position_id` column is still
+/// INTEGER (schema inconsistency fixed pre-live — tables created this week,
+/// expected to be empty or near-empty in production).
+pub async fn migrate_option_positions(pool: &DbPool) -> Result<()> {
+    // 1. Add missing columns to option_positions
+    let rows = sqlx::query("PRAGMA table_info(option_positions)")
+        .fetch_all(pool)
+        .await
+        .context("PRAGMA table_info(option_positions)")?;
+
+    let existing: Vec<String> = rows.iter().map(|r| r.get::<String, _>(1)).collect();
+
+    let additions: &[(&str, &str)] = &[
+        ("entry_premium", "REAL NOT NULL DEFAULT 0.0"),
+        ("realized_pnl", "REAL"),
+        ("closed_at", "INTEGER"),
+    ];
+    for (col, decl) in additions {
+        if !existing.iter().any(|name| name == col) {
+            let sql = format!("ALTER TABLE option_positions ADD COLUMN {col} {decl}");
+            sqlx::query(&sql)
+                .execute(pool)
+                .await
+                .with_context(|| format!("adding option_positions.{col}"))?;
+            info!("migrated option_positions: added column {col}");
+        }
+    }
+
+    // 2. Rebuild option_fills / exit_intent_log if position_id is INTEGER
+    for (table, ddl) in [
+        (
+            "option_fills",
+            r#"CREATE TABLE option_fills (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                position_id   TEXT    NOT NULL,
+                stage         TEXT    NOT NULL,
+                price         REAL    NOT NULL,
+                quantity      REAL    NOT NULL,
+                timestamp     INTEGER NOT NULL
+            )"#,
+        ),
+        (
+            "exit_intent_log",
+            r#"CREATE TABLE exit_intent_log (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                position_id   TEXT    NOT NULL,
+                stage         TEXT    NOT NULL,
+                order_id      TEXT,
+                limit_price   REAL    NOT NULL,
+                quantity      REAL    NOT NULL,
+                timestamp     TEXT    NOT NULL
+            )"#,
+        ),
+    ] {
+        let info = sqlx::query(&format!("PRAGMA table_info({table})"))
+            .fetch_all(pool)
+            .await
+            .with_context(|| format!("PRAGMA table_info({table})"))?;
+        let pos_id_type: Option<String> = info.iter().find_map(|r| {
+            if r.get::<String, _>(1) == "position_id" {
+                Some(r.get::<String, _>(2))
+            } else {
+                None
+            }
+        });
+        if pos_id_type.as_deref() == Some("INTEGER") {
+            let n: i64 = sqlx::query(&format!("SELECT COUNT(*) AS n FROM {table}"))
+                .fetch_one(pool)
+                .await?
+                .get("n");
+            let tmp = format!("{table}_new");
+            let create_tmp = ddl.replace(table, &tmp);
+            sqlx::query(&create_tmp).execute(pool).await?;
+            if n > 0 {
+                warn!("{table}: position_id is INTEGER with {n} rows — rebuilding (pre-live schema fix, rows cast to TEXT)");
+                let copy = match table {
+                    "option_fills" => format!(
+                        "INSERT INTO {tmp} (id, position_id, stage, price, quantity, timestamp) \
+                         SELECT id, CAST(position_id AS TEXT), stage, price, quantity, timestamp FROM {table}"
+                    ),
+                    _ => format!(
+                        "INSERT INTO {tmp} (id, position_id, stage, order_id, limit_price, quantity, timestamp) \
+                         SELECT id, CAST(position_id AS TEXT), stage, order_id, limit_price, quantity, timestamp FROM {table}"
+                    ),
+                };
+                sqlx::query(&copy)
+                    .execute(pool)
+                    .await
+                    .context("copying rows during rebuild")?;
+            }
+            sqlx::query(&format!("DROP TABLE {table}")).execute(pool).await?;
+            sqlx::query(&format!("ALTER TABLE {tmp} RENAME TO {table}")).execute(pool).await?;
+            info!("migrated {table}: position_id INTEGER -> TEXT");
+        }
+    }
+
+    Ok(())
+}
+
+/// Add the nullable `equity` column to `engine_events` if missing
+/// (table predates Phase 7 — existing rows keep equity = NULL).
+pub async fn migrate_engine_events(pool: &DbPool) -> Result<()> {
+    let rows = sqlx::query("PRAGMA table_info(engine_events)")
+        .fetch_all(pool)
+        .await
+        .context("PRAGMA table_info(engine_events)")?;
+    let existing: Vec<String> = rows.iter().map(|r| r.get::<String, _>(1)).collect();
+    if !existing.iter().any(|n| n == "equity") {
+        sqlx::query("ALTER TABLE engine_events ADD COLUMN equity TEXT")
+            .execute(pool)
+            .await
+            .context("adding engine_events.equity")?;
+        info!("migrated engine_events: added column equity");
+    }
     Ok(())
 }
 
@@ -392,6 +549,402 @@ pub async fn count_strategy_versions_by_status(
         result.insert(status, count);
     }
     Ok(result)
+}
+
+// ── Engine events ────────────────────────────────────────────────────────────
+
+/// Insert an engine event. `payload_json` is an arbitrary JSON object string.
+pub async fn insert_event(
+    pool: &DbPool,
+    category: &str,
+    severity: &str,
+    mode: &str,
+    source: &str,
+    message: &str,
+    payload_json: &str,
+    equity: Option<&str>,
+) -> Result<()> {
+    sqlx::query(
+        r#"INSERT INTO engine_events (ts, category, severity, mode, source, message, payload_json, equity)
+           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#,
+    )
+    .bind(Utc::now().timestamp())
+    .bind(category)
+    .bind(severity)
+    .bind(mode)
+    .bind(source)
+    .bind(message)
+    .bind(payload_json)
+    .bind(equity)
+    .execute(pool)
+    .await
+    .context("insert_event")?;
+    Ok(())
+}
+
+/// A row from the engine_events table.
+#[derive(Debug, Clone, Serialize)]
+pub struct EngineEvent {
+    pub id: i64,
+    pub ts: i64,
+    pub category: String,
+    pub severity: String,
+    pub mode: String,
+    pub source: String,
+    pub message: String,
+    pub payload_json: String,
+    pub equity: Option<String>,
+}
+
+/// Search engine events. All filters optional; results newest-first.
+pub async fn search_events(
+    pool: &DbPool,
+    category: Option<&str>,
+    mode: Option<&str>,
+    severity: Option<&str>,
+    equity: Option<&str>,
+    since_ts: Option<i64>,
+    limit: i64,
+) -> Result<Vec<EngineEvent>> {
+    let mut sql = String::from(
+        "SELECT id, ts, category, severity, mode, source, message, payload_json, equity FROM engine_events WHERE 1=1",
+    );
+    if category.is_some() {
+        sql.push_str(" AND category = ?");
+    }
+    if mode.is_some() {
+        sql.push_str(" AND mode = ?");
+    }
+    if severity.is_some() {
+        sql.push_str(" AND severity = ?");
+    }
+    if equity.is_some() {
+        sql.push_str(" AND equity = ?");
+    }
+    if since_ts.is_some() {
+        sql.push_str(" AND ts >= ?");
+    }
+    sql.push_str(" ORDER BY ts DESC, id DESC LIMIT ?");
+
+    let mut q = sqlx::query(&sql);
+    if let Some(c) = category {
+        q = q.bind(c);
+    }
+    if let Some(m) = mode {
+        q = q.bind(m);
+    }
+    if let Some(s) = severity {
+        q = q.bind(s);
+    }
+    if let Some(e) = equity {
+        q = q.bind(e);
+    }
+    if let Some(t) = since_ts {
+        q = q.bind(t);
+    }
+    q = q.bind(limit);
+
+    let rows = q.fetch_all(pool).await.context("search_events")?;
+    Ok(rows
+        .iter()
+        .map(|r| EngineEvent {
+            id: r.get("id"),
+            ts: r.get("ts"),
+            category: r.get("category"),
+            severity: r.get("severity"),
+            mode: r.get("mode"),
+            source: r.get("source"),
+            message: r.get("message"),
+            payload_json: r.get("payload_json"),
+            equity: r.get("equity"),
+        })
+        .collect())
+}
+
+/// Distinct category values present in engine_events (for UI filter dropdowns).
+pub async fn event_categories(pool: &DbPool) -> Result<Vec<String>> {
+    let rows = sqlx::query("SELECT DISTINCT category FROM engine_events ORDER BY category")
+        .fetch_all(pool)
+        .await
+        .context("event_categories")?;
+    Ok(rows.iter().map(|r| r.get::<String, _>("category")).collect())
+}
+
+// ── Options config KV store ──────────────────────────────────────────────────
+
+/// Set an options config value. `tier` is 'strategy' (free to tune) or
+/// 'rail' (risk rail — editable but bounded; changes are event-logged).
+pub async fn set_options_config(
+    pool: &DbPool,
+    key: &str,
+    value_json: &str,
+    tier: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"INSERT INTO options_config_kv (key, value_json, tier, updated_at)
+           VALUES (?1, ?2, ?3, ?4)
+           ON CONFLICT(key) DO UPDATE SET value_json = ?2, tier = ?3, updated_at = ?4"#,
+    )
+    .bind(key)
+    .bind(value_json)
+    .bind(tier)
+    .bind(Utc::now().timestamp())
+    .execute(pool)
+    .await
+    .context("set_options_config")?;
+    Ok(())
+}
+
+/// Get an options config value (raw JSON string) by key.
+pub async fn get_options_config(pool: &DbPool, key: &str) -> Result<Option<String>> {
+    let row = sqlx::query("SELECT value_json FROM options_config_kv WHERE key = ?1")
+        .bind(key)
+        .fetch_optional(pool)
+        .await
+        .context("get_options_config")?;
+    Ok(row.map(|r| r.get::<String, _>("value_json")))
+}
+
+/// List all options config entries as (key, value_json, tier, updated_at).
+pub async fn list_options_config(pool: &DbPool) -> Result<Vec<(String, String, String, i64)>> {
+    let rows = sqlx::query(
+        "SELECT key, value_json, tier, updated_at FROM options_config_kv ORDER BY key",
+    )
+    .fetch_all(pool)
+    .await
+    .context("list_options_config")?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            (
+                r.get::<String, _>("key"),
+                r.get::<String, _>("value_json"),
+                r.get::<String, _>("tier"),
+                r.get::<i64, _>("updated_at"),
+            )
+        })
+        .collect())
+}
+
+// ── Hyperopt runs ────────────────────────────────────────────────────────────
+
+/// Record the start of a hyperopt run. Returns the run id.
+pub async fn insert_hyperopt_run(pool: &DbPool) -> Result<i64> {
+    let row = sqlx::query(
+        "INSERT INTO hyperopt_runs (started_at) VALUES (?1) RETURNING id",
+    )
+    .bind(Utc::now().timestamp())
+    .fetch_one(pool)
+    .await
+    .context("insert_hyperopt_run")?;
+    Ok(row.get::<i64, _>("id"))
+}
+
+/// Mark a hyperopt run finished.
+#[allow(clippy::too_many_arguments)]
+pub async fn complete_hyperopt_run(
+    pool: &DbPool,
+    id: i64,
+    status: &str,
+    equities_processed: i64,
+    candidates_stored: i64,
+    candidates_promoted: i64,
+    error: Option<&str>,
+) -> Result<()> {
+    sqlx::query(
+        r#"UPDATE hyperopt_runs
+           SET finished_at = ?2, status = ?3, equities_processed = ?4,
+               candidates_stored = ?5, candidates_promoted = ?6, error = ?7
+           WHERE id = ?1"#,
+    )
+    .bind(id)
+    .bind(Utc::now().timestamp())
+    .bind(status)
+    .bind(equities_processed)
+    .bind(candidates_stored)
+    .bind(candidates_promoted)
+    .bind(error)
+    .execute(pool)
+    .await
+    .context("complete_hyperopt_run")?;
+    Ok(())
+}
+
+/// A hyperopt run row.
+#[derive(Debug, Clone, Serialize)]
+pub struct HyperoptRun {
+    pub id: i64,
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
+    pub status: String,
+    pub equities_processed: i64,
+    pub candidates_stored: i64,
+    pub candidates_promoted: i64,
+    pub error: Option<String>,
+}
+
+/// List recent hyperopt runs, newest first.
+pub async fn list_hyperopt_runs(pool: &DbPool, limit: i64) -> Result<Vec<HyperoptRun>> {
+    let rows = sqlx::query(
+        r#"SELECT id, started_at, finished_at, status, equities_processed,
+                  candidates_stored, candidates_promoted, error
+           FROM hyperopt_runs ORDER BY started_at DESC, id DESC LIMIT ?1"#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .context("list_hyperopt_runs")?;
+    Ok(rows
+        .iter()
+        .map(|r| HyperoptRun {
+            id: r.get("id"),
+            started_at: r.get("started_at"),
+            finished_at: r.get("finished_at"),
+            status: r.get("status"),
+            equities_processed: r.get("equities_processed"),
+            candidates_stored: r.get("candidates_stored"),
+            candidates_promoted: r.get("candidates_promoted"),
+            error: r.get("error"),
+        })
+        .collect())
+}
+
+// ── Option positions ─────────────────────────────────────────────────────────
+
+/// A row from option_positions.
+#[derive(Debug, Clone, Serialize)]
+pub struct OptionPosition {
+    pub id: String,
+    pub underlying: String,
+    pub contract_code: String,
+    pub strategy_version_id: String,
+    pub entry_underlying_price: f64,
+    pub entry_premium: f64,
+    pub entry_spread: f64,
+    pub entry_slippage_budget: f64,
+    pub qty: i64,
+    pub qty_filled_residual: i64,
+    pub status: String,
+    pub dte_at_entry: i64,
+    pub delta_at_entry: f64,
+    pub realized_pnl: Option<f64>,
+    pub closed_at: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+fn row_to_option_position(r: &sqlx::sqlite::SqliteRow) -> OptionPosition {
+    OptionPosition {
+        id: r.get("id"),
+        underlying: r.get("underlying"),
+        contract_code: r.get("contract_code"),
+        strategy_version_id: r.get("strategy_version_id"),
+        entry_underlying_price: r.get("entry_underlying_price"),
+        entry_premium: r.get("entry_premium"),
+        entry_spread: r.get("entry_spread"),
+        entry_slippage_budget: r.get("entry_slippage_budget"),
+        qty: r.get("qty"),
+        qty_filled_residual: r.get("qty_filled_residual"),
+        status: r.get("status"),
+        dte_at_entry: r.get("dte_at_entry"),
+        delta_at_entry: r.get("delta_at_entry"),
+        realized_pnl: r.get("realized_pnl"),
+        closed_at: r.get("closed_at"),
+        created_at: r.get("created_at"),
+        updated_at: r.get("updated_at"),
+    }
+}
+
+/// List option positions, optionally filtered by underlying and/or status.
+pub async fn list_option_positions(
+    pool: &DbPool,
+    underlying: Option<&str>,
+    status: Option<&str>,
+    limit: i64,
+) -> Result<Vec<OptionPosition>> {
+    let mut sql = String::from("SELECT * FROM option_positions WHERE 1=1");
+    if underlying.is_some() {
+        sql.push_str(" AND underlying = ?");
+    }
+    if status.is_some() {
+        sql.push_str(" AND status = ?");
+    }
+    sql.push_str(" ORDER BY created_at DESC LIMIT ?");
+
+    let mut q = sqlx::query(&sql);
+    if let Some(u) = underlying {
+        q = q.bind(u);
+    }
+    if let Some(s) = status {
+        q = q.bind(s);
+    }
+    q = q.bind(limit);
+
+    let rows = q.fetch_all(pool).await.context("list_option_positions")?;
+    Ok(rows.iter().map(row_to_option_position).collect())
+}
+
+/// A fill row for an option position lifecycle.
+#[derive(Debug, Clone, Serialize)]
+pub struct OptionFill {
+    pub id: i64,
+    pub position_id: String,
+    pub stage: String,
+    pub price: f64,
+    pub quantity: f64,
+    pub timestamp: i64,
+}
+
+/// List fills for a position, chronological.
+pub async fn list_option_fills(pool: &DbPool, position_id: &str) -> Result<Vec<OptionFill>> {
+    let rows = sqlx::query(
+        "SELECT id, position_id, stage, price, quantity, timestamp FROM option_fills WHERE position_id = ?1 ORDER BY timestamp ASC",
+    )
+    .bind(position_id)
+    .fetch_all(pool)
+    .await
+    .context("list_option_fills")?;
+    Ok(rows
+        .iter()
+        .map(|r| OptionFill {
+            id: r.get("id"),
+            position_id: r.get("position_id"),
+            stage: r.get("stage"),
+            price: r.get("price"),
+            quantity: r.get("quantity"),
+            timestamp: r.get("timestamp"),
+        })
+        .collect())
+}
+
+/// Tape recorder heartbeat: a meta row with last-heartbeat info.
+#[derive(Debug, Clone, Serialize)]
+pub struct TapeMeta {
+    pub id: String,
+    pub underlying: String,
+    pub chain_code: String,
+    pub quota_accounting_json: String,
+    pub created_at: i64,
+}
+
+/// List tape recorder meta rows (heartbeat + quota accounting).
+pub async fn list_tape_meta(pool: &DbPool) -> Result<Vec<TapeMeta>> {
+    let rows = sqlx::query(
+        "SELECT id, underlying, chain_code, quota_accounting_json, created_at FROM option_tape_meta ORDER BY created_at DESC",
+    )
+    .fetch_all(pool)
+    .await
+    .context("list_tape_meta")?;
+    Ok(rows
+        .iter()
+        .map(|r| TapeMeta {
+            id: r.get("id"),
+            underlying: r.get("underlying"),
+            chain_code: r.get("chain_code"),
+            quota_accounting_json: r.get("quota_accounting_json"),
+            created_at: r.get("created_at"),
+        })
+        .collect())
 }
 
 /// Add nullable `actual_*` columns to the predictions table if they don't exist.
@@ -1612,6 +2165,230 @@ mod tests {
         let pool = test_pool().await;
         migrate_predictions(&pool).await.unwrap();
         migrate_predictions(&pool).await.unwrap();
+    }
+
+    // ── Phase 7 migration tests ──────────────────────────────────────────────
+
+    /// Build a pool with the PRE-Phase-7 schema: option_positions without the
+    /// new columns, option_fills / exit_intent_log with INTEGER position_id,
+    /// and engine_events without the equity column.
+    async fn old_schema_pool() -> DbPool {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            r#"CREATE TABLE option_positions (
+                id TEXT PRIMARY KEY, underlying TEXT NOT NULL, contract_code TEXT NOT NULL,
+                strategy_version_id TEXT NOT NULL, entry_underlying_price REAL NOT NULL,
+                entry_spread REAL NOT NULL, entry_slippage_budget REAL NOT NULL,
+                qty INTEGER NOT NULL, qty_filled_residual INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'OPEN', dte_at_entry INTEGER NOT NULL,
+                delta_at_entry REAL NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)"#,
+        )
+        .execute(&pool).await.unwrap();
+        sqlx::query(
+            r#"CREATE TABLE option_fills (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, position_id INTEGER NOT NULL,
+                stage TEXT NOT NULL, price REAL NOT NULL, quantity REAL NOT NULL,
+                timestamp INTEGER NOT NULL)"#,
+        )
+        .execute(&pool).await.unwrap();
+        sqlx::query(
+            r#"CREATE TABLE exit_intent_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, position_id INTEGER NOT NULL,
+                stage TEXT NOT NULL, order_id TEXT, limit_price REAL NOT NULL,
+                quantity REAL NOT NULL, timestamp TEXT NOT NULL)"#,
+        )
+        .execute(&pool).await.unwrap();
+        sqlx::query(
+            r#"CREATE TABLE engine_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL,
+                category TEXT NOT NULL, severity TEXT NOT NULL, mode TEXT NOT NULL,
+                source TEXT NOT NULL, message TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}')"#,
+        )
+        .execute(&pool).await.unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn migrate_option_positions_adds_new_columns() {
+        let pool = old_schema_pool().await;
+        migrate_option_positions(&pool).await.unwrap();
+
+        let rows = sqlx::query("PRAGMA table_info(option_positions)")
+            .fetch_all(&pool).await.unwrap();
+        let names: Vec<String> = rows.iter().map(|r| r.get::<String, _>(1)).collect();
+        assert!(names.contains(&"entry_premium".to_string()));
+        assert!(names.contains(&"realized_pnl".to_string()));
+        assert!(names.contains(&"closed_at".to_string()));
+
+        // Idempotent
+        migrate_option_positions(&pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn migrate_option_positions_rebuilds_integer_position_ids() {
+        let pool = old_schema_pool().await;
+
+        // Seed rows with INTEGER position_ids (pre-live schema)
+        sqlx::query(
+            "INSERT INTO option_fills (position_id, stage, price, quantity, timestamp) VALUES (7, 'ENTRY', 1.25, 2.0, 100)",
+        ).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO exit_intent_log (position_id, stage, order_id, limit_price, quantity, timestamp) VALUES (7, 'EXIT_STAGE_1', 'ord-1', 1.20, 2.0, '2026-08-19T00:00:00Z')",
+        ).execute(&pool).await.unwrap();
+
+        migrate_option_positions(&pool).await.unwrap();
+
+        // position_id must now be TEXT and rows preserved
+        let fill_row = sqlx::query("SELECT position_id, stage FROM option_fills")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(fill_row.get::<String, _>("position_id"), "7");
+        assert_eq!(fill_row.get::<String, _>("stage"), "ENTRY");
+
+        let intent_row = sqlx::query("SELECT position_id, order_id FROM exit_intent_log")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(intent_row.get::<String, _>("position_id"), "7");
+        assert_eq!(intent_row.get::<String, _>("order_id"), "ord-1");
+
+        // Verify column type flipped to TEXT
+        let rows = sqlx::query("PRAGMA table_info(option_fills)")
+            .fetch_all(&pool).await.unwrap();
+        let pos_type: String = rows.iter()
+            .find(|r| r.get::<String, _>(1) == "position_id")
+            .map(|r| r.get::<String, _>(2))
+            .unwrap();
+        assert_eq!(pos_type, "TEXT");
+    }
+
+    #[tokio::test]
+    async fn migrate_engine_events_adds_equity_column() {
+        let pool = old_schema_pool().await;
+        migrate_engine_events(&pool).await.unwrap();
+
+        let rows = sqlx::query("PRAGMA table_info(engine_events)")
+            .fetch_all(&pool).await.unwrap();
+        let names: Vec<String> = rows.iter().map(|r| r.get::<String, _>(1)).collect();
+        assert!(names.contains(&"equity".to_string()));
+
+        // Idempotent
+        migrate_engine_events(&pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn events_insert_and_search_roundtrip() {
+        let pool = test_pool().await;
+        insert_event(&pool, "strategy", "info", "paper", "options::entry",
+            "SKIPPED_ENTRY: macro gate denied QQQ", r#"{"vix":24.1}"#, Some("QQQ"))
+            .await.unwrap();
+        insert_event(&pool, "trade", "warn", "paper", "options::exit",
+            "circuit breaker tripped", "{}", Some("SMH"))
+            .await.unwrap();
+
+        // Search by category + mode
+        let hits = search_events(&pool, Some("strategy"), Some("paper"), None, None, None, 50)
+            .await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message, "SKIPPED_ENTRY: macro gate denied QQQ");
+        assert_eq!(hits[0].equity.as_deref(), Some("QQQ"));
+
+        // Search by equity
+        let smh = search_events(&pool, None, None, None, Some("SMH"), None, 50).await.unwrap();
+        assert_eq!(smh.len(), 1);
+        assert_eq!(smh[0].severity, "warn");
+
+        // Categories list
+        let cats = event_categories(&pool).await.unwrap();
+        assert!(cats.contains(&"strategy".to_string()));
+        assert!(cats.contains(&"trade".to_string()));
+    }
+
+    #[tokio::test]
+    async fn options_config_kv_set_get_list() {
+        let pool = test_pool().await;
+        set_options_config(&pool, "risk_pct", "0.01", "strategy").await.unwrap();
+        set_options_config(&pool, "dte_exit_min", "7", "rail").await.unwrap();
+
+        let v = get_options_config(&pool, "risk_pct").await.unwrap();
+        assert_eq!(v.as_deref(), Some("0.01"));
+
+        // Upsert overwrites
+        set_options_config(&pool, "risk_pct", "0.02", "strategy").await.unwrap();
+        let v = get_options_config(&pool, "risk_pct").await.unwrap();
+        assert_eq!(v.as_deref(), Some("0.02"));
+
+        let all = list_options_config(&pool).await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[1].0, "risk_pct"); // ordered by key
+
+        // Missing key
+        let missing = get_options_config(&pool, "nope").await.unwrap();
+        assert!(missing.is_none());
+    }
+
+    #[tokio::test]
+    async fn hyperopt_runs_insert_complete_list() {
+        let pool = test_pool().await;
+        let id = insert_hyperopt_run(&pool).await.unwrap();
+
+        // Running state visible
+        let runs = list_hyperopt_runs(&pool, 10).await.unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, "RUNNING");
+        assert!(runs[0].finished_at.is_none());
+
+        complete_hyperopt_run(&pool, id, "SUCCESS", 3, 12, 0, None).await.unwrap();
+
+        let runs = list_hyperopt_runs(&pool, 10).await.unwrap();
+        assert_eq!(runs[0].status, "SUCCESS");
+        assert_eq!(runs[0].equities_processed, 3);
+        assert_eq!(runs[0].candidates_stored, 12);
+        assert!(runs[0].finished_at.is_some());
+        assert!(runs[0].error.is_none());
+
+        // Failure path
+        let id2 = insert_hyperopt_run(&pool).await.unwrap();
+        complete_hyperopt_run(&pool, id2, "FAILED", 0, 0, 0, Some("tape missing")).await.unwrap();
+        let runs = list_hyperopt_runs(&pool, 10).await.unwrap();
+        assert_eq!(runs[0].status, "FAILED");
+        assert_eq!(runs[0].error.as_deref(), Some("tape missing"));
+    }
+
+    #[tokio::test]
+    async fn option_positions_and_fills_roundtrip() {
+        let pool = test_pool().await;
+        sqlx::query(
+            r#"INSERT INTO option_positions
+               (id, underlying, contract_code, strategy_version_id, entry_underlying_price,
+                entry_premium, entry_spread, entry_slippage_budget, qty, dte_at_entry,
+                delta_at_entry, created_at, updated_at)
+               VALUES ('pos-1', 'QQQ', 'QQQ 260918C400', 'v_QQQ_1', 480.0, 5.25, 0.10, 0.5,
+                       2, 34, 0.45, 100, 100)"#,
+        ).execute(&pool).await.unwrap();
+
+        sqlx::query(
+            "INSERT INTO option_fills (position_id, stage, price, quantity, timestamp) VALUES ('pos-1', 'ENTRY', 5.25, 2.0, 100)",
+        ).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO option_fills (position_id, stage, price, quantity, timestamp) VALUES ('pos-1', 'EXIT_STAGE_1', 5.90, 2.0, 200)",
+        ).execute(&pool).await.unwrap();
+
+        let open = list_option_positions(&pool, Some("QQQ"), Some("OPEN"), 10).await.unwrap();
+        assert_eq!(open.len(), 1);
+        assert!((open[0].entry_premium - 5.25).abs() < 1e-9);
+        assert!(open[0].realized_pnl.is_none());
+
+        let fills = list_option_fills(&pool, "pos-1").await.unwrap();
+        assert_eq!(fills.len(), 2);
+        assert_eq!(fills[0].stage, "ENTRY");
+        assert_eq!(fills[1].stage, "EXIT_STAGE_1");
+
+        // Filter by closed status returns nothing
+        let closed = list_option_positions(&pool, None, Some("CLOSED"), 10).await.unwrap();
+        assert_eq!(closed.len(), 0);
     }
 
     #[tokio::test]
