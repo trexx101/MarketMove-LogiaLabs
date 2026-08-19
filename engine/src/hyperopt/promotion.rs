@@ -246,6 +246,7 @@ impl PromotionPipeline {
 pub async fn apply_pending_promotions(
     pool: &crate::db::DbPool,
     equity: &str,
+    mode: &str,
     pipeline: &PromotionPipeline,
     store: &CandidateStore,
 ) -> Result<(usize, usize)> {
@@ -287,6 +288,27 @@ pub async fn apply_pending_promotions(
             format!("DENIED: {}", result.reason)
         };
         crate::db::mark_pending_promotion_applied(pool, &pending.version_id, &outcome).await?;
+
+        // Publish promotion outcome event for the Events tab (strategy category)
+        let payload = serde_json::json!({
+            "version_id": pending.version_id,
+            "target_status": pending.target_status,
+            "outcome": outcome,
+        });
+        if let Err(e) = crate::db::insert_event(
+            pool,
+            "strategy",
+            if result.promoted { "info" } else { "warn" },
+            mode,
+            "hyperopt::promotion",
+            &format!("PROMOTION {equity} {}: {outcome}", pending.version_id),
+            &payload.to_string(),
+            Some(equity),
+        )
+        .await
+        {
+            tracing::error!(equity, error = %e, "failed to record PROMOTION event");
+        }
     }
 
     Ok((applied, skipped))
@@ -347,6 +369,17 @@ mod tests {
                 applied_result     TEXT,
                 UNIQUE(version_id, equity)
             );
+            CREATE TABLE IF NOT EXISTS engine_events (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts           INTEGER NOT NULL,
+                category     TEXT    NOT NULL,
+                severity     TEXT    NOT NULL,
+                mode         TEXT    NOT NULL,
+                source       TEXT    NOT NULL,
+                message      TEXT    NOT NULL,
+                payload_json TEXT    NOT NULL DEFAULT '{}',
+                equity       TEXT
+            );
             "#,
         )
         .execute(&pool)
@@ -401,7 +434,7 @@ mod tests {
 
         // No open positions → promotion applies at the boundary
         let (applied, skipped) =
-            apply_pending_promotions(&pool, "QQQ", &pipeline, &store).await.unwrap();
+            apply_pending_promotions(&pool, "QQQ", "paper", &pipeline, &store).await.unwrap();
         assert_eq!(applied, 1);
         assert_eq!(skipped, 0);
 
@@ -410,6 +443,14 @@ mod tests {
 
         // Request marked applied, no longer pending
         assert!(crate::db::fetch_pending_promotion(&pool, &version_id).await.unwrap().is_none());
+
+        // Promotion outcome event published via insert_event (category + mode searchable)
+        let events = crate::db::search_events(&pool, Some("strategy"), Some("paper"), None, Some("QQQ"), None, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(events[0].message.contains("PROMOTION QQQ"));
+        assert!(events[0].message.contains("PROMOTED to Paper"));
     }
 
     #[tokio::test]
@@ -429,7 +470,7 @@ mod tests {
         // Open position → D13 mid-exit block: stays queued, status untouched
         insert_open_position(&pool, "QQQ").await;
         let (applied, skipped) =
-            apply_pending_promotions(&pool, "QQQ", &pipeline, &store).await.unwrap();
+            apply_pending_promotions(&pool, "QQQ", "paper", &pipeline, &store).await.unwrap();
         assert_eq!(applied, 0);
         assert_eq!(skipped, 1);
 
@@ -465,7 +506,7 @@ mod tests {
 
         // Boundary for QQQ must not touch SMH's queue
         let (applied, skipped) =
-            apply_pending_promotions(&pool, "QQQ", &pipeline, &store).await.unwrap();
+            apply_pending_promotions(&pool, "QQQ", "paper", &pipeline, &store).await.unwrap();
         assert_eq!(applied, 0);
         assert_eq!(skipped, 0);
         let snapshot = store.get(&version_id).await.unwrap().unwrap();

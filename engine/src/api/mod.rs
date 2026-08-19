@@ -88,6 +88,7 @@ pub fn router(pool: db::DbPool, config: &Config, tx: ws::TelemetrySender) -> Rou
         .route("/api/hyperopt/:equity/candidates/:id", get(hyperopt::get_candidate))
         .route("/api/hyperopt/:equity/promote/:id", post(hyperopt::promote_candidate))
         .route("/api/hyperopt/:equity/status", get(hyperopt::get_status))
+        .route("/api/events", get(events::handle_list_events))
         .route("/api/mode", get(mode::handle_get_mode))
         .route("/api/mode", post(mode::handle_set_mode))
         .route("/api/v1/ws", get(ws::ws_handler))
@@ -124,6 +125,7 @@ pub mod mode;
 pub mod hyperopt;
 mod quote;
 mod strategy_config;
+pub mod events;
 
 #[cfg(test)]
 mod tests;

@@ -198,7 +198,7 @@ impl OptionsScheduler {
         let pipeline = crate::hyperopt::PromotionPipeline::new();
         let cand_store = crate::hyperopt::CandidateStore::new(self.pool.clone());
         match crate::hyperopt::promotion::apply_pending_promotions(
-            &self.pool, equity, &pipeline, &cand_store,
+            &self.pool, equity, &self.config.mode, &pipeline, &cand_store,
         )
         .await
         {
@@ -361,6 +361,41 @@ impl OptionsScheduler {
             premium = selected_chain.ask * sizing_decision.contracts as f64 * 100.0,
             "entry initiated"
         );
+
+        // Publish ENTRY_INITIATED event for the Events tab (trade category)
+        let payload = serde_json::json!({
+            "candle_ts": candle_ts,
+            "symbol": selected_chain.symbol,
+            "expiry": selected_chain.expiry,
+            "strike": selected_chain.strike,
+            "option_type": selected_chain.option_type,
+            "delta": selected_chain.delta,
+            "dte": selected_chain.dte,
+            "ask": selected_chain.ask,
+            "contracts": sizing_decision.contracts,
+            "total_premium": sizing_decision.total_premium,
+        });
+        if let Err(e) = db::insert_event(
+            &self.pool,
+            "trade",
+            "info",
+            &self.config.mode,
+            "options::entry",
+            &format!(
+                "ENTRY_INITIATED {equity}: {} {} {} @ {:.2} x{}",
+                selected_chain.symbol,
+                selected_chain.expiry,
+                selected_chain.option_type,
+                selected_chain.ask,
+                sizing_decision.contracts
+            ),
+            &payload.to_string(),
+            Some(equity),
+        )
+        .await
+        {
+            error!(equity, error = %e, "failed to record ENTRY_INITIATED event");
+        }
 
         Ok(EntryPipelineResult {
             entry_initiated: true,
