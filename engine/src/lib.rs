@@ -8,6 +8,7 @@ pub mod features;
 pub mod market_hours;
 pub mod normalize;
 pub mod options;
+pub mod hyperopt;
 pub mod options_recorder;
 pub mod parity;
 pub mod scheduler;
