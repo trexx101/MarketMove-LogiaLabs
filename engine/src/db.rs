@@ -220,6 +220,18 @@ CREATE TABLE IF NOT EXISTS option_tape_meta (
 );
 CREATE INDEX IF NOT EXISTS option_tape_meta_underlying_chain_idx
     ON option_tape_meta (underlying, chain_code);
+
+CREATE TABLE IF NOT EXISTS exit_intent_log (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_id   INTEGER NOT NULL,
+    stage         TEXT    NOT NULL,
+    order_id      TEXT,
+    limit_price   REAL    NOT NULL,
+    quantity      REAL    NOT NULL,
+    timestamp     TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS exit_intent_log_position_idx
+    ON exit_intent_log (position_id, timestamp);
 "#;
 
 /// A single OHLCV + VWAP candle as stored in the database.

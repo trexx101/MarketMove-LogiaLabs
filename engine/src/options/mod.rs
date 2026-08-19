@@ -6,3 +6,4 @@ pub mod staged_ladder;
 pub mod trailing_stop;
 pub mod circuit_breaker;
 pub mod reconciliation;
+pub mod intent_log;
