@@ -80,9 +80,10 @@
     }
 
     try {
-      const td = await fetchEquityTrades(symbol || '*', 200);
+      const td = await fetchEquityTrades('*', 500);
       setSlice(mid, 'trades', (td.trades || []).map((t) => ({
         time: t.ts,
+        symbol: t.symbol,
         side: t.side,
         qty: t.qty,
         price: t.price,

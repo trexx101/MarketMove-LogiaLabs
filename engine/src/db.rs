@@ -1690,6 +1690,7 @@ pub struct TradeRow {
     pub fee: f64,
     pub realized_pnl: f64,
     pub created_at: i64,
+    pub symbol: String,
 }
 
 /// Fetch the `limit` most recent predictions, ordered newest-first.
@@ -1748,6 +1749,9 @@ pub async fn fetch_recent_trades(pool: &DbPool, limit: usize) -> Result<Vec<Trad
             fee: row.get(5),
             realized_pnl: row.get(6),
             created_at: row.get(7),
+            // Legacy `trades` table has no `symbol` column; this path is
+            // dead code (`#[allow(dead_code)]`) and never reaches the API.
+            symbol: String::new(),
         })
         .collect())
 }
@@ -1770,7 +1774,7 @@ pub async fn fetch_recent_equity_trades(
     limit: usize,
 ) -> Result<Vec<TradeRow>> {
     let rows = sqlx::query(
-        "SELECT id, candle_ts, side, qty, price, fee, realized_pnl, created_at
+        "SELECT id, candle_ts, side, qty, price, fee, realized_pnl, created_at, symbol
          FROM equity_trades
          WHERE symbol = ?1
          ORDER BY id DESC
@@ -1793,6 +1797,7 @@ pub async fn fetch_recent_equity_trades(
             fee: row.get(5),
             realized_pnl: row.get(6),
             created_at: row.get(7),
+            symbol: row.get(8),
         })
         .collect())
 }
@@ -2549,7 +2554,7 @@ pub async fn fetch_recent_all_equity_trades(
     limit: usize,
 ) -> Result<Vec<TradeRow>> {
     let rows = sqlx::query(
-        "SELECT id, candle_ts, side, qty, price, fee, realized_pnl, created_at
+        "SELECT id, candle_ts, side, qty, price, fee, realized_pnl, created_at, symbol
          FROM equity_trades
          ORDER BY id DESC
          LIMIT ?1",
@@ -2570,6 +2575,7 @@ pub async fn fetch_recent_all_equity_trades(
             fee: row.get(5),
             realized_pnl: row.get(6),
             created_at: row.get(7),
+            symbol: row.get(8),
         })
         .collect())
 }

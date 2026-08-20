@@ -478,6 +478,7 @@ fn compute_atr_for_bar(candles: &[crate::db::EquityCandle], period: usize) -> Op
 pub(crate) struct EquityTradePoint {
     id: i64,
     ts: String,
+    symbol: String,
     side: String,
     qty: f64,
     price: f64,
@@ -530,6 +531,7 @@ pub(crate) async fn handle_equity_trades(
             EquityTradePoint {
                 id: r.id,
                 ts: super::ts_to_rfc3339(r.candle_ts),
+                symbol: r.symbol.clone(),
                 side: r.side.clone(),
                 qty: r.qty,
                 price: r.price,

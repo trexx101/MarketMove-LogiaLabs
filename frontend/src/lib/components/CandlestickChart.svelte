@@ -49,7 +49,12 @@
         liveQuote = data.live_quote;
       }
 
-      chartData.set(data);
+      // NOTE: `chartData` is a derived store (computed from the active model
+      // slice), so it has no `.set()`. Writing to it throws and would skip the
+      // draw() below — that is what made the timeframe selector a no-op.
+      // The chart draws from the local `candles`/`sma` we set above, so we
+      // just draw directly. The initial/slice-driven data still arrives via
+      // the `$: if ($chartData)` reactive block.
       draw();
     } catch (e) {
       console.warn('chart refresh failed:', e.message);
