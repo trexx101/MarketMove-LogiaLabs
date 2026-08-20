@@ -121,7 +121,6 @@ pub fn router(
         .route("/api/hyperopt/:equity/candidates/:id", get(hyperopt::get_candidate))
         .route("/api/hyperopt/:equity/promote/:id", post(hyperopt::promote_candidate))
         .route("/api/hyperopt/:equity/status", get(hyperopt::get_status))
-        .route("/api/events", get(events::handle_events))
         .route("/api/options/positions", get(options::handle_list_positions))
         .route("/api/options/trades", get(options::handle_list_trades))
         .route("/api/options/config", get(options::handle_get_config))
