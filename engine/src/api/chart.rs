@@ -45,6 +45,8 @@ pub(crate) struct SmaPoint {
 pub(crate) struct ChartQuery {
     pub range: Option<String>,
     pub limit: Option<i64>,
+    #[serde(default)]
+    pub symbol: Option<String>,
 }
 
 impl ChartQuery {
@@ -60,7 +62,7 @@ impl ChartQuery {
     }
 }
 
-/// `GET /api/chart?range=5y&limit=500`
+/// `GET /api/chart?symbol=QQQ&range=5y&limit=500`
 ///
 /// Always attempts a fresh Yahoo Finance backfill so the chart is never stale.
 /// Also fetches the current live quote to anchor the price line and projections.
@@ -71,15 +73,17 @@ pub(crate) async fn handle_chart(
     let query = ChartQuery {
         range: params.get("range").cloned(),
         limit: params.get("limit").and_then(|s| s.parse().ok()),
+        symbol: params.get("symbol").cloned(),
     };
     let limit = query.limit() as i64;
     let range = query.range();
+    let symbol = query.symbol.as_deref().unwrap_or(&state.symbol);
 
     // Always try to refresh from Yahoo (will skip if data is fresh enough).
     let backfill_started = std::time::Instant::now();
     let backfill_err = match crate::data::yahoo::backfill(
         &state.pool,
-        &state.symbol,
+        symbol,
         200,
         range,
         43_200, // 12-hour stale threshold
@@ -89,7 +93,7 @@ pub(crate) async fn handle_chart(
         Ok(n) => {
             if n > 0 {
                 tracing::info!(
-                    symbol = %state.symbol,
+                    symbol,
                     fetched = n,
                     range,
                     elapsed_ms = backfill_started.elapsed().as_millis(),
@@ -99,7 +103,7 @@ pub(crate) async fn handle_chart(
             None
         }
         Err(e) => {
-            tracing::warn!(symbol = %state.symbol, error = %e, "chart backfill failed");
+            tracing::warn!(symbol, error = %e, "chart backfill failed");
             Some(e)
         }
     };
@@ -108,27 +112,26 @@ pub(crate) async fn handle_chart(
     sleep(Duration::from_millis(50)).await;
 
     let candles =
-        db::fetch_recent_equity_candles(&state.pool, &state.symbol, limit)
+        db::fetch_recent_equity_candles(&state.pool, symbol, limit)
             .await
             .map_err(|e| internal_error("fetch_recent_equity_candles", e))?;
 
-    // Detect staleness: no candles OR latest candle > 48h old.
+    // Detect staleness: no candles OR NEWEST candle > 48h old.
+    // fetch_recent_equity_candles returns newest-first (ORDER BY ts DESC).
     let now_ts = chrono::Utc::now().timestamp();
-    let latest_ts = candles.last().map(|c| c.ts).unwrap_or(0);
+    let latest_ts = candles.first().map(|c| c.ts).unwrap_or(0);
     let stale = candles.is_empty()
         || now_ts.saturating_sub(latest_ts) > 172_800; // 48 h
 
     // Fetch live quote — Moomoo first, Yahoo fallback.
-    // It anchors the live-price dashed line and the prediction projections.
-    let live_quote = fetch_live_quote(&state.symbol).await;
+    let live_quote = fetch_live_quote(symbol).await;
 
     if candles.is_empty() && live_quote.is_none() {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             format!(
-                "no candle data for {} and live quote unavailable — \
-                 ensure /api/equity/backfill has been run or check network access",
-                state.symbol
+                "no candle data for {symbol} and live quote unavailable — \
+                 ensure /api/equity/backfill has been run or check network access"
             ),
         ));
     }

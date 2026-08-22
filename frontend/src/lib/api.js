@@ -27,13 +27,17 @@ export async function fetchHyperoptStatus(equity) {
  * Gated: promotion only succeeds if the candidate meets evidence requirements.
  * @param {string} equity - equity the candidate belongs to
  * @param {string} id - candidate version id
+ * @param {string} targetStatus - next stage the caller wants (PAPER | MICRO | LIVE)
  * @returns {Promise<{success: boolean, message: string}>}
  */
-export async function promoteCandidate(equity, id) {
+export async function promoteCandidate(equity, id, targetStatus) {
+  if (!['PAPER', 'MICRO', 'LIVE'].includes(targetStatus)) {
+    throw new Error(`promote: target_status must be PAPER, MICRO or LIVE (got ${targetStatus})`);
+  }
   const res = await fetch(`${API_BASE}/hyperopt/${equity}/promote/${id}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ target_status: 'AUTO' }),
+    body: JSON.stringify({ target_status: targetStatus }),
   });
   if (!res.ok) throw new Error(`promote: ${res.status}`);
   return res.json();
@@ -41,43 +45,53 @@ export async function promoteCandidate(equity, id) {
 
 /**
  * Fetch current system status.
+ * @param {string} [symbol] - Optional symbol filter (e.g. "QQQ", "NVDA")
  * @returns {Promise<object>} StatusResponse
  */
-export async function fetchStatus() {
-  const res = await fetch(`${API_BASE}/status`);
+export async function fetchStatus(symbol) {
+  let url = `${API_BASE}/status`;
+  if (symbol) url += `?symbol=${encodeURIComponent(symbol)}`;
+  const res = await fetch(url);
   if (!res.ok) throw new Error(`status: ${res.status}`);
   return res.json();
 }
 
 /**
  * Fetch recent predictions.
+ * @param {string} [symbol] - Optional symbol filter
  * @returns {Promise<object>} PredictionsResponse
  */
-export async function fetchPredictions() {
-  const res = await fetch(`${API_BASE}/predictions`);
+export async function fetchPredictions(symbol) {
+  let url = `${API_BASE}/predictions`;
+  if (symbol) url += `?symbol=${encodeURIComponent(symbol)}`;
+  const res = await fetch(url);
   if (!res.ok) throw new Error(`predictions: ${res.status}`);
   return res.json();
 }
 
 /**
  * Fetch chart data (candles + SMA).
- * Default 90 daily candles (~6 months) so prediction cones have room to render.
- * Pass a different limit (10-1500) to widen/narrow the window.
  * @param {number} [limit=90] Number of candles to fetch
+ * @param {string} [symbol] - Optional symbol filter
  * @returns {Promise<object>} ChartResponse
  */
-export async function fetchChart(limit = 90) {
-  const res = await fetch(`${API_BASE}/chart?limit=${limit}`);
+export async function fetchChart(limit = 90, symbol) {
+  let url = `${API_BASE}/chart?limit=${limit}`;
+  if (symbol) url += `&symbol=${encodeURIComponent(symbol)}`;
+  const res = await fetch(url);
   if (!res.ok) throw new Error(`chart: ${res.status}`);
   return res.json();
 }
 
 /**
  * Fetch model accuracy / IC drift metrics.
+ * @param {string} [symbol] - Optional symbol filter
  * @returns {Promise<object|null>} AccuracyResponse or null if unavailable
  */
-export async function fetchAccuracy() {
-  const res = await fetch(`${API_BASE}/accuracy`);
+export async function fetchAccuracy(symbol) {
+  let url = `${API_BASE}/accuracy`;
+  if (symbol) url += `?symbol=${encodeURIComponent(symbol)}`;
+  const res = await fetch(url);
   if (!res.ok) return null;
   return res.json();
 }

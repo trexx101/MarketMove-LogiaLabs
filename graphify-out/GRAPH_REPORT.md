@@ -1,16 +1,16 @@
-# Graph Report - MarketMoves  (2026-07-28)
+# Graph Report - MarketMoves  (2026-08-22)
 
 ## Corpus Check
-- 336 files · ~241,218 words
+- 408 files · ~342,155 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 3194 nodes · 5506 edges · 250 communities (230 shown, 20 thin omitted)
-- Extraction: 79% EXTRACTED · 21% INFERRED · 0% AMBIGUOUS · INFERRED: 1132 edges (avg confidence: 0.8)
+- 4690 nodes · 8689 edges · 300 communities (286 shown, 14 thin omitted)
+- Extraction: 87% EXTRACTED · 13% INFERRED · 0% AMBIGUOUS · INFERRED: 1146 edges (avg confidence: 0.79)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `4b228120`
+- Built from commit: `bc2c65e8`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -46,6 +46,7 @@
 - Find Skills CLI
 - Graphify Plugin
 - Agent Rules
+- Engine Entry Point
 - Inference Test Fixtures
 - Data Pipeline Design
 - Docker Cache Issue
@@ -124,6 +125,7 @@
 - Prompt: Convert a Plan into Per-Feature Implementation Specs
 - Feature Pipeline (log_return, ATR, VWAP)
 - AGENTS.md
+- Training_model_Design.md
 - 8.8 Documentation in Rust: How, When and Why
 - Market Data Commands
 - Market Data Commands
@@ -194,8 +196,6 @@
 - Institutional Holdings
 - Resolve Option Shorthand Code
 - paper_verification.rs
-- Cryptocurrency (Crypto)
-- Company Info
 - Earnings & Calendar
 - Macro Data
 - get_indicator_list.py
@@ -212,7 +212,6 @@
 - which_npm
 - spa_fallback_handler
 - ARK Fund
-- Paper Trading vs Live Trading
 - Corporate Actions
 - Other Market Data
 - Query Combo Order Trading Info
@@ -231,12 +230,8 @@
 - Subscription Management Commands
 - Dividend & SOE
 - Financials — Earnings Analysis
-- Financials — Statements & Revenue
-- Research — Analyst Ratings
-- Short Selling
 - Indicators
 - Research — Valuation
-- Push Reception Commands
 - get_earnings_beat_rank
 - get_high_dividend_soe_rank
 - get_option_strategy_analysis
@@ -255,106 +250,152 @@
 - Get Plate Constituents / Index Constituents
 - verify_version.md
 - Get Plate Constituents / Index Constituents
+- reconciliation.rs
+- scheduler.rs
+- record_option_quotes.py
+- context.rs
+- moomoo.rs
+- Strategy Configuration UI & Runtime Config Plan
+- IntentLogEntry
+- Task Breakdown
+- Option
+- generate_briefing
+- prompt.rs
+- EntryExecutor
+- PSQ Short + QQQ Long: Higher-Frequency Trading Strategy Plan
+- .replay
+- sizing.rs
+- hyperopt.rs
+- chain_selector.rs
+- macro_gate.rs
+- .check
+- bsm.rs
+- strategy_parity.rs
+- handle_put
+- 2. Phases
+- deploy/
+- predictions.rs
+- yahoo.rs
+- test_pool
+- next_position
+- Data Source Consolidation Plan
+- Dashboard.svelte
+- evaluate_rhai_strategy
+- String
+- replay.rs
+- ../lib/components/CandlestickChart.svelte
+- 5.1 Tests as Living Documentation
+- generate_chat_response
+- handle_backtest
+- ../lib/api.js
+- OptionsSettings.svelte
+- archive.rs
+- parse_cboe_csv
+- 3.3 Runtime Paper/Live Toggle
+- Troubleshooting
+- 1.2 Svelte Dashboard (`frontend/src/views/Dashboard.svelte`)
+- handle_quote
+- count_strategy_versions_by_status
+- Environment variables
+- list_hyperopt_runs
 
 ## God Nodes (most connected - your core abstractions)
-1. `safe_close()` - 175 edges
+1. `safe_close()` - 177 edges
 2. `check_ret()` - 173 edges
-3. `create_quote_context()` - 151 edges
+3. `create_quote_context()` - 153 edges
 4. `is_empty()` - 138 edges
 5. `df_to_records()` - 102 edges
-6. `Market Data Commands` - 38 edges
+6. `AppState` - 61 edges
 7. `Market Data Commands` - 38 edges
-8. `print_display_df()` - 34 edges
-9. `safe_get()` - 29 edges
-10. `compute_equity_features()` - 27 edges
+8. `Market Data Commands` - 38 edges
+9. `print_display_df()` - 34 edges
+10. `compute_equity_features()` - 30 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `ATR Indicator` --semantically_similar_to--> `Feature Engineering Pipeline`  [INFERRED] [semantically similar]
-  .agents/skills/technical-analysis/SKILL.md → Training_model_Design.md
-- `Rolling Z-Score Normalization` --semantically_similar_to--> `Rolling Feature Pipeline`  [INFERRED] [semantically similar]
-  Training_model_Design.md → README.md
-- `SMA Indicator` --semantically_similar_to--> `Regime-Filtered Swing Backtester`  [INFERRED] [semantically similar]
-  .agents/skills/technical-analysis/SKILL.md → Training_model_Design.md
-- `MarketMarkovNet` --conceptually_related_to--> `MarketMarkovNet Neural Architecture`  [INFERRED]
-  README.md → Training_model_Design.md
-- `Inference Service (Python/PyTorch)` --conceptually_related_to--> `MarketMarkovNet Neural Architecture`  [INFERRED]
-  README.md → Training_model_Design.md
+- `draw()` --calls--> `yScale()`  [INFERRED]
+  frontend/src/lib/components/CandlestickChart.svelte → frontend/src/lib/components/PnLEquityCurve.svelte
+- `Parity gate` --conceptually_related_to--> `Parity Marker Refresh`  [INFERRED]
+  README.md → deploy/README.md
+- `ZMQ REQ/REP Protocol` --conceptually_related_to--> `ZMQ_ENDPOINT Configuration`  [INFERRED]
+  README.md → deploy/config.md
+- `TRADING_MODE Configuration` --conceptually_related_to--> `Paper Trading Mode`  [INFERRED]
+  deploy/config.md → README.md
+- `TRADING_MODE Configuration` --conceptually_related_to--> `Live Trading Mode`  [INFERRED]
+  deploy/config.md → README.md
 
 ## Import Cycles
-- None detected.
+- 1-file cycle: `engine/src/api/hyperopt.rs -> engine/src/api/hyperopt.rs`
 
 ## Hyperedges (group relationships)
-- **MarketMarkovNet System Architecture** — readme_marketmarkovnet, readme_inference_service, readme_engine_service, readme_frontend, readme_zmq_reqrep, readme_kraken_v2, readme_sqlite, readme_axum_telemetry [EXTRACTED 1.00]
-- **MarketMarkovNet Model Training Pipeline** — training_model_design_marketmarkovnet_model, training_model_design_feature_engineering, training_model_design_backbone_pretraining, training_model_design_markov_alignment, training_model_design_directional_temporal_loss, training_model_design_causal_conv1d, training_model_design_draft_heads, training_model_design_markov_heads [EXTRACTED 1.00]
 - **Docker Compose Full Deployment Stack** — deploy_docker_compose_yml_inference_service, deploy_docker_compose_yml_engine_service, deploy_docker_compose_yml_proxy_service, deploy_docker_compose_yml_mmn_network, deploy_docker_compose_yml_caddy_proxy [EXTRACTED 1.00]
 - **Parity Verification System (Gate + Harness + Marker)** — plans_market_markov_net_requirements_parity_gate, plans_market_markov_net_features_13_parity_harness, plans_market_markov_net_features_13_parity_marker, plans_market_markov_net_features_13_golden_fixture, tests_readme_feature_parity, tests_readme_prediction_parity, tests_readme_signal_parity, plans_market_markov_net_features_12_live_mode_guard [EXTRACTED 1.00]
 - **Data Ingestion to Prediction End-to-End Flow** — plans_market_markov_net_features_06_kraken_ws_ingest, plans_market_markov_net_features_06_rest_backfill, plans_market_markov_net_features_07_feature_pipeline, plans_market_markov_net_features_07_zscore_normalization, plans_market_markov_net_features_07_zmq_bridge, inference_readme_zmq_rep, inference_readme_prediction_payload [EXTRACTED 1.00]
 
-## Communities (250 total, 20 thin omitted)
+## Communities (300 total, 14 thin omitted)
 
 ### Community 0 - "Inference Service"
 Cohesion: 0.16
 Nodes (18): device, _handle_request(), Tensor, MarketMarkovNet inference microservice (ZMQ REP).  Binds a ZeroMQ REP socket and, Block until ``model_path`` exists (useful for Docker startup ordering)., Start the ZMQ REP loop.  Blocks until a shutdown signal is received., Convert a nested list (seq_len × n_features) to a model-ready tensor.      Retur, Decode one REQ message, run inference, and return the serialized reply. (+10 more)
 
 ### Community 1 - "Kraken Execution"
-Cohesion: 0.29
-Nodes (12): flat_to_long_opens_position(), long_to_flat_closes_with_pnl(), long_to_short_closes_and_opens(), PaperExecutor, DbPool, Option, Result, Self (+4 more)
+Cohesion: 0.21
+Nodes (17): flat_to_long_opens_position(), flat_to_short_buys_psq(), long_to_flat_closes_with_pnl(), long_to_short_trades_qqq_then_psq(), PaperExecutor, DbPool, FillResult, Option (+9 more)
 
 ### Community 2 - "Parity Verification"
-Cohesion: 0.06
-Nodes (77): build_fixture(), Candle, golden_fixture_round_trips_json(), golden_fixture_sha256_is_stable(), GoldenCandle, GoldenFeature, GoldenFixture, GoldenPrediction (+69 more)
+Cohesion: 0.07
+Nodes (54): build_fixture(), Candle, golden_fixture_round_trips_json(), golden_fixture_sha256_is_stable(), GoldenCandle, GoldenFeature, GoldenFixture, GoldenPrediction (+46 more)
 
 ### Community 3 - "Deployment Infrastructure"
 Cohesion: 0.22
 Nodes (11): Live Mode Guard, Golden Fixture (parity_golden_168h.json), Parity Harness, parity_verified.json Marker, Feature 12: Paper Trading Verification, Feature 13: Regression Parity Harness, Feature 14: Docker Compose Deploy, Paper Trading as Default Mode (+3 more)
 
 ### Community 4 - "Configuration Management"
-Cohesion: 0.12
-Nodes (33): BinanceConfig, clear_engine_env(), Config, config_round_trips_through_serde(), custom_env_overrides_defaults(), defaults_load_when_env_unset(), empty_parity_marker_path_rejected(), empty_symbol_rejected() (+25 more)
+Cohesion: 0.11
+Nodes (39): BinanceConfig, clear_engine_env(), Config, defaults_load_when_env_unset(), empty_parity_marker_path_rejected(), empty_symbol_rejected(), env_or(), invalid_enable_shorting_rejected() (+31 more)
 
 ### Community 5 - "Trading Strategy"
-Cohesion: 0.06
-Nodes (51): Box, BacktestPayload, handle_backtest(), ApiResult, Json, Option, State, String (+43 more)
+Cohesion: 0.16
+Nodes (20): compute(), compute_daily_returns(), compute_max_drawdown(), compute_trade_stats(), count_trading_days(), Vec, test_empty_curve(), test_max_drawdown() (+12 more)
 
 ### Community 6 - "Feature Computation"
 Cohesion: 0.08
 Nodes (38): FeatureRowV2, candle(), compute_features(), compute_features_atr_rolling_mean(), compute_features_atr_window_clamp(), compute_features_empty_returns_empty(), compute_features_log_return_correct(), compute_features_parity_contract_matches_colab() (+30 more)
 
 ### Community 7 - "Axum Telemetry API"
-Cohesion: 0.22
-Nodes (13): Config, handle_chart(), ApiResult, State, AppState, internal_error(), router(), DbPool (+5 more)
+Cohesion: 0.13
+Nodes (27): AppState, internal_error(), router(), Arc, Config, DbPool, Error, HashMap (+19 more)
 
 ### Community 8 - "Frontend SPA"
 Cohesion: 0.01
-Nodes (59): _build_crypto_ctx(), _check_opend_reachable(), _check_version_stamp(), _crypto_firm_cache_clear(), _crypto_firm_cache_read(), _crypto_firm_cache_write(), _detect_ai_type_support(), _detect_crypto_firm() (+51 more)
+Nodes (73): _build_crypto_ctx(), _build_permission_hint(), _build_permission_hint_json(), _check_opend_reachable(), _check_version_stamp(), _crypto_firm_cache_clear(), _crypto_firm_cache_read(), _crypto_firm_cache_write() (+65 more)
 
 ### Community 9 - "Rust Best Practices"
 Cohesion: 0.15
 Nodes (11): Clippy Linting Discipline, Important Clippy Lints, Snapshot Testing with cargo insta, Automated Testing Practices, Dynamic Dispatch, Generics and Dispatch, Static Dispatch, PhantomData Usage (+3 more)
 
 ### Community 10 - "ZMQ Bridge"
-Cohesion: 0.23
-Nodes (16): ExecutorKind, compute_atr_ratio(), EquityScheduler, fake_prediction(), process_sets_last_processed_after_prediction(), process_skips_when_insufficient_candles(), DbPool, Option (+8 more)
+Cohesion: 0.06
+Nodes (54): EquityPrediction, Prediction, Duration, Result, Self, ZmqBridge, Display, Formatter (+46 more)
 
 ### Community 11 - "Database Layer"
-Cohesion: 0.06
-Nodes (93): Client, AccuracyResponse, equity_prediction_to_dto(), handle_accuracy(), handle_predictions(), prediction_to_dto(), PredictionDto, PredictionsResponse (+85 more)
+Cohesion: 0.16
+Nodes (28): equity_candles_upsert_and_count(), EquityCandle, EquityPredictionRow, fetch_equity_candles(), fetch_equity_candles_asc(), fetch_equity_candles_desc(), fetch_equity_candles_range_asc(), fetch_equity_candles_returns_recent_first() (+20 more)
 
 ### Community 12 - "Inference Config & Tests"
 Cohesion: 0.19
 Nodes (19): CaptureFixture, main(), clean_env(), Path, Tests for ``inference.config.InferenceConfig``., Engine reaches run_service when config and artifacts are valid., test_config_is_immutable(), test_custom_endpoint() (+11 more)
 
 ### Community 13 - "Trading Modes"
-Cohesion: 0.29
-Nodes (10): Environment Variable Reference, MAGNITUDE_THRESHOLD Configuration, SMA_WINDOW Configuration, TRADING_MODE Configuration, Live Trading Mode, Paper Trading Mode, Hysteresis + Regime-Filtered Trading State Machine, SMA Indicator (+2 more)
+Cohesion: 0.12
+Nodes (17): Environment Variable Reference, MAGNITUDE_THRESHOLD Configuration, SMA_WINDOW Configuration, TRADING_MODE Configuration, ZMQ_ENDPOINT Configuration, Parity Marker Refresh, Axum Telemetry Server, Engine Service (Rust/Tokio) (+9 more)
 
 ### Community 14 - "REST Data Ingestion"
-Cohesion: 0.10
-Nodes (42): adx_14(), adx_in_range(), compute_equity_features(), compute_returns_correct_length(), drawdown_from_high(), drawdown_nonpositive(), eq_candle(), EquityFeatureRow (+34 more)
+Cohesion: 0.09
+Nodes (46): adx_14(), adx_in_range(), compute_equity_features(), compute_returns_correct_length(), drawdown_from_high(), drawdown_nonpositive(), eq_candle(), EquityFeatureRow (+38 more)
 
 ### Community 15 - "API Keys & Security"
 Cohesion: 0.13
-Nodes (18): ZMQ_ENDPOINT Configuration, Architecture, Axum Telemetry Server, Engine (Rust, host-side dev), Engine Service (Rust/Tokio), Environment variables, Frontend, Inference (Python, host-side dev) (+10 more)
+Nodes (15): Architecture, Control Room dashboard, Docker Compose (recommended), Environment variables, License, Local dev (host-side), MarketMoves — QQQ Daily Equities Control Room, Plan & feature specs (+7 more)
 
 ### Community 16 - "Parity Fixture Generator"
 Cohesion: 0.29
@@ -365,24 +406,20 @@ Cohesion: 0.33
 Nodes (10): Caddy TLS Reverse Proxy, Engine Service (Compose), Inference Service (Compose), MMN Internal Network, Models Volume (Read-Only), Proxy Service (Compose), UFW Firewall Rules, Caddy Reverse Proxy (+2 more)
 
 ### Community 18 - "VPS Hardening"
-Cohesion: 0.28
-Nodes (9): Deploy User Setup, setup.sh Hardening Script, SSH Hardening, UFW Firewall Configuration, Backups, Caddy Reverse Proxy, Docker Compose Stack, Deployment Security Model (+1 more)
+Cohesion: 0.15
+Nodes (15): Deploy User Setup, setup.sh Hardening Script, SSH Hardening, UFW Firewall Configuration, Backups, Caddy Reverse Proxy, Docker Compose Stack, Operations (+7 more)
 
 ### Community 19 - "WebSocket Ingest"
 Cohesion: 0.05
 Nodes (37): 1.1 Borrowing Over Cloning, 1.2 When to pass by value? (Copy trait), 1.3 Handling `Option<T>` and `Result<T, E>`, 1.4 Prevent Early Allocation, 1.5 Iterator, `.iter` vs `for`, 1.6 Comments: Context, not Clutter, 1.7 Use Declarations - "imports", 🚨 Anti-patterns to AVOID (+29 more)
 
 ### Community 20 - "Technical Analysis Indicators"
-Cohesion: 0.14
-Nodes (13): Arguments, Examples, Instructions, Interpretation, Output, Technical Analysis, ADX Indicator, Bollinger Bands (+5 more)
-
-### Community 21 - "Model Architecture"
-Cohesion: 0.25
-Nodes (8): Model Architecture Mismatch Fix, Stage 1: Backbone Pre-training, CausalConv1d, DirectionalTemporalLoss, Parallel Draft Heads, MarketMarkovNet Neural Architecture, Stage 2: Markov Alignment Fine-tuning, Low-Rank Markov Heads
+Cohesion: 0.08
+Nodes (23): Arguments, Arguments, Correlation Analysis, Dependencies, Examples, Examples, Instructions, Instructions (+15 more)
 
 ### Community 22 - "Feature Engineering"
-Cohesion: 0.29
-Nodes (8): Parity Marker Refresh, Rolling Feature Pipeline, Parity gate, ATR Indicator, Binance Data Ingestion, Feature Engineering Pipeline, Rolling Z-Score Normalization, SwingTradingDataset
+Cohesion: 0.14
+Nodes (29): apply_pending_promotions(), d13_pool(), GateRequirement, insert_open_position(), passing_evidence_json(), PromotionEvidence, PromotionPipeline, PromotionResult (+21 more)
 
 ### Community 23 - "Setup Scripts"
 Cohesion: 0.70
@@ -408,6 +445,10 @@ Nodes (4): Hysteresis for Position Stickiness, 200-Hour SMA Regime Filter, Tradi
 Cohesion: 0.12
 Nodes (15): Common Skill Categories, Find Skills, How to Help Users Find Skills, Step 1: Understand What They Need, Step 2: Check the Leaderboard First, Step 3: Search for Skills, Step 4: Verify Quality Before Recommending, Step 5: Present Options to the User (+7 more)
 
+### Community 33 - "Engine Entry Point"
+Cohesion: 0.21
+Nodes (18): AtomicU64, CandidateSnapshot, CandidateStatus, CandidateStore, DbPool, HashMap, Option, Result (+10 more)
+
 ### Community 42 - "Feature Table"
 Cohesion: 0.22
 Nodes (8): Confirmed product decisions, Data model (SQLite), Environment variables, Feature table, Global constraints / rules, MarketMarkovNet — Requirements Index, Overview, Tech stack
@@ -425,8 +466,8 @@ Cohesion: 0.14
 Nodes (24): adx_14(), compute_equity_features(), drawdown_from_high(), gap_pct(), generate_synthetic_data(), main(), ndarray, Bucket VIX: <18→0, 18-25→1, >25→2. (+16 more)
 
 ### Community 46 - "Chapter 5 - Automated Testing"
-Cohesion: 0.09
-Nodes (22): 5.1 Tests as Living Documentation, 5.2 Add Test Examples to your Docs, 5.3 Unit Test vs Integration Tests vs Doc tests, 5.4 How to `assert!`, 5.5 Snapshot Testing with `cargo insta`, 5.6 ✅ Snapshot Best Practices, 🚨 `assert!` reminders, Attributes: (+14 more)
+Cohesion: 0.14
+Nodes (13): 5.2 Add Test Examples to your Docs, 5.3 Unit Test vs Integration Tests vs Doc tests, 5.4 How to `assert!`, 5.5 Snapshot Testing with `cargo insta`, 5.6 ✅ Snapshot Best Practices, 🚨 `assert!` reminders, Attributes:, Chapter 5 - Automated Testing (+5 more)
 
 ### Community 47 - "llm.rs"
 Cohesion: 0.14
@@ -461,8 +502,8 @@ Cohesion: 0.16
 Nodes (16): _free_port(), _handle_request_v3(), Round-trip contract tests for the V3 equities inference service.  Tests the JSON, Call _handle_request directly (bypasses ZMQ) to test the handler logic., _handle_request must return pred_1d, pred_5d, pred_21d in log-return space., atr_ratio=0 should produce near-zero predictions (no signal)., Higher atr_ratio should scale up predictions linearly., Handler must reject windows with wrong feature dimension. (+8 more)
 
 ### Community 55 - "Draft: mmn-prediction-fix"
-Cohesion: 0.12
-Nodes (15): Approval gate, Bug 1: Scheduler 30-second retry loop, Bug 2: seq_len=1 / insufficient candle data, Bug 3: Data pipeline not receiving new confirmed candles, Bug 4: Dashboard shows one prediction row, Components (topology ledger), Decisions (with rationale), Draft: mmn-prediction-fix (+7 more)
+Cohesion: 0.07
+Nodes (45): EventResponse, events_pool(), events_state(), EventsListResponse, get_events(), handle_events(), insert(), DbPool (+37 more)
 
 ### Community 56 - "equity_model.py"
 Cohesion: 0.18
@@ -481,8 +522,8 @@ Cohesion: 0.20
 Nodes (7): Any, CausalConv1d, Tensor, QqqTCN, TCN for QQQ daily equities prediction.      Architecture (matches training/train, Causal 1-D convolution (left-only padding, sequence length preserved).      Mirr, ResidualBlock
 
 ### Community 60 - "moomoo.rs"
-Cohesion: 0.07
-Nodes (123): assert_event_contract_support(), check_ret(), create_quote_context(), df_to_records(), is_empty(), parse_ec_kline_source(), parse_pred_side(), print_display_df() (+115 more)
+Cohesion: 0.06
+Nodes (139): assert_event_contract_support(), check_ret(), create_quote_context(), df_to_records(), ensure_event_contract_subscribed(), is_empty(), parse_ec_kline_source(), parse_ec_status() (+131 more)
 
 ### Community 61 - "fetch_features.py"
 Cohesion: 0.21
@@ -493,12 +534,12 @@ Cohesion: 0.15
 Nodes (13): 3.1 Flamegraph, 3.2 Avoid Redundant Cloning, 3.3 Stack vs Heap: Be size-smart!, 3.4 Iterators and Zero-Cost Abstractions, A good first steps, ❗ Avoid creating intermediate collections unless it is really needed:, ❗ Be Mindful, Chapter 3 - Performance Mindset (+5 more)
 
 ### Community 63 - "yahoo.rs"
-Cohesion: 0.05
-Nodes (91): _check_opend_alive(), create_crypto_trade_context(), create_future_trade_context(), create_sec_or_future_trade_context(), create_trade_context(), format_enum(), get_config(), get_default_acc_id() (+83 more)
+Cohesion: 0.03
+Nodes (110): _check_opend_alive(), create_crypto_trade_context(), create_future_trade_context(), create_sec_or_future_trade_context(), create_trade_context(), format_enum(), get_default_acc_id(), get_default_market() (+102 more)
 
 ### Community 64 - "fred.rs"
-Cohesion: 0.27
-Nodes (11): backfill_all_default_macros(), backfill_macro(), parse_fred_csv(), parse_fred_csv_filters_by_range(), parse_fred_csv_handles_missing_and_header(), DbPool, Option, Result (+3 more)
+Cohesion: 0.23
+Nodes (13): backfill_all_default_macros(), backfill_macro(), build_mock_json(), parse_fred_json(), parse_fred_json_empty_value_skipped(), parse_fred_json_filters_by_range(), parse_fred_json_handles_missing_and_normal(), DbPool (+5 more)
 
 ### Community 65 - "InferenceConfig"
 Cohesion: 0.15
@@ -541,20 +582,20 @@ Cohesion: 0.24
 Nodes (10): uPlot Chart Library, Vanilla SPA Control Room, GET /api/chart, GET /api/predictions, GET /api/status, API Polling Logic, Feature 08: Logic Engine, Feature 09: Execution Layer (+2 more)
 
 ### Community 75 - "Environment variables"
-Cohesion: 0.05
-Nodes (55): disp_width(), format_big_number(), pad_disp(), Return the terminal display width of a string (CJK full-width = 2, others = 1)., Pad a string to the given display width (CJK-aware)., Scale a large number to a human-readable string with K/M/B/T suffix.      Appl, _pad(), _print_profile_table() (+47 more)
+Cohesion: 0.07
+Nodes (35): format_big_number(), Scale a large number to a human-readable string with K/M/B/T suffix.      Appl, _build_display_df(), _build_a_display_df(), _build_hk_display_df(), _fmt_date_range(), _fmt_money(), _fmt_pct() (+27 more)
 
 ### Community 76 - "Provisioning"
-Cohesion: 0.05
-Nodes (34): Compose / infra, Engine (Rust), Environment variables, Inference (Python), Notes, 3.1 Firewall, 3.2 Docker Compose plugin, 3.3 Docker runtime (+26 more)
+Cohesion: 0.12
+Nodes (16): 3.1 Firewall, 3.2 Docker Compose plugin, 3.3 Docker runtime, 3.4 Deploy user, 3.5 SSH hardening, 3.6 Idempotency check, Execute, Manual steps (+8 more)
 
 ### Community 77 - "MarketMarkovNet Model"
 Cohesion: 0.28
 Nodes (9): MarketMarkovNet Model, Prediction Payload (pred_1h/4h/24h), ZMQ REP Socket, model.pt (PyTorch Checkpoint), Causal CNN Backbone, Parallel Draft Heads, Low-Rank Markov Heads, ZMQ Bridge (REQ Client) (+1 more)
 
 ### Community 78 - "MarketMarkovNet — Wave 5: Edge-First Overhaul (research plan)"
-Cohesion: 0.22
-Nodes (8): Acceptance / go-no-go (from R1 + corrections), Build order (proposed), CRITIQUE + CORRECTIONS (Hermes, applied), Decision (locked with user), MarketMarkovNet — Wave 5: Edge-First Overhaul (research plan), R1 plan (summary — verbatim structure, see /tmp/hermes-r1-plan.md for full text), References, Why this exists (the proven failure)
+Cohesion: 0.08
+Nodes (30): cancel_exit_clears_ladder(), fill_at_stage1_when_bid_meets_limit(), FillResult, initiate_exit_creates_ladder(), no_fill_when_bid_below_limit(), OptionsPaperExecutor, DateTime, FillResult (+22 more)
 
 ### Community 79 - "tests/"
 Cohesion: 0.22
@@ -565,12 +606,12 @@ Cohesion: 0.25
 Nodes (8): 2.1 Why care about linting?, 2.2 Always run `cargo clippy`, 2.3 Important Clippy Lints to Respect, 2.4 Fix warnings, don't silence them!, 2.5 Configure workspace/package lints, Chapter 2 - Clippy and Linting Discipline, Example:, Handling false positives
 
 ### Community 81 - "Correlation Analysis"
-Cohesion: 0.25
-Nodes (8): Arguments, Correlation Analysis, Dependencies, Examples, Instructions, Interpretation, Output, Timezone
+Cohesion: 0.06
+Nodes (26): CircuitBreaker, CircuitBreakerTrigger, DateTime, Duration, Option, Self, Utc, ExitArbiter (+18 more)
 
 ### Community 82 - "Kraken API Key Generation Checklist"
 Cohesion: 0.05
-Nodes (38): Safely convert to float, returns default for N/A, empty string, None, etc., Safely convert to int, returns default for N/A, empty string, None, etc.     Ha, safe_float(), safe_int(), get_capital_distribution(), get_kline(), get_rt_data(), get_snapshot() (+30 more)
+Nodes (45): Safely convert to float, returns default for N/A, empty string, None, etc., Safely convert to int, returns default for N/A, empty string, None, etc.     Ha, safe_float(), safe_int(), get_kline(), get_rt_data(), get_snapshot(), _parse_snapshot_row() (+37 more)
 
 ### Community 83 - "Step 3: Verify hardening"
 Cohesion: 0.09
@@ -585,8 +626,8 @@ Cohesion: 0.29
 Nodes (6): ⚠️ Engine integration status (read before wiring up), Feature contract (MUST match `engine/src/features/equities_v2.rs`), Layout, `model_meta_qqq_v1.json`, models/, Retired artifacts (removed)
 
 ### Community 86 - "Wave 5 — Gemini 3.1 Pro Implementation Scaffold (committed artifact)"
-Cohesion: 0.29
-Nodes (6): CORRECTIONS TO GEMINI'S ASSUMPTIONS (verify at build time), NEXT STEPS (build order, per DAG), Scaffold summary (what Gemini built), SECTOR SPLIT (as requested), Wave 5 — Gemini 3.1 Pro Implementation Scaffold (committed artifact), WHO TRAINS THE MODEL (clarification)
+Cohesion: 0.10
+Nodes (40): EvalSpec, evaluate_params(), forward_returns(), mean_ic(), param(), param_defs_for_family(), pearson(), ranks() (+32 more)
 
 ### Community 87 - "Technical Analysis"
 Cohesion: 0.11
@@ -597,8 +638,8 @@ Cohesion: 0.06
 Nodes (30): Account (3), API Quick Reference (Full Function Signatures), Base Interfaces, Basic Info (7), Broker Support Matrix, Capital (2), Code Naming Convention, Cryptocurrency (Crypto) API Differences (+22 more)
 
 ### Community 89 - "Operations"
-Cohesion: 0.33
-Nodes (6): Operations, Refresh the parity marker (required weekly when running live), Restart a single service, Tail logs, Tear down, Update after a code change
+Cohesion: 0.05
+Nodes (42): 1A. `drawdown_from_50d_high` must use rolling max of `high`, not `close`, 1B. Feature clipping is missing in Rust, 1C. Z-score blend reconciliation, 1D. Optional: MAD_FLOORS are in notebook only, 2A. Generalize notebook to accept `--symbol`, 2B. Ingest NVDA + NVDD daily candles, 2C. Train NVDA ensemble, 2D. NVDD short-leg architecture (+34 more)
 
 ### Community 90 - "Feature 03: Kraken Credentials"
 Cohesion: 0.40
@@ -613,12 +654,12 @@ Cohesion: 0.33
 Nodes (5): Acceptance Criteria, Feature 14 — Docker Compose Deploy & Launch, Operational docs, Requirements, Technical Implementation Steps
 
 ### Community 93 - "frontend/"
-Cohesion: 0.40
-Nodes (4): Files, frontend/, Serving, Status
+Cohesion: 0.22
+Nodes (9): Build, Build troubleshooting, Components, Developing locally, frontend/, Layout, See also, Status (+1 more)
 
 ### Community 94 - "_build_logger"
-Cohesion: 0.07
-Nodes (29): 3.1 Extend `EquityStrategyParams` with Shorting, 3.2 PSQ Inverse ETF Execution, 3.3 Runtime Paper/Live Toggle, 3.4 Frontend: Mode Toggle UI, 3.5 Test requirements, 3.6 Rollout steps, 3.7 Risk notes, AppState changes (`engine/src/api/mod.rs`) (+21 more)
+Cohesion: 0.10
+Nodes (21): 3.1 Extend `EquityStrategyParams` with Shorting, 3.2 PSQ Inverse ETF Execution, 3.4 Frontend: Mode Toggle UI, 3.5 Test requirements, 3.6 Rollout steps, 3.7 Risk notes, Backend, Components (+13 more)
 
 ### Community 95 - "inference/"
 Cohesion: 0.40
@@ -677,8 +718,8 @@ Cohesion: 0.40
 Nodes (4): Acceptance Criteria, Feature 12 — Paper-Trading Verification, Requirements, Technical Implementation Steps
 
 ### Community 109 - "Quick start"
-Cohesion: 0.07
-Nodes (27): 4.1 Advisor Module (`engine/src/advisor.rs`), 4.2 API Endpoints (`engine/src/api/advisor.rs`), 4.3 Advisor Background Task, 4.4 Frontend: Advisor View (`frontend/src/views/Advisor.svelte`), 4.5 DB functions for advisor_log (`engine/src/db.rs`), 4.6 Test requirements, 4.7 Risk notes, Backend (+19 more)
+Cohesion: 0.04
+Nodes (48): 4.0 Sentiment Prerequisite (MUST land before §4.1), 4.1 Advisor Module (`engine/src/advisor/`), 4.2 API Endpoints (`engine/src/api/advisor.rs`), 4.3 Briefing Background Task, 4.4 DB Additions (`engine/src/db.rs`), 4.5 Frontend: Advisor View (`frontend/src/views/Advisor.svelte`), 4.6 Suggested Parameters (`AdvisorBriefing.suggested_params`), 4.7 Test Requirements (+40 more)
 
 ### Community 110 - "Pointer Types and Thread Safety"
 Cohesion: 0.83
@@ -687,6 +728,14 @@ Nodes (4): Arc Atomic Reference Counter, Mutex Thread-Safe Mutability, Pointer T
 ### Community 112 - "Feature Pipeline (log_return, ATR, VWAP)"
 Cohesion: 1.00
 Nodes (3): norm_stats.json (Z-score Stats), Feature Pipeline (log_return, ATR, VWAP), Z-Score Normalization (Rust-side)
+
+### Community 113 - "AGENTS.md"
+Cohesion: 0.25
+Nodes (7): CHANGE / EDIT MODE, CORE DIRECTIVES, GRAPHIFY WORKFLOW, PLANNING & TRIAGE MODE, SUB-AGENT ROUTING MATRIX, TECH STACK & DATABASE STRICT RULES, TESTING PROTOCOL
+
+### Community 114 - "Training_model_Design.md"
+Cohesion: 0.16
+Nodes (39): ConfigPutRequest, ConfigPutResponse, ConfigResponse, handle_get_config(), handle_list_positions(), handle_list_runs(), handle_list_trades(), handle_put_config() (+31 more)
 
 ### Community 115 - "8.8 Documentation in Rust: How, When and Why"
 Cohesion: 0.07
@@ -701,8 +750,8 @@ Cohesion: 0.07
 Nodes (27): Combo Option Order Book Price (Hard Constraint), Get Candlestick, Get Capital Distribution, Get Capital Flow, Get Market Snapshot, Get Market State, Get Option Chain, Get Option Exercise Probability (+19 more)
 
 ### Community 118 - "Dashboard.svelte"
-Cohesion: 0.11
-Nodes (16): ../lib/components/ABComparison.svelte, ../lib/components/CandlestickChart.svelte, ../lib/components/EquityCurveChart.svelte, ../lib/components/FeatureInspector.svelte, ../lib/components/MetricsTable.svelte, ../lib/components/ModelHealth.svelte, ../lib/components/ParamSlider.svelte, ../lib/components/PnLEquityCurve.svelte (+8 more)
+Cohesion: 0.17
+Nodes (6): ../lib/components/ABComparison.svelte, ../lib/components/EquityCurveChart.svelte, ../lib/components/MetricsTable.svelte, ../lib/components/ParamSlider.svelte, ../lib/components/RhaiEditor.svelte, active
 
 ### Community 119 - "Phase 2 — Strategy Lab & Rhai Integration"
 Cohesion: 0.08
@@ -713,8 +762,8 @@ Cohesion: 0.08
 Nodes (24): 0.1 Split `api.rs` into a module tree, 0.2 Add new crate dependencies, 0.3 Create new DB tables, 0.4 Scaffold Vite + Svelte frontend, 0.5 Wire `rust-embed` into Axum, 0.6 Test requirements, 0.7 Risk notes, Build integration (+16 more)
 
 ### Community 121 - "Phase 1 — Reactive Dashboard & WebSocket Telemetry"
-Cohesion: 0.08
-Nodes (24): 1.1 WebSocket Backend (`engine/src/api/ws.rs`), 1.2 Svelte Dashboard (`frontend/src/views/Dashboard.svelte`), 1.3 Ledger view (`frontend/src/views/Ledger.svelte`), 1.4 Retire old frontend, 1.5 Test requirements, 1.6 Rollout steps, 1.7 Risk notes, AppState changes (`engine/src/api/mod.rs`) (+16 more)
+Cohesion: 0.12
+Nodes (17): 1.1 WebSocket Backend (`engine/src/api/ws.rs`), 1.3 Ledger view (`frontend/src/views/Ledger.svelte`), 1.4 Retire old frontend, 1.5 Test requirements, 1.6 Rollout steps, 1.7 Risk notes, AppState changes (`engine/src/api/mod.rs`), Backend (+9 more)
 
 ### Community 122 - "Options Data"
 Cohesion: 0.10
@@ -725,12 +774,12 @@ Cohesion: 0.10
 Nodes (21): Get 0DTE Contract Details, Get 0DTE Underlying Screener, Get Batch Underlying Overview (IV/HV Multi-Period Snapshot), Get Earnings Option Screener (IV Crush / Expected Move), Get Option Contract Rank, Get Option Event Alert Settings, Get Option Exercise Probability (Option Exercise Probability), Get Option Market Statistics (Volume/OI Time Series) (+13 more)
 
 ### Community 124 - "equity.rs"
-Cohesion: 0.31
-Nodes (17): align_series(), BackfillResponse, EquityDataPoint, EquityDataResponse, EquityFeatureResponse, handle_equity_backfill(), handle_equity_data(), handle_equity_features() (+9 more)
+Cohesion: 0.20
+Nodes (26): align_for_features(), align_series(), BackfillPredictionsQuery, BackfillPredictionsResponse, BackfillResponse, compute_atr_for_bar(), EquityDataPoint, EquityDataResponse (+18 more)
 
 ### Community 125 - "Position"
-Cohesion: 0.14
-Nodes (12): FillResult, Result, Vec, TradeSide, EquityStrategyParams, next_equity_position(), Position, Default (+4 more)
+Cohesion: 0.21
+Nodes (11): FillResult, Result, String, Vec, TradeSide, paper_losing_trade(), paper_pnl_hand_computed_fixture(), paper_short_entry_and_exit() (+3 more)
 
 ### Community 126 - "Prediction Market Commands"
 Cohesion: 0.12
@@ -741,40 +790,40 @@ Cohesion: 0.12
 Nodes (17): Combo RFQ, Fetch Prediction Market Historical K-line, Filter Competition, Get Prediction Market Category, Get Prediction Market (Contract) List, Get Prediction Market Event List, Get Prediction Market K-line, Get Prediction Market Milestone List (+9 more)
 
 ### Community 128 - "API_LIMITS.md"
-Cohesion: 0.12
-Nodes (15): API Quick Reference, Brokerage Auto-Detection (security_firm), Check if Installed, Common Options, Decision Logic, Environment Variables, Futures Trading Commands, Known Issues & Error Handling (+7 more)
+Cohesion: 0.09
+Nodes (22): API Quick Reference, Brokerage Auto-Detection (security_firm), Check if Installed, Common Options, Competition Account (SimAccType.COMPETITION), Decision Logic, Environment Variables, Futures Trading Commands (+14 more)
 
 ### Community 129 - "place_combo_order"
-Cohesion: 0.24
-Nodes (15): _account_has_prediction(), _audit_log(), _build_remark(), _classify_combo_legs(), _fail(), _parse_combo_legs(), _parse_trdmarket_auth(), place_combo_order() (+7 more)
+Cohesion: 0.08
+Nodes (25): ArrayRef, ArrowWriter, main(), post_heartbeat(), QuoteJson, Client, Option, PathBuf (+17 more)
 
 ### Community 130 - "SKILL.md"
 Cohesion: 0.12
 Nodes (15): API Quick Reference, Brokerage Auto-Detection (security_firm), Check if Installed, Common Options, Decision Logic, Environment Variables, Futures Trading Commands, Known Issues & Error Handling (+7 more)
 
 ### Community 131 - "F10 Fundamentals / Research / Corporate Actions / Shareholders / Company Info"
-Cohesion: 0.13
-Nodes (15): Brokers, Cancel Order, F10 Fundamentals / Research / Corporate Actions / Shareholders / Company Info, Get Morningstar Report (Research-Morningstar Report), Get Positions & Funds, Get Top Ten Buy/Sell Brokers (Top Ten Brokers), Modify Order, Place Combo Order (Option Combo/Strategy / Prediction Market Combo) (+7 more)
+Cohesion: 0.07
+Nodes (29): Brokers, Cancel Order, Company Info, F10 Fundamentals / Research / Corporate Actions / Shareholders / Company Info, Financials — Statements & Revenue, Get Analyst Consensus (Research-Analyst Ratings), Get Company Executives (Company Info-Executives), Get Company Profile (Company Info) (+21 more)
 
 ### Community 132 - "F10 Fundamentals / Research / Corporate Actions / Shareholders / Company Info"
 Cohesion: 0.13
 Nodes (15): Brokers, Cancel Order, F10 Fundamentals / Research / Corporate Actions / Shareholders / Company Info, Get Morningstar Report (Research-Morningstar Report), Get Positions & Funds, Get Top Ten Buy/Sell Brokers (Top Ten Brokers), Modify Order, Place Combo Order (Option Combo/Strategy / Prediction Market Combo) (+7 more)
 
 ### Community 133 - "Duration"
-Cohesion: 0.33
-Nodes (7): Duration, EquityPrediction, Prediction, Result, Self, ZmqBridge, ReqSocket
+Cohesion: 0.27
+Nodes (12): NightlyRunner, DbPool, Default, Result, Self, String, Vec, RunnerConfig (+4 more)
 
 ### Community 134 - "ws.rs"
-Cohesion: 0.15
-Nodes (11): forward_events(), Option, State, String, Vec, TelemetryEvent, ws_handler(), IntoResponse (+3 more)
+Cohesion: 0.13
+Nodes (12): forward_events(), Option, State, String, Value, Vec, TelemetryEvent, ws_handler() (+4 more)
 
 ### Community 135 - "package.json"
 Cohesion: 0.13
 Nodes (14): devDependencies, svelte, @sveltejs/vite-plugin-svelte, vite, svelte, name, private, scripts (+6 more)
 
 ### Community 136 - "websocket.js"
-Cohesion: 0.22
-Nodes (10): accuracy, chartData, features, predictions, status, trades, wsConnected, buildWsUrl() (+2 more)
+Cohesion: 0.13
+Nodes (18): accuracy, activeModelId, chartData, events, features, models, modelSlice, predictions (+10 more)
 
 ### Community 137 - "API Limits (Must Consider Before Calling)"
 Cohesion: 0.15
@@ -785,16 +834,16 @@ Cohesion: 0.23
 Nodes (9): _CalcCollector, get_indicator_calc_result(), _load_kl_payload(), _normalize_klines_for_sdk(), _parse_params(), get_kline --json outputs time; SDK request_indicator_calc_async expects time_key, Route push by calcId and wait for the target calcId result., _resolve_kl_type() (+1 more)
 
 ### Community 139 - "tests.rs"
-Cohesion: 0.32
-Nodes (10): accuracy_returns_503_when_no_resolved(), chart_computes_rolling_sma(), predictions_returns_history(), router_serves_static_files_and_api(), DbPool, State, status_reports_unrealized_pnl_for_open_position(), status_returns_empty_state() (+2 more)
+Cohesion: 0.23
+Nodes (19): accuracy_returns_503_when_no_resolved(), chart_computes_rolling_sma(), list_models_returns_empty_when_registry_empty(), predictions_returns_history(), register_then_list_model(), router_serves_static_files_and_api(), DbPool, State (+11 more)
 
 ### Community 140 - "Control Room Platform Redesign — Prompt for Gemini"
 Cohesion: 0.15
 Nodes (12): 1.1 Stack, 1.2 Process flow (daily equities), 1.3 Config (env-driven, `engine/src/config.rs`), 1. SYSTEM ARCHITECTURE (locked facts), 2.1 Equity tables (active path), 2.2 Legacy crypto tables (dormant — do not remove, do not mutate), 2. DATABASE SCHEMA (locked — do not break), 3. API SURFACE (locked — existing endpoints) (+4 more)
 
 ### Community 141 - "to_jsonable"
-Cohesion: 0.23
-Nodes (10): Convert a value to a JSON-serializable type, to_jsonable(), get_global_state(), _leg_to_dict(), _parse_combo_legs(), _parse_combo_trd_side(), Parse combo-leg trading side -> TrdSide (combo legs support BUY/SELL/SELL_SHORT/, Parse legs JSON list -> ComboLeg object list (+2 more)
+Cohesion: 0.11
+Nodes (37): Candle, count_candles(), count_equity_candles(), count_strategy_versions(), fetch_latest_candle(), fetch_recent_candles(), get_options_config(), insert_advisor_briefing_log() (+29 more)
 
 ### Community 142 - "QQQ Model Train/Serve Parity — Fix Plan"
 Cohesion: 0.17
@@ -821,32 +870,32 @@ Cohesion: 0.20
 Nodes (10): A-Shares, Automatic Market Inference (Hard Constraint), Code Format Validation (Hard Constraint), Common Stock Lookup Table, HK Stocks, Japan Stocks (JP) Support Scope, Malaysia Stocks (MY) Support Scope, Singapore Stocks (SG) Support Scope (+2 more)
 
 ### Community 149 - "handle_list_strategies"
-Cohesion: 0.29
-Nodes (9): handle_list_strategies(), handle_save_strategy(), ApiResult, Json, Option, State, String, Vec (+1 more)
+Cohesion: 0.24
+Nodes (11): fetch_strategy_configs(), StrategyConfigRow, handle_list_strategies(), handle_save_strategy(), ApiResult, Json, Option, State (+3 more)
 
 ### Community 150 - "macOS Installation Steps (moomoo OpenD)"
 Cohesion: 0.22
 Nodes (8): Error Handling, macOS Installation Steps (moomoo OpenD), Step Five: Launch GUI Version, Step Four: Mount .dmg and Install GUI Version, Step One: Get the Latest Version Filename, Step Six: Clean Up, Step Three: Extract, Step Two: Download from softwaredownload Domain
 
 ### Community 151 - "Crypto Trading Commands"
-Cohesion: 0.22
-Nodes (9): Cancel Crypto Order, Crypto Trading Commands, Place Crypto Order, Query Crypto Accounts, Query Crypto Cash Flow, Query Crypto Max Tradable Quantity, Query Crypto Order Fee, Query Crypto Orders / Deals (+1 more)
+Cohesion: 0.14
+Nodes (14): Cancel Crypto Order, Code Naming Convention, Crypto Market Data, Crypto Ordering Rules, Crypto Trading Commands, Cryptocurrency (Crypto), Place Crypto Order, Query Crypto Accounts (+6 more)
 
 ### Community 152 - "Crypto Trading Commands"
 Cohesion: 0.22
 Nodes (9): Cancel Crypto Order, Crypto Trading Commands, Place Crypto Order, Query Crypto Accounts, Query Crypto Cash Flow, Query Crypto Max Tradable Quantity, Query Crypto Order Fee, Query Crypto Orders / Deals (+1 more)
 
 ### Community 153 - "handle_status"
-Cohesion: 0.28
-Nodes (8): handle_market_state(), handle_status(), ApiResult, Json, Option, State, String, StatusResponse
+Cohesion: 0.30
+Nodes (13): derive_position(), derive_unrealized_pnl(), handle_market_state(), handle_status(), ApiResult, DbPool, Option, Query (+5 more)
 
 ### Community 154 - "Featured Rankings"
 Cohesion: 0.25
 Nodes (8): Featured Rankings, Get Hot List, Get Period Change Rank, Get Short Selling Rank, Get Top Movers Rank, Get US After-Hours Rank, Get US Overnight Rank, Get US Pre-Market Rank
 
 ### Community 155 - "_build_permission_hint"
-Cohesion: 0.29
-Nodes (8): _build_permission_hint(), _build_permission_hint_json(), _detect_market_from_argv(), _get_authority_url(), Detect market from stock code in command-line arguments (e.g. HK.00700 -> HK sto, Return the quote permission page URL, Build a hint message for insufficient quote permissions, Build JSON-format quote permission hint fields
+Cohesion: 0.15
+Nodes (22): configs_from_store(), EntryPipelineResult, OptionsScheduler, OptionsSchedulerConfig, OptionsSchedulerState, Arc, DbPool, Default (+14 more)
 
 ### Community 156 - "Featured Rankings"
 Cohesion: 0.25
@@ -881,8 +930,8 @@ Cohesion: 0.33
 Nodes (4): push_rt_data(), Real-time data push callback handler class, RTDataHandler, RTDataHandlerBase
 
 ### Community 164 - "query_portfolio"
-Cohesion: 0.43
-Nodes (6): get_all_accounts(), main(), query_portfolio(), Query funds and positions for a single account, Get all account list (securities + futures, deduplicated by acc_id), _resolve_asset_category()
+Cohesion: 0.22
+Nodes (5): Position, Display, Formatter, Result, Self
 
 ### Community 165 - "Get Account List"
 Cohesion: 0.29
@@ -893,12 +942,12 @@ Cohesion: 0.29
 Nodes (7): Get Holder Detail (Shareholders-Holder Detail), Get Holding Changes (Shareholders-Holding Changes), Get Insider Holder List (Shareholders-Insiders), Get Insider Trade List (Shareholders-Insiders), Get Institutional Holdings (Shareholders-Institutional), Get Shareholders Overview (Shareholders), Shareholders
 
 ### Community 167 - "chart.rs"
-Cohesion: 0.48
-Nodes (6): CandleDto, ChartResponse, equity_candle_to_dto(), String, Vec, SmaPoint
+Cohesion: 0.20
+Nodes (15): CandleDto, ChartQuery, ChartResponse, equity_candle_to_dto(), fetch_live_quote(), handle_chart(), LiveQuote, ApiResult (+7 more)
 
 ### Community 168 - "exec_parity.rs"
 Cohesion: 0.48
-Nodes (6): paper_losing_trade(), paper_pnl_hand_computed_fixture(), paper_short_entry_and_exit(), paper_zero_fee(), DbPool, test_pool()
+Nodes (6): SqlitePool, test_full_pipeline_candidate_to_paper(), test_multi_equity_pipeline(), test_multi_stage_promotion(), test_pool(), test_promotion_failure_idempotent()
 
 ### Community 169 - "Fix: norm_stats for QQQ equities deploy"
 Cohesion: 0.29
@@ -925,8 +974,8 @@ Cohesion: 0.47
 Nodes (5): _check_opend(), _check_sdk(), main(), Check moomoo-api SDK is installed, Check OpenD connectivity
 
 ### Community 175 - "get_event_contract_order_book"
-Cohesion: 0.40
-Nodes (5): ensure_event_contract_subscribed(), Subscribe a prediction market type; silently skip if already subscribed, otherwi, _format_book_side(), get_event_contract_order_book(), Format one side of the order book -> [[price, size], ...] (JSON-serializable)
+Cohesion: 0.12
+Nodes (30): handle_get_mode(), handle_set_mode(), ModeResponse, ApiResult, Json, Option, Result, State (+22 more)
 
 ### Community 176 - "get_financials_earnings_price_move.py"
 Cohesion: 0.53
@@ -938,7 +987,7 @@ Nodes (5): _build_filters(), get_option_seller_screener(), _resolve_option_marke
 
 ### Community 178 - "BrokerHandler"
 Cohesion: 0.33
-Nodes (3): BrokerHandler, Broker queue push callback handler class, BrokerHandlerBase
+Nodes (4): BrokerHandler, push_broker(), Broker queue push callback handler class, BrokerHandlerBase
 
 ### Community 179 - "OptionEventHandler"
 Cohesion: 0.40
@@ -946,11 +995,11 @@ Nodes (3): OptionEventHandler, push_option_event(), OptionEventHandlerBase
 
 ### Community 180 - "OrderBookHandler"
 Cohesion: 0.33
-Nodes (3): OrderBookHandler, Order book push callback handler class, OrderBookHandlerBase
+Nodes (4): OrderBookHandler, push_orderbook(), Order book push callback handler class, OrderBookHandlerBase
 
 ### Community 181 - "TickerHandler"
 Cohesion: 0.33
-Nodes (3): Tick-by-tick push callback handler class, TickerHandler, TickerHandlerBase
+Nodes (4): push_ticker(), Tick-by-tick push callback handler class, TickerHandler, TickerHandlerBase
 
 ### Community 182 - "Industrial Chain"
 Cohesion: 0.33
@@ -968,14 +1017,6 @@ Nodes (6): Option Code Format, Option Operations Workflow, Resolve Option Shorth
 Cohesion: 0.53
 Nodes (5): executor_kind_paper_variant_holds_no_http_client(), paper_executor_cumulative_pnl_four_trade_sequence(), paper_mode_makes_no_kraken_calls(), DbPool, test_pool()
 
-### Community 186 - "Cryptocurrency (Crypto)"
-Cohesion: 0.40
-Nodes (5): Code Naming Convention, Crypto Market Data, Crypto Ordering Rules, Cryptocurrency (Crypto), Scope
-
-### Community 187 - "Company Info"
-Cohesion: 0.40
-Nodes (5): Company Info, Get Company Executives (Company Info-Executives), Get Company Profile (Company Info), Get Executive Background (Company Info-Executives), Get Operational Efficiency (Company Info-Operational Efficiency)
-
 ### Community 188 - "Earnings & Calendar"
 Cohesion: 0.40
 Nodes (5): Earnings & Calendar, Get Dividend Calendar, Get Earnings Beat Rank, Get Earnings Calendar, Get Economic Calendar
@@ -985,8 +1026,8 @@ Cohesion: 0.40
 Nodes (5): Get FedWatch Dot Plot, Get FedWatch Target Rate, Get Macro Indicator History, Get Macro Indicator List, Macro Data
 
 ### Community 190 - "get_indicator_list.py"
-Cohesion: 0.50
-Nodes (4): _fmt_value(), _print_info(), Render {'type': str, 'value': ...} as a string., Print one language version of an info dict.
+Cohesion: 0.47
+Nodes (5): _fmt_value(), get_indicator_list(), _print_info(), Render {'type': str, 'value': ...} as a string., Print one language version of an info dict.
 
 ### Community 191 - "get_option_earnings_screener"
 Cohesion: 0.70
@@ -1040,10 +1081,6 @@ Nodes (4): Assets, spa_fallback_handler(), Response, Uri
 Cohesion: 0.50
 Nodes (4): ARK Fund, Get ARK Active Transaction, Get ARK Fund Holding, Get ARK Stock Dynamic
 
-### Community 204 - "Paper Trading vs Live Trading"
-Cohesion: 0.50
-Nodes (4): Competition Account (SimAccType.COMPETITION), Paper Trading vs Live Trading, Trade Unlock Restriction, US Paper Trading Account (STOCK_AND_OPTION type)
-
 ### Community 205 - "Corporate Actions"
 Cohesion: 0.50
 Nodes (4): Corporate Actions, Get Buybacks (Corporate Actions-Buybacks), Get Dividends (Corporate Actions-Dividends), Get Stock Splits (Corporate Actions-Stock Splits)
@@ -1077,8 +1114,8 @@ Cohesion: 0.83
 Nodes (3): get_research_morningstar_report(), _swut_text(), _swut_time()
 
 ### Community 213 - "get_short_interest"
-Cohesion: 0.83
-Nodes (3): _fmt_pct(), _fmt_price(), get_short_interest()
+Cohesion: 0.13
+Nodes (25): AdvisorBriefing, AdvisorConfig, AdvisorContext, AdvisorState, BriefingSections, CachedBriefing, EarningsEvent, FeatureSnapshot (+17 more)
 
 ### Community 214 - "set_option_event_alert"
 Cohesion: 1.00
@@ -1116,18 +1153,6 @@ Nodes (3): Dividend & SOE, Get Dividend Rank, Get High Dividend SOE Rank
 Cohesion: 0.67
 Nodes (3): Financials — Earnings Analysis, Get Earnings Day Price History (Financials-Earnings Analysis), Get Earnings Day Price Move (Financials-Earnings Analysis)
 
-### Community 223 - "Financials — Statements & Revenue"
-Cohesion: 0.67
-Nodes (3): Financials — Statements & Revenue, Get Financial Statements (Financials-Key Metrics/Income/Balance Sheet/Cash Flow), Get Revenue Breakdown (Financials-Revenue Breakdown)
-
-### Community 224 - "Research — Analyst Ratings"
-Cohesion: 0.67
-Nodes (3): Get Analyst Consensus (Research-Analyst Ratings), Get Rating Summary (Research-Analyst Ratings), Research — Analyst Ratings
-
-### Community 225 - "Short Selling"
-Cohesion: 0.67
-Nodes (3): Get Daily Short Volume (Daily Short Volume), Get Short Interest (Short Interest), Short Selling
-
 ### Community 226 - "Indicators"
 Cohesion: 0.67
 Nodes (3): Get Indicator Calculation Result, Get Indicator List, Indicators
@@ -1136,9 +1161,33 @@ Nodes (3): Get Indicator Calculation Result, Get Indicator List, Indicators
 Cohesion: 0.67
 Nodes (3): Get Valuation Detail (Research-Valuation), Get Valuation Plate Stock List (Research-Valuation), Research — Valuation
 
-### Community 228 - "Push Reception Commands"
-Cohesion: 0.67
-Nodes (3): Push Reception Commands, Receive Candlestick Pushes, Receive Quote Pushes
+### Community 229 - "get_earnings_beat_rank"
+Cohesion: 0.06
+Nodes (31): Appendix A — Notebook Source Reference, Appendix B — Artifact Inventory, Appendix C — Glossary, D-Solo vs D-Pool, Divergence 1: Blend Strategy Mismatch (medium severity), Divergence 2: `drawdown_from_50d_high` Source Differs (low-medium severity), Divergence 3: Feature Clipping Differs (low severity), Executive Summary (+23 more)
+
+### Community 230 - "get_high_dividend_soe_rank"
+Cohesion: 0.16
+Nodes (31): apply_sentiment_overlay(), default_enable_sentiment_overlay(), default_pred_5d_filter(), default_sentiment_exit_threshold(), default_sentiment_min_articles(), default_sentiment_reduce_threshold(), default_short_entry_threshold(), default_short_exit_threshold() (+23 more)
+
+### Community 231 - "get_option_strategy_analysis"
+Cohesion: 0.13
+Nodes (19): MoomooError, MoomooExecutor, place_order_script(), PlaceOrderResponse, plan_trades_exit_long(), plan_trades_exit_short_sells_inverse(), plan_trades_long_entry(), plan_trades_long_to_short_is_two_step() (+11 more)
+
+### Community 232 - "get_option_underlying_overview"
+Cohesion: 0.15
+Nodes (24): compute_score(), compute_score_bearish(), compute_score_bullish(), compute_score_empty(), compute_score_no_buzz(), EarningsCalendarEntry, fetch_earnings_calendar(), fetch_news_sentiment() (+16 more)
+
+### Community 233 - "get_us_overnight_rank"
+Cohesion: 0.13
+Nodes (23): disp_width(), pad_disp(), Return the terminal display width of a string (CJK full-width = 2, others = 1)., Pad a string to the given display width (CJK-aware)., get_company_profile(), _pad(), _print_profile_table(), _translate_field_type() (+15 more)
+
+### Community 234 - "get_us_pre_market_rank"
+Cohesion: 0.15
+Nodes (24): AskRequest, BriefingQuery, BriefingResponse, default_symbol(), handle_ask(), handle_get_briefing(), handle_refresh(), handle_sentiment_history() (+16 more)
+
+### Community 235 - "get_warrant_screen.py"
+Cohesion: 0.22
+Nodes (20): clean_reconciliation(), default_guards(), default_pipeline(), dirty_reconciliation(), EntryInitiated, EntryPipeline, EntryPipelineResult, EntrySkipReason (+12 more)
 
 ### Community 236 - "Dividend & SOE"
 Cohesion: 0.67
@@ -1172,25 +1221,213 @@ Nodes (3): Get Valuation Detail (Research-Valuation), Get Valuation Plate Stock 
 Cohesion: 0.67
 Nodes (3): Push Reception Commands, Receive Candlestick Pushes, Receive Quote Pushes
 
+### Community 250 - "reconciliation.rs"
+Cohesion: 0.16
+Nodes (22): make_order(), make_position(), Mismatch, OrderState, PositionState, reconcile_orders(), reconcile_positions(), ReconciliationResult (+14 more)
+
+### Community 251 - "scheduler.rs"
+Cohesion: 0.20
+Nodes (16): NightlyScheduler, DateTime, Default, Self, Utc, SchedulerConfig, SchedulerState, test_can_run_post_market_malaysia() (+8 more)
+
+### Community 252 - "record_option_quotes.py"
+Cohesion: 0.13
+Nodes (23): discover_contracts(), _fetch_trading_days_from_opend(), get_session_label(), init_trading_calendar(), is_market_hours(), is_trading_day(), main(), poll_contracts() (+15 more)
+
+### Community 253 - "context.rs"
+Cohesion: 0.18
+Nodes (22): build_context(), build_macro_snapshot(), FeatureSnapshot, fetch_current_position(), fetch_latest_prediction_with_features(), fetch_latest_sentiment(), fetch_recent_closed_trades(), latest_close() (+14 more)
+
+### Community 254 - "moomoo.rs"
+Cohesion: 0.15
+Nodes (21): backfill(), fetch_quote(), get_kline_script(), get_snapshot_script(), kline_to_equity_candle(), kline_to_equity_candle_time_key_field(), kline_to_equity_candle_timestamp_field(), KlineResponse (+13 more)
+
+### Community 255 - "Strategy Configuration UI & Runtime Config Plan"
+Cohesion: 0.09
+Nodes (22): Files that change, Open questions, Phase 1: Externalize all strategy params into AppState (backend), Phase 2: Runtime config API endpoints, Phase 3: Frontend — Strategy Config Panel, Phase 4: Dockerfile defaults & deploy, Strategy Configuration UI & Runtime Config Plan, Task 1.1: Add strategy params to Config (+14 more)
+
+### Community 256 - "IntentLogEntry"
+Cohesion: 0.13
+Nodes (14): ExitStage, IntentLogEntry, IntentLogger, DateTime, Display, Error, Formatter, Option (+6 more)
+
+### Community 257 - "Task Breakdown"
+Cohesion: 0.09
+Nodes (22): Constraints & Decisions, Dependencies, Estimated Effort, Event Categories, Event Tracker & Logging Implementation Plan, Risks & Open Questions, Task 10: Frontend — add `EngineEvent` handling in WS, Task 11: Frontend — add `fetchEvents` API function (+14 more)
+
+### Community 258 - "Option"
+Cohesion: 0.11
+Nodes (22): EngineEvent, event_categories(), events_insert_and_search_roundtrip(), fetch_entry_trade_price(), fetch_equity_close_at_ts(), fetch_equity_entry_trade_price(), fetch_equity_entry_trade_ts(), fetch_pending_promotion() (+14 more)
+
+### Community 259 - "generate_briefing"
+Cohesion: 0.20
+Nodes (19): call_llm_with_fallback(), call_openrouter(), compute_next_briefing_ts(), compute_next_briefing_ts_returns_future(), generate_briefing(), Arc, DbPool, Notify (+11 more)
+
+### Community 260 - "prompt.rs"
+Cohesion: 0.17
+Nodes (19): compile_system_prompt(), compile_user_prompt(), extract_json_block(), extract_json_block_basic(), parse_missing_section_fails(), parse_no_json_block_fails(), parse_response(), parse_valid_response() (+11 more)
+
+### Community 261 - "EntryExecutor"
+Cohesion: 0.17
+Nodes (13): EntryExecutor, EntryResult, EntryStage, DateTime, Duration, Self, Utc, test_cancel_after_stage2() (+5 more)
+
+### Community 262 - "PSQ Short + QQQ Long: Higher-Frequency Trading Strategy Plan"
+Cohesion: 0.10
+Nodes (19): Background, Decision Matrix, Files That Change, No code changes. Write a script, POST it to `/api/strategies`, backtest it., One-field Rust change. Zero API surface changes., Open Questions, Optimal recommended config (after Option A lands), Option A (+11 more)
+
+### Community 263 - ".replay"
+Cohesion: 0.20
+Nodes (16): make_tape(), ReplayResult, DateTime, Default, F, Self, String, Utc (+8 more)
+
+### Community 264 - "sizing.rs"
+Cohesion: 0.23
+Nodes (16): CapType, PositionSizer, Default, Option, Self, String, SizingConfig, SizingDecision (+8 more)
+
+### Community 265 - "hyperopt.rs"
+Cohesion: 0.28
+Nodes (18): CandidateResponse, CandidatesListResponse, get_candidate(), get_status(), HyperoptStatusResponse, list_candidates(), promote_candidate(), PromoteRequest (+10 more)
+
+### Community 266 - "chain_selector.rs"
+Cohesion: 0.25
+Nodes (15): CandidateChain, ChainSelectionResult, ChainSelector, ChainSelectorConfig, make_candidate(), Default, Self, String (+7 more)
+
+### Community 267 - "macro_gate.rs"
+Cohesion: 0.22
+Nodes (15): CalendarEvent, MacroGate, MacroGateConfig, MacroGateDecision, MacroGateDenialReason, DateTime, Default, Self (+7 more)
+
+### Community 269 - ".check"
+Cohesion: 0.24
+Nodes (13): Default, F, HashMap, Self, String, Vec, StabilityChecker, StabilityResult (+5 more)
+
+### Community 270 - "bsm.rs"
+Cohesion: 0.20
+Nodes (16): OptionPrice, OptionSpec, OptionType, price_option(), test_call_price_atm(), test_deep_itm_call(), test_expired_option(), test_put_price_atm() (+8 more)
+
+### Community 271 - "strategy_parity.rs"
+Cohesion: 0.16
+Nodes (24): compute_sma(), compute_sma_empty_returns_false(), compute_sma_full_window(), compute_sma_partial_window(), entry_long_requires_both_predictions_above_threshold(), entry_short_requires_both_predictions_below_neg_threshold(), hysteresis_holds_long_when_no_new_signal(), hysteresis_holds_long_when_short_signal_blocked_by_regime() (+16 more)
+
+### Community 272 - "handle_put"
+Cohesion: 0.24
+Nodes (16): handle_get(), handle_put(), ModelIdQuery, resolve_params(), ApiResult, Arc, Json, Option (+8 more)
+
+### Community 273 - "2. Phases"
+Cohesion: 0.12
+Nodes (16): 0. Settled Design Decisions (from grill session), 1. Architecture Overview, 2. Phases, 3. Cross-Phase Conventions, 4. Open Items, 5. Explicit Non-Goals (v1), Phase 0 — Prerequisites & Foundations, Phase 1 — Tape Recorder (Mode B) (+8 more)
+
+### Community 274 - "deploy/"
+Cohesion: 0.16
+Nodes (9): Common pitfalls, deploy/, Going live, Quick start (local dev), Quick start (production VPS), Security notes, See also, Stack (+1 more)
+
+### Community 275 - "predictions.rs"
+Cohesion: 0.25
+Nodes (15): ts_to_rfc3339(), AccuracyResponse, equity_prediction_to_dto(), handle_accuracy(), handle_predictions(), prediction_to_dto(), PredictionDto, PredictionsResponse (+7 more)
+
+### Community 276 - "yahoo.rs"
+Cohesion: 0.23
+Nodes (14): backfill(), backfill_many(), fetch_chart(), fetch_quote(), parse_chart(), parse_chart_extracts_ohlcv(), parse_chart_skips_nan_rows(), Quote (+6 more)
+
+### Community 277 - "test_pool"
+Cohesion: 0.23
+Nodes (16): compute_actuals(), compute_actuals_fills_null_columns(), compute_actuals_skips_unresolved_horizons(), fetch_accuracy_computes_directional_and_mae(), fetch_recent_predictions(), ingest_state_tracks_errors(), insert_prediction(), insert_prediction_preserves_actuals_on_conflict() (+8 more)
+
+### Community 279 - "next_position"
+Cohesion: 0.36
+Nodes (13): next_position(), next_position_flips_long_to_short(), next_position_holds_long_on_neutral_signal(), next_position_holds_short_on_neutral_signal(), next_position_long_entry_in_bullish_regime(), next_position_no_long_in_bearish_regime(), next_position_no_short_in_bullish_regime(), next_position_short_entry_in_bearish_regime() (+5 more)
+
+### Community 280 - "Data Source Consolidation Plan"
+Cohesion: 0.13
+Nodes (14): Current State, Data Source Consolidation Plan, Key Design Decisions, Risks & tradeoffs, Summary of files changed, Task 1: Add `FRED_API_KEY` to docker-compose and .env.example, Task 2: Create CBOE VIX data source module, Task 3: Rewrite FRED module to use JSON API v2 with API key (+6 more)
+
+### Community 281 - "Dashboard.svelte"
+Cohesion: 0.23
+Nodes (11): ../lib/components/FeatureInspector.svelte, ../lib/components/ModelHealth.svelte, ../lib/components/PnLEquityCurve.svelte, yScale(), zeroY, ../lib/components/StatusPanel.svelte, ../lib/components/StrategyConfigPanel.svelte, ../lib/components/TradeHistory.svelte (+3 more)
+
+### Community 282 - "evaluate_rhai_strategy"
+Cohesion: 0.28
+Nodes (11): Box, EquitySignalInput, BarInput, evaluate_rhai_strategy(), Result, test_input(), test_rhai_flat_when_no_signal(), test_rhai_simple_long() (+3 more)
+
+### Community 283 - "String"
+Cohesion: 0.22
+Nodes (10): bootstrap_default_model(), fetch_recent_chat_turns(), load_enabled_models(), load_model_by_id(), PredictionRow, register_model(), resolve_active_models(), String (+2 more)
+
+### Community 285 - "replay.rs"
+Cohesion: 0.27
+Nodes (12): compute_realized_pnl(), compute_sma_series(), integration_backtest_threshold_on_seeded_data(), OpenTrade, DbPool, Result, String, Vec (+4 more)
+
+### Community 286 - "../lib/components/CandlestickChart.svelte"
+Cohesion: 0.33
+Nodes (11): ../lib/components/CandlestickChart.svelte, active, draw(), formatLabel(), onMouseLeave(), onMouseMove(), refreshChart(), refreshTrades() (+3 more)
+
+### Community 288 - "5.1 Tests as Living Documentation"
+Cohesion: 0.22
+Nodes (9): 5.1 Tests as Living Documentation, ❌ Don't test multiple things in the same test, ❌ Don't use a generic name for a test, Only test one behavior per function, ✅ Test one thing per test, ✅ Use a name which reads like a sentence, describing the desired behavior, Use descriptive names, Use modules for organization (+1 more)
+
+### Community 289 - "generate_chat_response"
+Cohesion: 0.39
+Nodes (8): chat_system_prompt_not_empty(), chat_user_prompt_includes_history(), compile_chat_system_prompt(), compile_chat_user_prompt(), generate_chat_response(), DbPool, Result, String
+
+### Community 290 - "handle_backtest"
+Cohesion: 0.25
+Nodes (8): BacktestPayload, handle_backtest(), ApiResult, Json, Option, State, String, Value
+
+### Community 293 - "OptionsSettings.svelte"
+Cohesion: 0.25
+Nodes (3): GROUPS, load(), save()
+
+### Community 294 - "archive.rs"
+Cohesion: 0.39
+Nodes (7): archive_old_events(), ArchiveInfo, list_archives(), DbPool, Result, String, Vec
+
+### Community 295 - "parse_cboe_csv"
+Cohesion: 0.36
+Nodes (6): backfill_vix(), parse_cboe_csv(), parse_cboe_csv_basic(), DbPool, Result, Vec
+
+### Community 298 - "3.3 Runtime Paper/Live Toggle"
+Cohesion: 0.25
+Nodes (8): 3.3 Runtime Paper/Live Toggle, AppState changes (`engine/src/api/mod.rs`), Files to create/modify, `GET /api/mode` (`engine/src/api/mode.rs`) — NEW, `POST /api/mode` (`engine/src/api/mode.rs`) — NEW, Route registration, TOTP setup, Validation flow
+
+### Community 299 - "Troubleshooting"
+Cohesion: 0.29
+Nodes (7): Docker Compose plugin not found after install, `docker-compose` (v1) errors out with `KeyError: ContainerConfig`, Docker group requires new login, Locked out after SSH hardening, sshd restart fails, Troubleshooting, UFW blocking Docker ports
+
+### Community 303 - "1.2 Svelte Dashboard (`frontend/src/views/Dashboard.svelte`)"
+Cohesion: 0.29
+Nodes (7): 1.2 Svelte Dashboard (`frontend/src/views/Dashboard.svelte`), Components to build, Initial load strategy, Layout, Prediction trajectory cones, Stores (`frontend/src/lib/stores.js`), WebSocket manager (`frontend/src/lib/websocket.js`)
+
+### Community 304 - "handle_quote"
+Cohesion: 0.40
+Nodes (5): handle_quote(), QuoteResponse, ApiResult, State, String
+
+### Community 305 - "count_strategy_versions_by_status"
+Cohesion: 0.33
+Nodes (6): AccuracyStats, count_strategy_versions_by_status(), fetch_accuracy(), fetch_equity_accuracy(), find_closest_close(), HashMap
+
+### Community 307 - "Environment variables"
+Cohesion: 0.40
+Nodes (5): Compose / infra, Engine (Rust), Environment variables, Inference (Python), Notes
+
+### Community 308 - "list_hyperopt_runs"
+Cohesion: 0.40
+Nodes (5): complete_hyperopt_run(), hyperopt_runs_insert_complete_list(), HyperoptRun, insert_hyperopt_run(), list_hyperopt_runs()
+
 ## Knowledge Gaps
-- **1037 isolated node(s):** `$schema`, `.opencode/plugins/graphify.js`, `Assets`, `views`, `intervalId` (+1032 more)
+- **1203 isolated node(s):** `$schema`, `.opencode/plugins/graphify.js`, `FeatureSnapshot`, `Assets`, `views` (+1198 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **20 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **14 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `AppState` connect `Axum Telemetry API` to `Configuration Management`, `Trading Strategy`, `ws.rs`, `Database Layer`, `tests.rs`, `handle_list_strategies`, `handle_status`, `equity.rs`?**
+- **Why does `AppState` connect `Axum Telemetry API` to `handle_backtest`, `get_high_dividend_soe_rank`, `chart.rs`, `ws.rs`, `hyperopt.rs`, `get_us_pre_market_rank`, `ZMQ Bridge`, `tests.rs`, `get_event_contract_order_book`, `handle_quote`, `handle_put`, `Training_model_Design.md`, `predictions.rs`, `get_short_interest`, `handle_list_strategies`, `Draft: mmn-prediction-fix`, `handle_status`, `equity.rs`?**
+  _High betweenness centrality (0.027) - this node is a cross-community bridge._
+- **Why does `AdvisorState` connect `get_short_interest` to `generate_chat_response`, `generate_briefing`, `ws.rs`, `Axum Telemetry API`?**
   _High betweenness centrality (0.012) - this node is a cross-community bridge._
-- **Why does `check_ret()` connect `moomoo.rs` to `place_combo_order`, `Frontend SPA`, `get_indicator_calc_result`, `to_jsonable`, `get_research_rating_summary`, `_build_permission_hint`, `EventContractOrderBookHandler`, `RTDataHandler`, `get_event_contract_order_book`, `get_option_seller_screener`, `get_option_earnings_screener`, `get_option_event`, `get_option_rank`, `get_option_underlying_rank`, `get_option_zero_dte_screener`, `yahoo.rs`, `Environment variables`, `get_option_market_statistic`, `Kraken API Key Generation Checklist`, `get_option_zero_dte_contract`, `get_research_morningstar_report`, `get_short_interest`, `set_option_event_alert`, `get_earnings_beat_rank`, `get_high_dividend_soe_rank`, `get_option_strategy_analysis`, `get_option_underlying_overview`, `get_us_overnight_rank`, `get_us_pre_market_rank`?**
-  _High betweenness centrality (0.008) - this node is a cross-community bridge._
-- **Why does `handle_status()` connect `handle_status` to `Axum Telemetry API`?**
-  _High betweenness centrality (0.007) - this node is a cross-community bridge._
-- **Are the 171 inferred relationships involving `safe_close()` (e.g. with `filter_competition()` and `get_ark_active_transaction()`) actually correct?**
-  _`safe_close()` has 171 INFERRED edges - model-reasoned connections that need verification._
+- **Why does `compute_features()` connect `Feature Computation` to `Parity Verification`?**
+  _High betweenness centrality (0.009) - this node is a cross-community bridge._
+- **Are the 173 inferred relationships involving `safe_close()` (e.g. with `filter_competition()` and `get_ark_active_transaction()`) actually correct?**
+  _`safe_close()` has 173 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 165 inferred relationships involving `check_ret()` (e.g. with `filter_competition()` and `get_ark_active_transaction()`) actually correct?**
   _`check_ret()` has 165 INFERRED edges - model-reasoned connections that need verification._
-- **Are the 147 inferred relationships involving `create_quote_context()` (e.g. with `filter_competition()` and `get_ark_active_transaction()`) actually correct?**
-  _`create_quote_context()` has 147 INFERRED edges - model-reasoned connections that need verification._
+- **Are the 149 inferred relationships involving `create_quote_context()` (e.g. with `filter_competition()` and `get_ark_active_transaction()`) actually correct?**
+  _`create_quote_context()` has 149 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 133 inferred relationships involving `is_empty()` (e.g. with `filter_competition()` and `get_ark_active_transaction()`) actually correct?**
   _`is_empty()` has 133 INFERRED edges - model-reasoned connections that need verification._

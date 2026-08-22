@@ -1,9 +1,16 @@
-use axum::{extract::State, response::Json};
-use serde::Serialize;
+use axum::extract::{Query, State};
+use axum::response::Json;
+use serde::{Deserialize, Serialize};
 
 use crate::db;
 
 use super::{internal_error, ts_to_rfc3339, ApiResult, AppState};
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct SymbolQuery {
+    #[serde(default)]
+    symbol: Option<String>,
+}
 
 #[derive(Debug, Serialize)]
 pub(crate) struct AccuracyResponse {
@@ -37,9 +44,11 @@ pub(crate) struct PredictionDto {
 }
 
 pub(crate) async fn handle_predictions(
+    Query(params): Query<SymbolQuery>,
     State(state): State<AppState>,
 ) -> ApiResult<PredictionsResponse> {
-    let history = db::fetch_recent_equity_predictions(&state.pool, &state.symbol, 48)
+    let symbol = params.symbol.as_deref().unwrap_or(&state.symbol);
+    let history = db::fetch_recent_equity_predictions(&state.pool, symbol, 48)
         .await
         .map_err(|e| internal_error("fetch_recent_equity_predictions", e))?;
 
@@ -52,8 +61,12 @@ pub(crate) async fn handle_predictions(
     }))
 }
 
-pub(crate) async fn handle_accuracy(State(state): State<AppState>) -> ApiResult<AccuracyResponse> {
-    let stats = db::fetch_equity_accuracy(&state.pool, &state.symbol)
+pub(crate) async fn handle_accuracy(
+    Query(params): Query<SymbolQuery>,
+    State(state): State<AppState>,
+) -> ApiResult<AccuracyResponse> {
+    let symbol = params.symbol.as_deref().unwrap_or(&state.symbol);
+    let stats = db::fetch_equity_accuracy(&state.pool, symbol)
         .await
         .map_err(|e| internal_error("fetch_equity_accuracy", e))?;
 

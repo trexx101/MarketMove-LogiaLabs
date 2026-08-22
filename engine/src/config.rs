@@ -72,6 +72,8 @@ pub struct OptionsEngineConfig {
     pub max_positions: u32,
     /// Operating mode: 'paper' | 'micro' | 'full' (D12).
     pub mode: String,
+    /// Comma-separated list of underlying codes to record (e.g. "US.QQQ,US.SMH,US.XLF").
+    pub underlyings: String,
 }
 
 impl Default for OptionsEngineConfig {
@@ -99,6 +101,7 @@ impl Default for OptionsEngineConfig {
             positions_per_underlying: 1,
             max_positions: 3,
             mode: "paper".to_string(),
+            underlyings: "US.QQQ".to_string(),
         }
     }
 }
@@ -392,6 +395,7 @@ impl Config {
             max_positions: parse_env::<u32>("OPT_MAX_POSITIONS", "3")
                 .context("OPT_MAX_POSITIONS must be a positive integer")?,
             mode: env_or("OPT_MODE", "paper"),
+            underlyings: env_or("OPT_UNDERLYINGS", "US.QQQ"),
         };
 
         // Validate options config
@@ -900,6 +904,7 @@ mod tests {
         
         // Mode (D12)
         assert_eq!(cfg.options.mode, "paper", "mode should default to 'paper'");
+        assert_eq!(cfg.options.underlyings, "US.QQQ", "underlyings should default to 'US.QQQ'");
     }
 
     #[test]

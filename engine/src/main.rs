@@ -353,6 +353,97 @@ async fn main() {
         }
     });
 
+    // Nightly hyperopt runner. Self-waking loop: it sleeps until the next
+    // eligible window (capped at 30 min so the schedule re-derives on clock /
+    // config drift), then runs the optimization grid → stability check →
+    // candidate store when the scheduler state is CanRun. Built for the
+    // currently-implemented signal families; eval::signal_for skips any family
+    // without a real signal implementation.
+    let hyperopt_pool = pool.clone();
+    tokio::spawn(async move {
+        let store = crate::hyperopt::CandidateStore::new(hyperopt_pool.clone());
+        let runner = crate::hyperopt::runner::NightlyRunner::new(
+            crate::hyperopt::runner::RunnerConfig::default(),
+            hyperopt_pool.clone(),
+            store,
+        );
+        let sched = crate::hyperopt::scheduler::NightlyScheduler::new(
+            crate::hyperopt::scheduler::SchedulerConfig::default(),
+        );
+        loop {
+            let now = chrono::Utc::now();
+            let next = sched.next_run_time(now);
+            let wait = (next - now)
+                .to_std()
+                .unwrap_or(std::time::Duration::ZERO)
+                .min(std::time::Duration::from_secs(1800));
+            tokio::time::sleep(wait).await;
+            match runner.run().await {
+                Ok(report) => info!(
+                    "hyperopt run: success={} candidates={} equities={} ({})",
+                    report.success, report.candidates_stored, report.equities_processed, report.reason
+                ),
+                Err(e) => tracing::error!("hyperopt run error: {e:#}"),
+            }
+        }
+    });
+
+    // Promotion applier: drains pending_promotions at each NEW daily candle
+    // boundary per equity. Independent of the (not-yet-enabled) OptionsScheduler
+    // entry pipeline, so gated hyperopt promotions actually advance
+    // NEW → PAPER → MICRO → LIVE without enabling mocked entry execution.
+    // It iterates the SAME equity set as the nightly runner (the producers of
+    // candidates), so whatever the runner stores can be promoted.
+    {
+        let applier_pool = pool.clone();
+        let applier_equities = crate::hyperopt::runner::RunnerConfig::default().equities;
+        let applier_mode = "paper".to_string(); // event attribution; mirrors OptionsSchedulerConfig default
+        tokio::spawn(async move {
+            let pipeline = crate::hyperopt::PromotionPipeline::new();
+            let store = crate::hyperopt::CandidateStore::new(applier_pool.clone());
+            // Per-equity last-seen candle ts; promotions apply when it advances
+            // (i.e. a new daily bar exists) so we never flip mid-bar.
+            let mut last_seen: std::collections::HashMap<String, i64> = Default::default();
+            // Small initial delay so it doesn't race boot.
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(120));
+            loop {
+                interval.tick().await;
+                for equity in &applier_equities {
+                    let latest = match db::latest_equity_candle_ts(&applier_pool, equity).await {
+                        Ok(ts) => ts,
+                        Err(e) => {
+                            tracing::warn!(equity, error = %e, "promotion applier: candle lookup failed");
+                            continue;
+                        }
+                    };
+                    let Some(ts) = latest else { continue };
+                    let advanced = last_seen
+                        .insert(equity.clone(), ts)
+                        .map_or(true, |prev| prev != ts);
+                    if !advanced {
+                        continue;
+                    }
+                    match crate::hyperopt::promotion::apply_pending_promotions(
+                        &applier_pool,
+                        equity,
+                        &applier_mode,
+                        &pipeline,
+                        &store,
+                    )
+                    .await
+                    {
+                        Ok((applied, skipped)) if applied > 0 || skipped > 0 => {
+                            info!(equity, applied, skipped, "applied pending promotions at new candle boundary");
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::error!(equity, error = %e, "promotion apply failed"),
+                    }
+                }
+            }
+        });
+    }
+
     // Build and spawn the Axum telemetry server. We pass an updated Config
     // with the resolved TOTP secret (which may have been generated above)
     // so the API endpoint can verify submitted codes.

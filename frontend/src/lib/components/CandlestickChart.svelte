@@ -1,7 +1,10 @@
 <script>
   import { onMount, onDestroy } from 'svelte';
   import { fetchChart, fetchEquityTrades } from '../api.js';
-  import { chartData, status, predictions } from '../stores.js';
+  import { chartData, status, predictions, activeModelId, models } from '../stores.js';
+
+  // ── Props ────────────────────────────────────────────────────────────────
+  export let symbol = null; // optional override; falls back to active model's primary_symbol
 
   // ── State ───────────────────────────────────────────────────────────────
   let canvas;
@@ -16,6 +19,9 @@
   let liveQuote = null;
   let resizeObserver;
   let chartTimer;
+
+  // Resolve the symbol to chart: explicit prop > active model > 'QQQ'.
+  $: resolvedSymbol = symbol || ($models.find((m) => m.model_id === $activeModelId)?.primary_symbol) || 'QQQ';
 
   // Timeframe selector — value is the limit param fed to fetchChart().
   // ~21 trading days/month, ~252/year. "ALL" up to the backend cap of 1500.
@@ -39,7 +45,7 @@
   async function refreshChart() {
     try {
       const tf = TIMEFRAMES.find((t) => t.label === activeTimeframe) ?? TIMEFRAMES[2];
-      const data = await fetchChart(tf.limit);
+      const data = await fetchChart(tf.limit, resolvedSymbol);
       candles = data.candles || [];
       sma = data.sma || [];
       isStale = !!data.stale;
@@ -63,7 +69,7 @@
 
   async function refreshTrades() {
     try {
-      const data = await fetchEquityTrades('QQQ', 200);
+      const data = await fetchEquityTrades(resolvedSymbol, 200);
       trades = data.trades || [];
       draw();
     } catch (e) {

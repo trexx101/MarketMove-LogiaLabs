@@ -61,7 +61,10 @@
     promotingId = id;
     promoteResult = null;
     try {
-      const res = await promoteCandidate(equity, id);
+      const candidate = candidates.find((c) => c.id === id);
+      const target = nextStage(candidate?.status);
+      if (!target) throw new Error(`cannot promote ${id}: no next stage for status ${candidate?.status}`);
+      const res = await promoteCandidate(equity, id, target);
       promoteResult = { id, ...res };
       confirmingId = null;
       await load(); // refresh statuses

@@ -126,6 +126,7 @@ pub fn router(
         .route("/api/options/config", get(options::handle_get_config))
         .route("/api/options/config", put(options::handle_put_config))
         .route("/api/options/tape/status", get(options::handle_tape_status))
+        .route("/api/internal/tape/heartbeat", post(options::handle_tape_heartbeat))
         .route("/api/hyperopt/runs", get(options::handle_list_runs))
         .route("/api/mode", get(mode::handle_get_mode))
         .route("/api/mode", post(mode::handle_set_mode))

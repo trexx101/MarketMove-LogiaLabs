@@ -6,6 +6,7 @@ pub mod stability;
 pub mod candidate_store;
 pub mod promotion;
 pub mod tape_replay;
+pub mod eval;
 pub mod runner;
 
 #[cfg(test)]

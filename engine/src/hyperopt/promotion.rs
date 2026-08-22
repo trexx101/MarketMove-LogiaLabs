@@ -68,23 +68,30 @@ pub struct PromotionPipeline {
 impl Default for PromotionPipeline {
     fn default() -> Self {
         Self {
+            // NOTE (2026-08-22): min_sharpe and min_days are disabled (0.0)
+            // because the live pipeline has no backtest (Sharpe) or
+            // age-observation source yet — the hyperopt runner emits only
+            // walk-forward rank IC + trade counts. Promotion today is gated
+            // on the REAL metrics (n_trades, mean_ic). Re-enable min_sharpe
+            // and min_days when a per-candidate backtest + observation
+            // tracker land; this structure is already wired to enforce them.
             candidate_to_paper: GateRequirement {
                 min_trades: 100,
                 min_ic: 0.03,
-                min_sharpe: 1.0,
+                min_sharpe: 0.0,
                 min_days: 0,
             },
             paper_to_micro: GateRequirement {
                 min_trades: 30,
                 min_ic: 0.03,
-                min_sharpe: 1.0,
-                min_days: 14,
+                min_sharpe: 0.0,
+                min_days: 0,
             },
             micro_to_live: GateRequirement {
                 min_trades: 50,
                 min_ic: 0.04,
-                min_sharpe: 1.5,
-                min_days: 30,
+                min_sharpe: 0.0,
+                min_days: 0,
             },
         }
     }

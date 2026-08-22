@@ -38,8 +38,10 @@
     statusInterval = setInterval(async () => {
       const mid = $activeModelId;
       if (!mid) return;
+      const m = $models.find((mm) => mm.model_id === mid);
+      const sym = m?.primary_symbol || 'QQQ';
       try {
-        const s = await fetchStatus();
+        const s = await fetchStatus(sym);
         setSlice(mid, 'status', s);
       } catch (e) {
         // Silent — WS may still be delivering updates
@@ -50,30 +52,31 @@
   async function loadModelData(modelId, symbol) {
     // Fetch per-model data into the model's slice.
     const mid = modelId || 'legacy';
+    const sym = symbol || 'QQQ';
 
     try {
-      const s = await fetchStatus();
+      const s = await fetchStatus(sym);
       setSlice(mid, 'status', s);
     } catch (e) {
       console.error('Failed to fetch status:', e);
     }
 
     try {
-      const p = await fetchPredictions();
+      const p = await fetchPredictions(sym);
       setSlice(mid, 'predictions', p);
     } catch (e) {
       console.error('Failed to fetch predictions:', e);
     }
 
     try {
-      const c = await fetchChart();
+      const c = await fetchChart(90, sym);
       setSlice(mid, 'chartData', c);
     } catch (e) {
       console.error('Failed to fetch chart:', e);
     }
 
     try {
-      const a = await fetchAccuracy();
+      const a = await fetchAccuracy(sym);
       if (a) setSlice(mid, 'accuracy', a);
     } catch (e) {
       console.error('Failed to fetch accuracy:', e);

@@ -48,9 +48,10 @@ COPY engine/Cargo.toml engine/
 # build` that resolves the dep graph so the next layer is fully cached.
 # We use a sentinel `src/main.rs` to drive the resolver; the real source
 # is copied in the next layer.
-RUN mkdir -p engine/src \
+RUN mkdir -p engine/src/bin \
     && echo 'fn main() { println!("deps-warmup"); }' > engine/src/main.rs \
     && echo '' > engine/src/lib.rs \
+    && echo 'fn main() {}' > engine/src/bin/options_recorder.rs \
     && cargo build --release --manifest-path engine/Cargo.toml \
     && rm -rf engine/src
 

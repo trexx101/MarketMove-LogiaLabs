@@ -249,6 +249,42 @@ pub async fn handle_tape_status(
     }))
 }
 
+// ── Internal heartbeat endpoint (called by the recorder process) ──────────
+
+#[derive(Deserialize)]
+pub struct HeartbeatRequest {
+    pub tape_id: String,
+    pub underlying: String,
+    pub chain_code: String,
+    pub quota_accounting_json: String,
+}
+
+/// POST /api/internal/tape/heartbeat
+///
+/// Fire-and-forget heartbeat from the tape recorder process. The engine is
+/// the sole writer to the database; the recorder never touches SQLite
+/// directly. This avoids SQLITE_BUSY locks between the host process and
+/// the Dockerized engine.
+pub async fn handle_tape_heartbeat(
+    State(state): State<AppState>,
+    Json(req): Json<HeartbeatRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    db::touch_tape_heartbeat(
+        &state.pool,
+        &req.tape_id,
+        &req.underlying,
+        &req.chain_code,
+        &req.quota_accounting_json,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = %e, "tape heartbeat insert failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(serde_json::json!({"ok": true})))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,8 +306,13 @@ mod tests {
 
     fn options_state(pool: db::DbPool) -> State<AppState> {
         let (tx, _rx) = tokio::sync::broadcast::channel(16);
+        let event_logger = std::sync::Arc::new(crate::event::EventLogger::new(
+            pool.clone(),
+            None,
+            std::sync::Arc::new(tokio::sync::RwLock::new(crate::config::TradingMode::Paper)),
+        ));
         State(AppState {
-            pool,
+            pool: pool.clone(),
             trading_mode: std::sync::Arc::new(tokio::sync::RwLock::new(
                 crate::config::TradingMode::Paper,
             )),
@@ -285,6 +326,16 @@ mod tests {
             totp_secret: String::new(),
             zmq_endpoint: String::new(),
             norm_stats_path: String::new(),
+            short_symbol: "PSQ".into(),
+            event_logger: std::sync::Arc::new(crate::event::EventLogger::new(
+                pool.clone(),
+                None,
+                std::sync::Arc::new(tokio::sync::RwLock::new(crate::config::TradingMode::Paper)),
+            )),
+            advisor: None,
+            strategy_params_by_model: std::sync::Arc::new(tokio::sync::RwLock::new(
+                std::collections::HashMap::new(),
+            )),
         })
     }
 

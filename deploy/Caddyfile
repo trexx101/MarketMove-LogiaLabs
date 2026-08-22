@@ -59,15 +59,21 @@
 :80, :443 {
     tls internal
 
-    # Basic authentication (guards entire dashboard)
-    basic_auth {
-        admin $2a$14$vYowfZFr6iE0cWFWRJVQZuTzzBLEXEbP.4QqSRIHxPToUybQvRz9a
+    # Internal API routes — no auth required (internal services only)
+    route /api/internal/* {
+        import backend
     }
 
-    # Optional: IP whitelist (belt + suspenders)
-    # Uncomment and set your IP(s) to also block non-matching IPs
-    # @not_allowed not remote_ip 123.45.67.89
-    # respond @not_allowed "Forbidden" 403
+    # Everything else requires basic auth
+    route {
+        basic_auth {
+            admin $2a$14$vYowfZFr6iE0cWFWRJVQZuTzzBLEXEbP.4QqSRIHxPToUybQvRz9a
+        }
 
-    import backend
+        # Optional: IP whitelist (belt + suspenders)
+        # @not_allowed not remote_ip 123.45.67.89
+        # respond @not_allowed "Forbidden" 403
+
+        import backend
+    }
 }

@@ -1,17 +1,45 @@
 <script>
-  import { onMount } from 'svelte';
+  import { onDestroy } from 'svelte';
   import { fetchAccuracy } from '../api.js';
-  import { wsConnected, status } from '../stores.js';
+  import { wsConnected, activeModelId, models, setSlice, status } from '../stores.js';
 
   let accuracyData = null;
   let error = null;
+  let refreshTimer;
 
-  onMount(async () => {
+  // ── Reactive: re-fetch when model changes ───────────────────────────
+  $: {
+    if ($activeModelId) {
+      const m = $models.find((mm) => mm.model_id === $activeModelId);
+      const sym = m?.primary_symbol || 'QQQ';
+      loadAccuracy($activeModelId, sym);
+    }
+  }
+
+  async function loadAccuracy(mid, symbol) {
     try {
-      accuracyData = await fetchAccuracy();
+      const a = await fetchAccuracy(symbol);
+      accuracyData = a;
+      error = null;
+      if (a && mid) setSlice(mid, 'accuracy', a);
     } catch (e) {
       error = e.message;
     }
+  }
+
+  // Periodic refresh, re-armed whenever the active model changes
+  $: {
+    if ($activeModelId) {
+      if (refreshTimer) clearInterval(refreshTimer);
+      const m = $models.find((mm) => mm.model_id === $activeModelId);
+      const sym = m?.primary_symbol || 'QQQ';
+      const mid = $activeModelId;
+      refreshTimer = setInterval(() => loadAccuracy(mid, sym), 120_000);
+    }
+  }
+
+  onDestroy(() => {
+    if (refreshTimer) clearInterval(refreshTimer);
   });
 
   $: staleness = $status?.staleness_secs ?? 0;

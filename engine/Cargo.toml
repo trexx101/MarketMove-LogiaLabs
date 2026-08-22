@@ -42,6 +42,10 @@ async-trait = "0.1"
 name = "engine"
 path = "src/main.rs"
 
+[[bin]]
+name = "options_recorder"
+path = "src/bin/options_recorder.rs"
+
 [lib]
 name = "engine"
 path = "src/lib.rs"
