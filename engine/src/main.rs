@@ -370,21 +370,35 @@ async fn main() {
         let sched = crate::hyperopt::scheduler::NightlyScheduler::new(
             crate::hyperopt::scheduler::SchedulerConfig::default(),
         );
+        // Self-waking loop: poll every 30 minutes, running the hyperopt
+        // pipeline at most once per eligible window. `runner.run()` self-gates
+        // on the scheduler (no-ops outside the post-market window). The
+        // `last_window` guard prevents repeated runs within the SAME window,
+        // which would otherwise duplicate candidate rows (CandidateStore mints
+        // a fresh version id on every store).
+        let mut last_window: Option<chrono::NaiveDate> = None;
         loop {
             let now = chrono::Utc::now();
-            let next = sched.next_run_time(now);
-            let wait = (next - now)
-                .to_std()
-                .unwrap_or(std::time::Duration::ZERO)
-                .min(std::time::Duration::from_secs(1800));
-            tokio::time::sleep(wait).await;
-            match runner.run().await {
-                Ok(report) => info!(
-                    "hyperopt run: success={} candidates={} equities={} ({})",
-                    report.success, report.candidates_stored, report.equities_processed, report.reason
-                ),
-                Err(e) => tracing::error!("hyperopt run error: {e:#}"),
+            let window = sched.window_start_date(now);
+            if last_window != Some(window) {
+                match runner.run().await {
+                    Ok(report) => {
+                        info!(
+                            "hyperopt run: success={} candidates={} equities={} ({})",
+                            report.success, report.candidates_stored, report.equities_processed, report.reason
+                        );
+                        if report.success {
+                            // One successful run per window; skip until the
+                            // next window (midnight wrap safe).
+                            last_window = Some(window);
+                        }
+                        // On a no-run (outside the window) leave last_window
+                        // unset so the next poll retries until the window opens.
+                    }
+                    Err(e) => tracing::error!("hyperopt run error: {e:#}"),
+                }
             }
+            tokio::time::sleep(std::time::Duration::from_secs(1800)).await;
         }
     });
 

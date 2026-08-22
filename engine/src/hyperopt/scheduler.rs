@@ -183,6 +183,28 @@ impl NightlyScheduler {
         let run_datetime = tomorrow.and_time(earliest_start_time);
         Utc.from_utc_datetime(&run_datetime)
     }
+
+    /// UTC date of the hyperopt window that contains `now`.
+    ///
+    /// A window opens at (market_close + post_market_buffer) UTC, and the next
+    /// opens ~24h later. [`Self::next_run_time`] returns that opening instant;
+    /// this converts any `now` into the date of the window it belongs to, so a
+    /// caller can run the pipeline exactly once per window even across the
+    /// midnight wrap (the window spans [20:30, 04:30) UTC).
+    pub fn window_start_date(&self, now: DateTime<Utc>) -> chrono::NaiveDate {
+        let midnight = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+        let current_secs = now.time().signed_duration_since(midnight).num_seconds();
+        let market_close_utc = self.config.market_close_utc();
+        let earliest_start_secs = market_close_utc.signed_duration_since(midnight).num_seconds()
+            + self.config.post_market_buffer_mins * 60;
+        if current_secs >= earliest_start_secs {
+            now.date_naive()
+        } else {
+            // Before today's opening instant -> belongs to the window that
+            // opened yesterday (post-midnight side of [20:30, 04:30)).
+            now.date_naive() - Duration::days(1)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -258,6 +280,33 @@ mod tests {
         let now = Utc.with_ymd_and_hms(2026, 8, 19, 15, 0, 0).unwrap();
         let state = scheduler.check_state(now);
         assert_eq!(state, SchedulerState::CannotRun);
+    }
+
+    #[test]
+    fn test_window_start_date_midnight_wrap() {
+        // Malaysia (UTC+8): window opens 20:30 UTC each evening.
+        let scheduler = NightlyScheduler::new(SchedulerConfig {
+            timezone_offset_hours: 8,
+            market_open_local: NaiveTime::from_hms_opt(21, 30, 0).unwrap(),
+            market_close_local: NaiveTime::from_hms_opt(4, 0, 0).unwrap(),
+            post_market_buffer_mins: 30,
+            pre_market_buffer_mins: 30,
+            max_run_hours: 8,
+        });
+
+        // Evening inside the window (21:00 UTC on 8/19) -> window started 8/19.
+        let evening = Utc.with_ymd_and_hms(2026, 8, 19, 21, 0, 0).unwrap();
+        assert_eq!(scheduler.window_start_date(evening), chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap());
+
+        // Post-midnight inside the SAME window (02:00 UTC on 8/20) -> still 8/19.
+        // This is the midnight wrap: a naive date-of-now would wrongly yield 8/20.
+        let after_midnight = Utc.with_ymd_and_hms(2026, 8, 20, 2, 0, 0).unwrap();
+        assert_eq!(scheduler.window_start_date(after_midnight), chrono::NaiveDate::from_ymd_opt(2026, 8, 19).unwrap());
+
+        // Before the window opens (12:00 UTC on 8/19) -> belongs to the window
+        // that opened 8/18, not today (which has not opened yet).
+        let midday = Utc.with_ymd_and_hms(2026, 8, 19, 12, 0, 0).unwrap();
+        assert_eq!(scheduler.window_start_date(midday), chrono::NaiveDate::from_ymd_opt(2026, 8, 18).unwrap());
     }
 
     #[test]
