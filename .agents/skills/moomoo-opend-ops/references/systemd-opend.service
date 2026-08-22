@@ -1,0 +1,41 @@
+# systemd --user unit for moomoo OpenD on a headless VPS.
+# This is the EXACT unit deployed on vps-ab0567fd (Inah's VPS) and verified working:
+#   - survives SSH/VS Code disconnect (linger=yes)
+#   - auto-restarts on crash (Restart=on-failure)
+#   - auto-starts on boot/login
+#
+# INSTALL:
+#   mkdir -p ~/.config/systemd/user
+#   cp systemd-opend.service ~/.config/systemd/user/opend.service
+#   # fix the two absolute paths below to your OpenD install folder
+#   systemctl --user daemon-reload
+#   systemctl --user enable opend.service
+#   systemctl --user start  opend.service
+#
+# VERIFY detached from shell:
+#   PID=$(pgrep -f 'OpenD$'); ps -o pid,ppid,cmd -p $PID
+#   # PPID should be a systemd process, not bash/ssh
+#
+# NOTE: OpenD reads OpenD.xml and writes the login cache (AppData.dat / Broker.dat)
+# relative to WorkingDirectory. WorkingDirectory MUST be the OpenD install folder.
+
+[Unit]
+Description=moomoo OpenD (Futu OpenAPI gateway)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Run as the ubuntu user; do NOT use root (OpenD caches login in user home).
+WorkingDirectory=/home/ubuntu/projects/MarketMoves/moomoo_OpenD_10.10.7008_Ubuntu18.04/moomoo_OpenD_10.10.7008_Ubuntu18.04
+ExecStart=/home/ubuntu/projects/MarketMoves/moomoo_OpenD_10.10.7008_Ubuntu18.04/moomoo_OpenD_10.10.7008_Ubuntu18.04/OpenD
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+# OpenD writes its own logs to ~/.com.moomoo.OpenD/Log/GTWLog_0_*.log; the redirect
+# below may capture nothing on some systemd versions, so prefer that log for diagnosis.
+StandardOutput=append:/home/ubuntu/projects/MarketMoves/moomoo_OpenD_10.10.7008_Ubuntu18.04/moomoo_OpenD_10.10.7008_Ubuntu18.04/opend.service.log
+StandardError=append:/home/ubuntu/projects/MarketMoves/moomoo_OpenD_10.10.7008_Ubuntu18.04/moomoo_OpenD_10.10.7008_Ubuntu18.04/opend.service.log
+
+[Install]
+WantedBy=default.target

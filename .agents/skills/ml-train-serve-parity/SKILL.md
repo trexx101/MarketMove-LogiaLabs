@@ -1,0 +1,466 @@
+---
+name: ml-train-serve-parity
+description: Detect and fix train/serve skew when a model trained in one environment (notebook/Python/Colab/sklearn/PyTorch/TF) is served from a different runtime (Rust/C++/JS/edge/microservice). Use when live predictions are muted, near-zero, biased, or worse than the notebook backtest, or when reviewing training vs serving feature code for deployment. Covers the 5 skew dimensions (feature definition, normalization, label/target, data source, model metadata key-shape contract) and a parity-test verification pattern.
+---
+# ML Train/Serve Parity
+
+## When to use
+- A model trained in Python (Colab / sklearn / PyTorch / TF / Keras) is served
+  from a different runtime (Rust, C++, JS, edge, a separate microservice) and the
+  live outputs look wrong: muted/near-zero predictions, worse than the notebook
+  backtest, or a directional bias the training metrics never showed.
+- You are reviewing a training notebook next to a deployment feature pipeline and
+  must confirm they compute identical inputs.
+- The symptom is usually **SILENT** — the engine builds and runs, predictions are
+  just shifted. Never assume "it runs" means "it matches."
+
+## Core failure mode: train/serve skew
+The training pipeline and the serving pipeline are two independent
+implementations of the same feature/label math. They drift. Audit these 5
+dimensions, in priority order:
+
+1. **Feature definition mismatch** — same name, different formula.
+   e.g. training: `vwap_dev = log(close / vwap)`; serving:
+   `(close - vwap) / vwap`. Weights encode one; you feed the other.
+2. **Normalization mismatch** — rolling z-score (windowed mean/std) in training
+   vs global z-score (dataset mean/std) in serving → persistent covariate shift,
+   worst in the first window. Pick ONE scheme, apply identically both sides.
+3. **Label / target mismatch** — ×100 scaling, directional hinge margins, horizon
+   offsets. The 100× trap: if training targets are ×100 but serving feeds raw
+   (or vice-versa), magnitude thresholds break (never trades or always trades).
+4. **Data source / exchange / ticker mismatch** — trained on Binance BTCUSDT,
+   deployed on Kraken BTC/USD. Different OHLC conventions, microstructure, symbol.
+   No architecture change fixes this; only aligned data does.
+5. **Model metadata contract mismatch** (the silent key-shape skew) — training
+   code emits `model_meta.json` with one shape (e.g. `"label_std": [0.012, 0.028, 0.065]`
+   as a list); serving code reads a different shape (e.g. per-horizon keys
+   `label_std_1d`, `label_std_5d`, `label_std_21d`). The keys mismatch means
+   the serving code silently falls back to its hardcoded defaults — predictions
+   flow through, but the trained calibration is **never applied**. This also
+   applies to per-symbol model bundles: the directory name must match the
+   symbol exactly and the model files must use that lower-cased prefix.
+   See `references/multi-symbol-model-bundle-sync.md` for the full recipe.
+
+## Verification methodology (do this — don't eyeball)
+- **Parity test**: implement the serving feature function, feed it the SAME input
+  window the training code used, assert output vectors are bit-close (epsilon
+  1e-6 to 1e-9). Load a FIXED golden fixture (not random data) so the test is
+  deterministic. Assert the specific contract, e.g.
+  `vwap_dev == ln(close / rolling_vwap)` and
+  `rolling_vwap == Σ(tp·vol)/Σ(vol)` over the window.
+- **Ad-hoc verification before claiming done**: after editing code, run a focused
+  temporary script under `/tmp` with a `hermes-verify-` filename prefix that
+  re-runs the affected tests + a live smoke check, then clean it up. Report it
+  explicitly as *ad-hoc verification*, not suite-green. (Required by the coding
+  guardrail when no canonical CI ran this turn.)
+- Keep model metadata (train date, data range, exchange, threshold, norm stats)
+  versioned alongside the checkpoint so a retrain can't silently ship stale stats.
+
+## Pitfalls
+- Don't trust "it builds." A passing compile + non-crashing serve says nothing
+  about input parity.
+- Don't mix computed vs reported market fields (e.g. VWAP): pick the training
+  definition and replicate it EXACTLY in serving.
+- Single-year / single-regime training data bakes in drift bias (e.g. 2025 bull
+  → persistent long bias). Retrain on multi-regime, exchange-aligned history.
+- Threshold scale traps: confirm the deployed threshold unit matches the model's
+  output unit (raw vs ×100).
+- Pre-existing unrelated test failures (e.g. shared-mutex poisoning in one module)
+  should be confirmed out-of-scope before you blame your parity change.
+- **The fixture staleness trap — both sides can be wrong in the SAME way.**
+  When a parity test passes but the live model still disagrees with the
+  canonical training source (notebook / TF graph / saved pipeline), the
+  failure mode is often that the parity FIXTURE and the serving implementation
+  were generated by the SAME stale helper, NOT the canonical source. The
+  parity test asserts fixture == serving, both encoding the same bug; the
+  canonical source is NOT being checked. Detection: after fixing the bug
+  in the serving code, the parity test SUDDENLY fails — the "fix" exposed
+  a long-standing fixture bug. Diff between fixture and serving equals the
+  diff between helper and canonical source. Fix: mark the broken test as
+  deferred (Rust `#[ignore = "fixture stale; regen from <canonical source>"]`
+  for 1.73+, pytest.skip(reason=...), or equivalent) and regenerate the
+  fixture from the canonical source as a separate tracked work item.
+  Do NOT update the fixture by hand to match the new serving output —
+  that re-bakes the bug and removes the only test that could have caught it.
+  See `references/norm-stats-generation-pitfalls.md` §7 for the concrete
+  MarketMoves QQQ drawdown_from_50d_high case where the parity fixture and
+  Rust implementation both used `close` for the rolling max while the
+  notebook (ground truth) used `high` — parity green, divergence real.
+- **Directional-hinge / margin penalty traps**: a loss term that pushes predictions
+  AWAY from zero (e.g. `relu(margin - y_true·y_pred)`) "fixes" near-zero / muted
+  predictions by AMPLIFYING NOISE into confidently-wrong predictions. The symptom
+  ("terribly low predictions") gets masked but the model gains no real edge.
+  Detect this by checking the EVALUATION metrics, not the prediction magnitude:
+  if directional hit-rate ≈ 50% and Pearson correlation ≈ 0 (e.g. 0.01–0.04) while
+  predictions look "healthy," the model has NO edge — it is confidently wrong.
+  Never report hit-rate as success when correlation ≈ 0.
+  **Empirical confirmation (MarketMarkovNet audit):** dropping the ×100 scaling
+  AND the directional hinge, then retraining on multi-regime data, flipped eval
+  Pearson r from near-zero POSITIVE (0.01–0.04) to NEGATIVE (-0.01 to -0.03) —
+  the hinge was actively pushing predictions ANTI-correlated to truth. The fix is
+  to DROP the hinge entirely (pure MSE + light horizon-monotonicity loss), NOT to
+  tune its margin. If your eval r is ~0 after a retrain, the feature set has no
+  signal — stop retraining and reconsider features, don't amplify the noise.
+- **Walk-forward IC gate (the deploy gate, not a single-split backtest)**: a single
+  contiguous 70/15/15 split (or any non-chronological split) bakes in regime bias.
+  Replace with `TimeSeriesSplit` (expanding window, embargo) and report OUT-OF-SAMPLE
+  Pearson IC per fold + a MEAN. Gate any deploy on **mean |IC| > ~0.05 on at least
+  one horizon**. Single-regime "wins" are illusions: a regime-filtered backtest showing
+  +29% while hit-rate is 47% means the "edge" is just the test window's trend
+  (the filter stayed flat in a down market), not the model. Require walk-forward + Sharpe +
+  max DD reporting, not just cumulative return. Code pattern:
+  `tscv = TimeSeriesSplit(n_splits=5); for tr,va in tscv.split(idxs): ...`
+  then `pearson_ic(p_val, t_val)` per fold; assert `np.nanmean(fold_ics)` clears the bar.
+- **`pd.to_datetime(open_time, unit='ms')` OutOfBoundsDatetime bug**: Binance Vision
+  kline CSVs are read by pandas with `read_csv(names=...)` and the `open_time`
+  column arrives as FLOAT64 (huge ~1.6e18). `pd.to_datetime(float, unit='ms')`
+  OVERFLOWS → `OutOfBoundsDatetime`. Fix: cast BEFORE the call —
+  `df['open_time'] = df['open_time'].astype('int64')` in the load cell, then
+  `str(pd.to_datetime(int(df['open_time'].iloc[0]), unit='ms'))` in the meta export.
+  Without this the `model_meta.json` export crashes and the checkpoint ships with no record.
+- **Free crypto OHLC history is capped per venue.** Kraken's public
+  `0/public/OHLC` API IGNORES the `since` param and always returns only the most
+  recent ~720 candles (~30 days), even unauthenticated — so you CANNOT pull
+  multi-year Kraken history for free. Binance Vision
+  (`data.binance.vision/.../klines/<SYM>/1h/`) has full 2017+ monthly CSV zips.
+  Consequence for train==serve: if the live venue is Kraken but only Binance has
+  free multi-year history, you must either (a) switch the deploy engine to Binance
+  to get true train==serve, (b) train on Binance and DOCUMENT the exchange mismatch
+  as a known venue-drift risk, or (c) buy a Kraken data plan. Training on 30 days
+  of Kraken is not viable (one regime, massive overfit). See
+  `references/exchange-history-limits.md`.
+- **Backtest look-ahead fragility**: slicing `full_closes[-len(test_labels):]` to
+  recover closes for the test set only aligns because test is the tail of the
+  dataset. Make it explicit (use the test Subset's indices) so a future
+  non-tail split doesn't silently leak.
+- **Out-of-sample "wins" on a tail regime are not skill.** A regime-filtered
+  backtest showing +29% while hit-rate is 47% means the edge is an artifact of the
+  test window's trend, not the model. Require walk-forward / purged k-fold CV and
+  report Sharpe + max DD, not just cumulative return.
+- **Absolute vs fractional barrier `k` (units mismatch)**: `k = c * ATR`
+  where ATR is in absolute price units (e.g. $1000 for BTC) used as
+  `close * (1 + k)` — barrier lands at 151× close. Must normalize:
+  `k = c * ATR / close`. Silent killer — no error, just 0% penetration
+  forever. See `references/label-generation-pitfalls.md` §1b.
+- **Magnitude outlier domination**: unbounded penetration magnitudes (50×
+  barrier width) make MSE loss chase outliers instead of directional signal.
+  Clip signed targets to ±3. See `references/label-generation-pitfalls.md` §2b.
+- **Placeholder zero features → guaranteed no edge**: if 4 of 6 features are
+  zeros (unwired funding/basis/ob), walk-forward IC stays ~0. Print feature
+  stats before training; if `std ≈ 0`, fix the data pipeline, not the model.
+  See `references/label-generation-pitfalls.md` §3b + §5.
+- **Barrier calibration (empirical BTC 1h — CORRECTED 2026-07-21)**: c=0.15 → 100% penetration (too\n  tight); c=0.5 → 99.7-100% penetration (STILL too tight, barrier at ~0.2%); c=2.0+ → expected\n  ~40-60% (not yet confirmed). The previous claim of \"c=0.5 → ~40-60% (sweet spot)\" was WRONG —\n  it was inferred without testing on real data. The ATR(72)/close ratio for BTC 1h is ~0.4-0.7%,\n  so c=0.5 gives barriers at ~0.2-0.35% — well within BTC's 12h range.\n  **Rule: calibrate c empirically by running label generation first and checking penetration\n  rates BEFORE training. Never assume a c value — test it.**\n  See `references/label-generation-pitfalls.md` §3.
+- **GARCH(1,1) with fixed params can produce a CONSTANT output** if ω dominates α·r². For BTC 1h\n  log-returns (~0.001), r² ~ 1e-6, while ω=0.05 — the α·r² term is negligible, so σ² always converges\n  to ω/(1-β)=0.333 → scaled vol_regime = 0.732, std=0.000024. The feature is dead. Fix: retune GARCH\n  params for the return scale (ω~1e-6), or replace with a ratio (recent vol / long vol). Always print\n  feature std before training; if std ≈ 0, the feature is dead.\n  See `references/label-generation-pitfalls.md` §3c.
+- **Binance Futures API HTTP 451 geo-block from Colab**: `fapi.binance.com`, `www.binance.com`, and\n  `data.binance.com` all return HTTP 451 from US-based Colab IPs. No amount of retries or endpoint\n  rotation will work — this is a legal restriction, not a technical error. Fix: use\n  `data.binance.vision` CDN-hosted ZIP files for funding rates and futures klines (same format as\n  spot CSVs, no geo-block). Make feature fetch resilient — catch all exceptions, fall back to 0.0\n  with warning. At minimum `ob_imbalance` from CSV `taker_buy_base` is always available.\n  See `references/label-generation-pitfalls.md` §5-6.
+- **Staged V2 feature migration (keep V1 alive while V2 scaffolds alongside).** When
+  replacing a feature set (e.g. 3 OHLCV → 6-dim with funding/basis/order-flow), do NOT
+  switch the scheduler to the new features until the new model trains and clears the
+  walk-forward OOS IC gate. The old model expects the old feature count; feeding it
+  the wrong dimension breaks inference. Pattern: move old `features.rs` →
+  `features/legacy.rs` with re-exports from `features/mod.rs` so existing callers keep
+  resolving, add new modules (`core.rs`, `crypto.rs`, etc.) alongside, add `NormStatsV2`
+  with `schema_version` for backward-compat, add `predict_v2` to the bridge — all
+  compiling but dormant. Switch the scheduler only after the new model exports weights +
+  norm_stats v2 AND the IC gate passes.
+- **PyTorch state_dict key mismatch from module wrapping (COMMON when porting
+  architectures).** When you reimplement a model class for serving, the module
+  hierarchy must match the training code EXACTLY or `load_state_dict()` fails with
+  "Missing key(s)" / "Unexpected key(s)". The trap: training code defines
+  `class CausalConv1d(nn.Module)` with `self.conv = nn.Conv1d(...)`
+  (wrapper — params land at `conv1.conv.weight`), but serving code writes
+  `class CausalConv1d(nn.Conv1d)` (subclass — params land at `conv1.weight`).
+  Same math, different keys. Fix: inspect the checkpoint keys FIRST, then
+  match the hierarchy exactly:
+  ```
+  state = torch.load(checkpoint, weights_only=True)
+  print(state.keys())  # e.g. 'blocks.0.conv1.conv.weight' → use wrapper
+  ```
+  Always run a strict-load test: `missing, unexpected = m.load_state_dict(s, strict=True)`;
+  assert both are empty. Discovered and fixed in MarketMoves QQQ equities
+  (2026-07-27): old inference used `nn.Conv1d` subclass (producing
+  `conv1.weight`), Colab used wrapper (producing `conv1.conv.weight`). Fixed
+  inference to use `nn.Module` + `self.conv = nn.Conv1d(...)` matching the
+  Colab. See `references/marketmoves-qqq-equities-engine.md` §1.
+- **state_dict keys match but forward pass differs (SILENT — no error, no
+  warning).** `load_state_dict(strict=True)` succeeding only proves parameter
+  TENSORS have the right names and shapes — NOT that the forward pass is
+  identical. Discovered in MarketMoves QQQ equities (2026-07-26): the Colab
+  training notebook's `EquitiesTCN` used plain `nn.Conv1d(padding=dilation)`
+  (SYMMETRIC padding, both sides) with `nn.ModuleList` + manual loop, while
+  the inference service's `QqqTCN` used `CausalConv1d` (LEFT-ONLY padding)
+  with `nn.Sequential`. Both produced `blocks.0.conv1.weight` keys, so
+  `load_state_dict` would succeed — but the convolution outputs differ (symmetric
+  vs causal padding shifts the receptive field), and the activation order
+  differs (training: `return x + res` with NO final activation on the sum;
+  inference (old): `return self.activation(out + residual)` WITH a final SiLU).
+  **RESOLVED (2026-07-27).** Two-part fix:
+  (a) Colab retrained with `CausalConv1d` (left-only padding) in all blocks,
+      producing checkpoint keys `blocks.N.conv1.conv.weight` — new weights are
+      honest (no future leakage).
+  (b) `inference/equity_model.py` `ResidualBlock.forward` changed from
+      `return self.activation(out + residual)` → `return out + residual`
+      (no SiLU after residual add, matching training).
+  Ad-hoc verification (2026-07-27): strict load 70/70 keys, causal conv
+  early-position diff=0.0e+00, SiLU residual would change by max=5.39
+  (non-trivial effect, confirming the old bug was real). See
+  `references/marketmoves-qqq-equities-engine.md` §14.
+- **LightGBM sklearn wrapper `predict()` breaks on version mismatch.**
+  `LGBMRegressor.predict()` internally calls `_LGBMValidateData`, which can be
+  `None` when the installed scikit-learn version is newer than what the LightGBM
+  wrapper expects. Symptom: `TypeError: 'NoneType' object is not callable` on
+  `.predict()`. Fix: extract the raw `Booster` object and call it directly —
+  `booster = model.booster_ or model._Booster; booster.predict(X)`. The Booster
+  API is stable across versions and immune to sklearn API drift. Always do this
+  when loading LightGBM pickles trained in a different environment (e.g. Colab).
+  See `references/marketmoves-qqq-equities-engine.md` §2.
+- **dotenvy `.env` defeats Rust test env cleanup.** When `Config::from_env()`
+  calls `dotenvy::dotenv()`, it re-loads `.env` on EVERY call — so
+  `env::remove_var("NORM_STATS_PATH")` in test setup is immediately undone.
+  Symptom: test asserts default `models/norm_stats_qqq_v1.json` but gets
+  `/models/norm_stats.json` from `.env`. Fix: update `.env` to match the new
+  defaults (the `.env` is the source of truth for the test environment), or
+  mock dotenvy in tests. When you change a default path, grep `.env` for the
+  old value and update it alongside the code.
+- **Dormant vs dead code (pivot cleanup rule).** When pivoting from one model
+  to another (e.g. BTC hourly → QQQ daily), classify old code as **live**
+  (replace), **dormant** (preserve for fallback, e.g. V2 BTC TCN waiting for a
+  walk-forward IC retry), or **dead** (no callers anywhere outside its own
+  `pub mod` declaration — delete). Classification grep: search for
+  `crate::foo::bar` / `use foo::bar` references — if the ONLY hits are the
+  `pub mod foo;` declaration in `mod.rs`, it's dead. Always scan the parent
+  `mod.rs` for stale `pub mod foo;` and dead public API (constants, functions)
+  that only the deleted module consumed, AND stale docstrings referencing
+  removed symbols (future agents grep these and get false positives). See
+  `references/marketmoves-qqq-equities-engine.md` §6 + §8.
+- **Pre-existing test failure cascade (the `git stash` rule).** When many
+  tests fail at once with `PoisonError { .. }`, the real cause is usually ONE
+  panicking test that poisoned a shared mutex — the rest are cascades. Confirm
+  with `git stash` + retest on clean main: if the failing test ALSO fails
+  without your changes, it's pre-existing (don't fix it unless asked) and
+  reporting it as your regression wastes the user's time and erodes trust.
+  See `references/marketmoves-qqq-equities-engine.md` §7.
+- **venv without pip → `uv pip install` is the canonical install path.**
+  Many project `.venv/` directories have `pip` deliberately removed (PEP 668
+  external-managed). `python3 -m pip install <pkg>` fails with
+  "No module named pip". The system `uv` CLI works: `uv pip install <pkg>`
+  installs into the active venv without needing the in-venv pip.
+  See `references/marketmoves-qqq-equities-engine.md` §9.
+- **Indicator smoothing seed mismatch (pandas `ewm` vs Wilder SMA seed).**
+  `pd.Series.ewm(alpha=1/n, adjust=False)` starts recursive smoothing from
+  the FIRST value (index 0), but Wilder's classic smoothing seeds with the
+  SIMPLE MEAN of the first n values: `out[n-1] = sum(first n)/n`, then
+  recurses `out[i] = (out[i-1]*(n-1) + values[i]) / n`. The two produce
+  DIFFERENT values during the warmup period and converge only slowly. This
+  is a silent train/serve skew: the Python notebook uses `ewm`, the Rust
+  engine uses the Wilder SMA seed, and the "same" RSI/ADX/ATR feature has
+  different values for the first ~3n bars. Fix: in the notebook, implement
+  `wilder_smooth` as an explicit loop with SMA seed matching the engine
+  exactly:
+  ```python
+  def wilder_smooth(s, n):
+      out = pd.Series(index=s.index, dtype=float)
+      out.iloc[n-1] = s.iloc[:n].sum() / n
+      for i in range(n, len(s)):
+          out.iloc[i] = (out.iloc[i-1] * (n-1) + s.iloc[i]) / n
+      return out
+  ```
+  For RSI specifically: seed avg_gain/avg_loss with `gains.iloc[1:n+1].sum()/n`
+  (matching the engine), then recurse. Always verify by running both
+  implementations on the same fixture data and asserting values match to 1e-9.
+  See `references/norm-stats-generation-pitfalls.md` §2.
+
+## Workflow (recommended)
+1. Read training notebook feature/label cells + serving feature fn side by side.
+2. List every feature + the exact formula + normalization on each side.
+3. Diff them; the mismatches are your bugs. Fix serving to match training
+   (or retrain on the serving definition — but then re-export stats).
+4. Add a parity test on a fixed fixture. Build + run + ad-hoc verify + deploy.
+5. Write the plan to `.omo/plans/` first if the user wants plan-then-execute.
+
+## 10. ATR normalization pipeline (QQQ equities — Rust → Python inference)
+
+**Context:** QQQ labels are ATR-normalized penetration returns:
+`label = clip(fut_ret / (atr/close), -3, 3)`. The TCN and LightGBM are
+trained on label-space values. At inference, the Rust engine produces features,
+the Python inference service produces label-space predictions, and the Rust
+strategy (`next_equity_position`) uses raw log-return thresholds
+(entry=0.003, exit=-0.001). Three skew dimensions must align:
+
+**Label/Target:** model output is in label space (ATR-normalized).
+Must denormalize: `raw_return = label * (atr_ratio)` where
+`atr_ratio = ATR(14) / close`.
+
+**ATR computation:** The Rust scheduler has access to raw OHLCV
+for the full candle window. It computes ATR(14) using Wilder's EMA:
+- TR[i] = max(H-L, |H-prev_close|, |L-prev_close|) for i >= 1
+- ATR_warmup = mean(TR[1:14])  (simple average over first 14 TRs)
+- ATR[i] = (ATR[i-1] * 13 + TR[i]) / 14  for i > 14
+- `atr_ratio = ATR / close`
+
+The Colab notebook uses the same formula. `compute_atr_ratio` in
+`engine/src/scheduler.rs` implements this. ATR passes through the ZMQ V3
+payload as `atr_ratio` and the Python handler denormalizes predictions.
+
+**Blending:** Both TCN and LightGBM produce label-space values, so a
+weighted raw average is correct after denormalization. The Colab notebook
+uses z-score blending with rolling statistics per horizon — that requires a
+prediction history buffer not available at inference. Weighted raw average
+(0.5/0.5 default) is the right fallback.
+
+**The full inference pipeline:**
+```
+label_space_pred = w_t * tcn_out[h] + w_l * lgbm_out[h]   # both label units
+raw_return       = label_space_pred * atr_ratio               # → log-return
+```
+Strategy thresholds (entry=0.003, exit=-0.001) now operate on correct scale.
+
+## 11. Synthetic test data produces zero outputs from normalized NNet
+
+**Symptom:** tests using `[[0.0]*8 for _ in 126]` or `[[1.0]*8 for _ in 126]`
+as feature windows produce `pred = 0.0` regardless of blend weights or atr_ratio.
+
+**Root cause:** The QQQ TCN was trained on QQQ-normalized features
+(RobustScaler: `(x - median) / MAD`). A constant synthetic window is massively
+out-of-distribution — the model's final-layer activations collapse to near zero.
+Neural nets on OOD inputs can produce arbitrarily small outputs; this is expected,
+not a bug in the inference code.
+
+**Fix for arithmetic tests:** mock the model outputs with known values.
+```python
+class MockTCN:
+    def __call__(self, x):
+        return [torch.tensor([[v]], dtype=torch.float32) for v in [0.6, 0.2, 0.1]]
+class MockLGBM:
+    def __init__(self, value): self.value = value
+    def predict(self, x): return [self.value]
+
+ensemble = EquityEnsemble(MockTCN(), MockLGBM(0.4), MockLGBM(0.0), MockLGBM(-0.1))
+preds = ensemble.predict(window=[[0.0]*8]*126, atr_ratio=0.005)
+# pred_1d: 0.5*0.6 + 0.5*0.4 = 0.5 → raw = 0.5 * 0.005 = 0.0025
+assert np.isclose(preds["pred_1d"], 0.0025)
+```
+
+**Fix for integration tests** (ZMQ round-trip, E2E with real artifacts):
+use varied feature windows — `[[(i+j)*0.1 for j in range(8)] for i in range(126)]` —
+which produces non-trivial outputs even with real models.
+
+## 12. Near-zero MAD normalization: features explode on real data (MarketMoves QQQ equities — 2026-07-26)
+
+**Symptom:** inference server healthcheck (all-zeros features + tiny atr_ratio=0.005) returns sane
+predictions. Real features (rsi_14≈58, atr_ratio≈0.024, seq_len=126) produce `pred_1d=-2987`
+— billions of times larger than expected.
+
+**Root cause (CORRECTED — 2026-07-26):** TWO compounding bugs, not one:
+
+1. **Global clip squashing bounded features.** `compute_features()` in the
+   Colab notebook applied `f = f.clip(lower=-5.0, upper=5.0)` to ALL features
+   at the end. RSI naturally ranges 0–100, so this clipped it to 5.0 max.
+   The median over the training set landed at exactly 5.0 (the clip ceiling),
+   and MAD was ~0 (no variance above the ceiling). The `mads[mads==0] = 1e-6`
+   fallback then set MAD to 1e-6. Normalization formula:
+   `(58.7 - 5.0) / (1.4826 × 1e-6) ≈ 36,200,000,000`.
+   **Fix:** clip ONLY unbounded features (`trend_slope`, `rvol_20d`,
+   `gap_pct`, `drawdown_from_50d_high`). Leave bounded indicators
+   (`rsi_14` 0–100, `trend_adx`, `vix_regime`) unclipped.
+
+2. **trend_adx train/serve definition mismatch.** The Colab notebook
+   computes `trend_adx` as an ATR percentage proxy:
+   `wilder_ema(tr, 14) / wilder_ema(close, 14) * 100` — typically 1–3 for
+   QQQ. The Rust engine (`equities_v2.rs:adx_14`) computes a REAL ADX using
+   +DM/-DM → +DI/-DI → DX → Wilder smoothing — typically 10–50. Same column
+   name, completely different scale. The model was trained on the proxy
+   (median 1.6); the engine feeds real ADX (~20–40). After normalization this
+   creates large but finite OOD values (~50 z-score), not the billions that
+   RSI caused, but still wrong. **Fix (COMPLETED 2026-07-26):** rewrote the
+   Colab notebook's `compute_features` to use real ADX (+DM/-DM → DI → DX →
+   Wilder smoothing) matching the engine's `adx_14` exactly, plus aligned
+   RSI to use Wilder smoothing seeded with SMA of first 14 (not `pd.ewm`
+   from first value). New norm_stats: trend_adx median=21.9, MAD=5.6. See
+   `references/norm-stats-generation-pitfalls.md` §2 for the alignment recipe.
+
+**Other affected features (same artifact):**
+- `vix_regime`: median=1.0 with mad=1.0 for a discrete 0/1/2/3 variable — borderline.
+- `drawdown_from_50d_high`: median=-0.0285, MAD=0.024 — fine.
+
+**Fix applied (2 stages):**
+- Stage 1: regenerated `norm_stats_qqq_v1.json` with the clip fix. RSI median
+  55.19, MAD 14.0 (floored). Walk-forward IC 0.0941, all horizons positive.
+- Stage 2: the trend_adx ATR-proxy vs real-ADX mismatch (bug #2 above) was
+  RESOLVED by rewriting the Colab notebook's `compute_features` to use a real
+  ADX (+DM/-DM → +DI/-DI → DX → Wilder smoothing) matching the Rust engine's
+  `adx_14` exactly, plus aligning RSI to use Wilder smoothing seeded with SMA
+  of first 14 (not `pd.ewm` from first value). See
+  `references/norm-stats-generation-pitfalls.md` §2 for the complete alignment
+  recipe. New norm_stats: trend_adx median=21.9, MAD=5.6 (real ADX scale).
+
+**Detection pattern for future deployments:** before shipping a new model artifact, add a
+normalization sanity test: for each feature, assert `|normalized_value| < 10` on real-market
+data. Features that normalize to > 10 are likely out-of-distribution and should be flagged
+before causing prediction explosions.
+
+**Per-feature MAD floors (defensive):** Even after fixing the clip bug, add
+per-feature minimum MAD floors so a future training slice with near-zero
+variance on any feature can't reproduce the explosion:
+```python
+MAD_FLOORS = {'rsi_14': 14.0, 'trend_adx': 0.1, 'vix_regime': 1.0, ...}
+mads[col] = max(mads[col], floor)
+```
+
+**Hardcoded Rust test assertions on artifact values (PITFALL — RESOLVED):** When you
+regenerate `norm_stats_qqq_v1.json`, the Rust test
+`norm_stats_load_named_matches_trained_artifact` (equities_v2.rs:672) that
+hardcodes the old median/MAD values (e.g. `assert!(stats.mad[2] < 1e-5)` for
+RSI) will FAIL. **Fix (applied 2026-07-26):** replaced all hardcoded exact-value
+assertions with property-based range checks that validate the *shape* of the
+artifact without pinning to specific training-run values:
+```rust
+// trend_adx (idx 1): real ADX, median should be 5-80, MAD >= 1
+assert!(stats.median[1] > 5.0, "trend_adx median too low (ATR proxy?)");
+assert!(stats.mad[1] >= 1.0);
+// rsi_14 (idx 2): median 20-80, MAD >= 5 (not 1e-6!)
+assert!(stats.median[2] > 20.0, "rsi_14 median too low (clipped?)");
+assert!(stats.mad[2] >= 5.0, "rsi_14 MAD too small (explosion bug)");
+// normalized values must not explode
+assert!(v.abs() < 1e6, "normalized value exploded (norm_stats bug?)");
+```
+This is strictly better than updating hardcoded values — it survives every
+future retrain AND catches the explosion bug class if it recurs.
+
+```python
+# Sanity test to add to the inference test suite
+import sys; sys.path.insert(0, '/home/ubuntu/projects/MarketMoves/engine/src')
+from features import EquityNormStats, compute_equity_features
+
+stats = EquityNormStats.load('/models/norm_stats_qqq_v1.json')
+rows = compute_equity_features(...)  # real QQQ data
+for row in rows:
+    normalized = stats.normalize(row)
+    for name, val in zip(EQ_FEATURE_NAMES, normalized):
+        assert abs(val) < 10, f"Feature '{name}' normalized to {val} — likely OOD"
+```
+
+## References
+- `references/marketmarkovnet-example.md` — concrete worked example: the 4 skews
+  found in MarketMarkovNet (Colab PyTorch → Rust engine) and exactly how each
+  was fixed, plus the ad-hoc verification recipe.
+- `references/marketmoves-qqq-equities-engine.md` — Wave C QQQ equities engine
+  port: PyTorch state_dict key mismatch from module wrapping (CausalConv1d
+  subclass vs wrapper), **state_dict keys match but forward pass differs
+  (silent skew: symmetric vs causal padding, activation order, ModuleList vs
+  Sequential — §14)**, LightGBM Booster vs sklearn wrapper version mismatch,
+  dotenvy .env defeating Rust test env cleanup, TCN state_dict key inspection,
+  V3 wire protocol spec, dormant-vs-dead pivot cleanup rule, pre-existing
+  test cascade `git stash` verification, venv-without-pip `uv pip install` install path,
+  **ATR normalization pipeline (Rust ATR(14)/close → Python denorm), synthetic-feature
+  NNet zero-output pitfall in unit tests.**
+- `references/norm-stats-generation-pitfalls.md` — global clip squashing RSI/ADX
+  (the real root cause of median=5.0, not "different RSI computation"), trend_adx
+  ATR-proxy vs real-ADX train/serve mismatch, per-feature MAD floors, hardcoded
+  Rust test assertions on stale artifact values, stale notebook file detection.
+- `references/exchange-history-limits.md` — per-venue free OHLC history limits
+  (Kraken ignores `since`, Binance Vision has full CSVs), the train==serve
+  resolution matrix, and the directional-hinge / correlation-as-edge-test
+  quant-review notes from the MarketMarkovNet audit.
+- `references/multi-symbol-model-bundle-sync.md` — per-symbol model bundle
+  directory naming, `label_std` per-key metadata contract, named Docker volume
+  sync, and disk-prune note from the MarketMoves QQQ/SMH/XLF deployment.
