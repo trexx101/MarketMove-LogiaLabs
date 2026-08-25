@@ -11,5 +11,8 @@
     "@sveltejs/vite-plugin-svelte": "^3",
     "svelte": "^4",
     "vite": "^5"
+  },
+  "dependencies": {
+    "lightweight-charts": "^5.2.1"
   }
 }
