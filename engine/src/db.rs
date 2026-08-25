@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS predictions (
 );
 CREATE INDEX IF NOT EXISTS predictions_candle_ts_idx ON predictions (candle_ts DESC);
 CREATE TABLE IF NOT EXISTS signal_state (
-    id         INTEGER PRIMARY KEY CHECK (id = 1),
+    model_id   TEXT    PRIMARY KEY,
     position   INTEGER NOT NULL DEFAULT 0,
     updated_at INTEGER NOT NULL DEFAULT 0
 );
@@ -414,6 +414,7 @@ pub async fn open(database_url: &str) -> Result<DbPool> {
 
     migrate_predictions(&pool).await?;
     migrate_strategy_versions(&pool).await?;
+    migrate_signal_state(&pool).await?;
     migrate_option_positions(&pool).await?;
     migrate_option_tape_meta(&pool).await?;
     migrate_engine_events(&pool).await?;
@@ -438,6 +439,40 @@ pub async fn migrate_strategy_versions(pool: &DbPool) -> Result<()> {
             .await
             .context("adding column equity")?;
         info!("migrated strategy_versions: added column equity");
+    }
+
+    Ok(())
+}
+
+/// Migrate `signal_state` from the singleton schema (id=1 PK) to per-model
+/// rows (model_id TEXT PK). On old-schema databases the table is dropped and
+/// recreated — the single position row is ephemeral and reconstructed from
+/// `equity_trades` on restart.
+pub async fn migrate_signal_state(pool: &DbPool) -> Result<()> {
+    let rows = sqlx::query("PRAGMA table_info(signal_state)")
+        .fetch_all(pool)
+        .await
+        .context("PRAGMA table_info(signal_state)")?;
+
+    let columns: Vec<String> = rows.iter().map(|r| r.get::<String, _>(1)).collect();
+
+    if columns.contains(&"id".to_string()) && !columns.contains(&"model_id".to_string()) {
+        info!("migrating signal_state: singleton → per-model (model_id PK)");
+        sqlx::query("DROP TABLE signal_state")
+            .execute(pool)
+            .await
+            .context("dropping old signal_state")?;
+        sqlx::query(
+            "CREATE TABLE signal_state (
+                model_id   TEXT    PRIMARY KEY,
+                position   INTEGER NOT NULL DEFAULT 0,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .execute(pool)
+        .await
+        .context("creating new signal_state")?;
+        info!("signal_state migration complete");
     }
 
     Ok(())
@@ -1541,9 +1576,10 @@ pub async fn fetch_recent_candles(pool: &DbPool, limit: usize) -> Result<Vec<Can
     Ok(candles)
 }
 
-/// Return the current position from `signal_state` (id = 1), or `0` if no row exists.
-pub async fn load_position(pool: &DbPool) -> Result<i64> {
-    match sqlx::query("SELECT position FROM signal_state WHERE id = 1")
+/// Return the current position from `signal_state` for the given model, or `0` if no row exists.
+pub async fn load_position(pool: &DbPool, model_id: &str) -> Result<i64> {
+    match sqlx::query("SELECT position FROM signal_state WHERE model_id = ?1")
+        .bind(model_id)
         .fetch_one(pool)
         .await
     {
@@ -1553,13 +1589,14 @@ pub async fn load_position(pool: &DbPool) -> Result<i64> {
     }
 }
 
-/// Upsert the current position into `signal_state` (singleton row id = 1).
-pub async fn save_position(pool: &DbPool, position: i64) -> Result<()> {
+/// Upsert the current position into `signal_state` keyed by model_id.
+pub async fn save_position(pool: &DbPool, model_id: &str, position: i64) -> Result<()> {
     let updated_at = Utc::now().timestamp();
     sqlx::query(
-        "INSERT INTO signal_state (id, position, updated_at) VALUES (1, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET position = excluded.position, updated_at = excluded.updated_at",
+        "INSERT INTO signal_state (model_id, position, updated_at) VALUES (?, ?, ?)
+         ON CONFLICT(model_id) DO UPDATE SET position = excluded.position, updated_at = excluded.updated_at",
     )
+    .bind(model_id)
     .bind(position)
     .bind(updated_at)
     .execute(pool)

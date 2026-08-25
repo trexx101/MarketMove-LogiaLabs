@@ -20,9 +20,11 @@
 //!
 //! ## What's NOT in this module
 //!
-//! - The executor swap (Paper → Moomoo) is driven by the scheduler reading
-//!   `trading_mode` at each cycle. This module only flips the shared value
-//!   and broadcasts the change.
+//! - The current deployment always uses paper execution — the Moomoo executor
+//!   exists only in dead code (`build_executor_for_mode` in main.rs). This
+//!   module flips the shared `TradingMode` value and audits the switch, but
+//!   actual order routing remains paper-only. The `executor_kind` field in
+//!   `ModeResponse` is always `"paper"` until the Moomoo path is wired.
 
 use axum::{extract::State, http::StatusCode, response::Json};
 use serde::{Deserialize, Serialize};
@@ -37,6 +39,9 @@ use super::{internal_error, ws::TelemetryEvent, ApiResult, AppState};
 #[derive(Debug, Serialize)]
 pub struct ModeResponse {
     pub mode: String,
+    /// The executor kind currently routing orders: `"paper"` or `"moomoo"`.
+    /// Always `"paper"` in the current deployment — Moomoo is not wired.
+    pub executor_kind: String,
     pub parity_marker_age_secs: Option<i64>,
     pub parity_valid: bool,
     pub last_switch_ts: Option<i64>,
@@ -69,6 +74,7 @@ pub async fn handle_get_mode(State(state): State<AppState>) -> ApiResult<ModeRes
 
     Ok(Json(ModeResponse {
         mode: current.to_string(),
+        executor_kind: "paper".to_string(),
         parity_marker_age_secs: age,
         parity_valid,
         last_switch_ts: last_switch,

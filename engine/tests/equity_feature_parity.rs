@@ -103,7 +103,6 @@ fn build_candles(input: &FixtureInput) -> Vec<EquityCandle> {
 const TOLERANCE: f64 = 1e-6;
 
 #[test]
-#[ignore = "parity fixture was generated against stale training/equities_features.py (close-based drawdown); see module docs for regen plan"]
 fn rust_vs_python_feature_parity() {
     let fixture = load_fixture();
     let candles = build_candles(&fixture.input);

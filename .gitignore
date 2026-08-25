@@ -15,6 +15,9 @@
 *.db-wal
 /data/*.db
 
+# Options recorder tape (large, regenerated daily on the host — keep on disk, not in git)
+data/options_tape/
+
 # Rust
 /target
 **/target

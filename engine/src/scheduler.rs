@@ -288,7 +288,7 @@ impl EquityScheduler {
         sma_valid: bool,
     ) -> Result<()> {
         let current_pos = Position::from_i64(
-            db::load_position(&self.pool).await?
+            db::load_position(&self.pool, &self.model_id).await?
         );
 
         let latest_close = closes.last().copied().unwrap_or(0.0);
@@ -394,7 +394,7 @@ impl EquityScheduler {
                             }
 
                             // Commit position only after trade record succeeds.
-                            db::save_position(&self.pool, new_pos.as_i64()).await?;
+                            db::save_position(&self.pool, &self.model_id, new_pos.as_i64()).await?;
 
                             // Publish PnL tick after trade execution.
                             if let Some(tx) = &self.tx {
@@ -460,7 +460,7 @@ impl EquityScheduler {
                             }
 
                             // Commit position only after trade record succeeds.
-                            db::save_position(&self.pool, new_pos.as_i64()).await?;
+                            db::save_position(&self.pool, &self.model_id, new_pos.as_i64()).await?;
                             if let Some(tx) = &self.tx {
                                 let _ = tx.send(TelemetryEvent::PnlTick {
                                     model_id: self.model_id.clone(),

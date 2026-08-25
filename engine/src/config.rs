@@ -467,10 +467,8 @@ fn verify_parity_marker(marker_path: &str, max_age_secs: i64) -> Result<()> {
             return Err(anyhow!(
                 "TRADING_MODE=live requires a fresh parity marker at '{marker_path}', \
                  but no marker was found.\n\
-                 Run the parity harness (Feature 13) to produce it:\n\
-                   cargo run --bin engine --bin parity-harness --release\n\
-                 or invoke `engine::parity::run_parity` from a CLI and call \
-                 `engine::parity::write_marker` on success.\n\
+                 Run the parity harness to produce it:\n\
+                   cargo run --bin parity_harness --release\n\
                  Refusing to start in live mode."
             ));
         }

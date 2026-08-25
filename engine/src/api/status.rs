@@ -31,9 +31,8 @@ pub(crate) struct StatusQuery {
     symbol: Option<String>,
 }
 
-/// Derive current position from equity_trades for a given symbol.
-/// Counts total qty: buys add, sells subtract. Returns 1 (long), -1 (short), or 0 (flat).
-async fn derive_position(pool: &DbPool, symbol: &str) -> anyhow::Result<i64> {
+/// Return the net quantity (buys - sells) for a given symbol from equity_trades.
+async fn net_qty_for_symbol(pool: &DbPool, symbol: &str) -> anyhow::Result<f64> {
     let row = sqlx::query(
         "SELECT COALESCE(CAST(SUM(CASE WHEN side = 'buy' THEN qty ELSE -qty END) AS REAL), 0.0) AS net_qty
          FROM equity_trades WHERE symbol = ?1",
@@ -42,20 +41,49 @@ async fn derive_position(pool: &DbPool, symbol: &str) -> anyhow::Result<i64> {
     .fetch_one(pool)
     .await?;
     let net_qty: f64 = row.get("net_qty");
-    Ok(net_qty.signum() as i64)
+    Ok(net_qty)
 }
 
-/// Fetch unrealized PnL: last close vs entry price, with side sign.
-async fn derive_unrealized_pnl(pool: &DbPool, symbol: &str, position: i64) -> anyhow::Result<f64> {
+/// Effective position resolved across the primary AND inverse (short) ETF symbols.
+///
+/// Returns `(position_sign, held_symbol)` where:
+/// - `position_sign` = 1 (long primary), -1 (short via inverse ETF), or 0 (flat).
+/// - `held_symbol` is the instrument actually held, used for entry/close/PnL lookups.
+///   When flat, `held_symbol` defaults to `primary`.
+async fn derive_effective_position(
+    pool: &DbPool,
+    primary: &str,
+    inverse: &str,
+) -> anyhow::Result<(i64, String)> {
+    let primary_net = net_qty_for_symbol(pool, primary).await?;
+    let inverse_net = net_qty_for_symbol(pool, inverse).await?;
+
+    if primary_net > 0.0 && inverse_net <= 0.0 {
+        Ok((1, primary.to_string()))
+    } else if inverse_net > 0.0 && primary_net <= 0.0 {
+        Ok((-1, inverse.to_string()))
+    } else {
+        Ok((0, primary.to_string()))
+    }
+}
+
+/// Fetch unrealized PnL for the held instrument.
+///
+/// For a short position the held instrument is the inverse ETF (e.g. PSQ) —
+/// its price change *is* the PnL, so no sign flip is needed (we own the shares).
+async fn derive_unrealized_pnl(
+    pool: &DbPool,
+    held_symbol: &str,
+    position: i64,
+) -> anyhow::Result<f64> {
     if position == 0 {
         return Ok(0.0);
     }
-    let entry = db::fetch_equity_entry_trade_price(pool, symbol).await?;
-    let close = db::fetch_equity_close_at_ts(pool, symbol, chrono::Utc::now().timestamp()).await?;
+    let entry = db::fetch_equity_entry_trade_price(pool, held_symbol).await?;
+    let close = db::fetch_equity_close_at_ts(pool, held_symbol, chrono::Utc::now().timestamp()).await?;
     match (entry, close) {
         (Some(e), Some(c)) if c > 0.0 && e > 0.0 => {
-            let pct = (c - e) / e;
-            Ok(pct * position as f64)
+            Ok((c - e) / e)
         }
         _ => Ok(0.0),
     }
@@ -67,19 +95,31 @@ pub(crate) async fn handle_status(
 ) -> ApiResult<StatusResponse> {
     let pool = &state.pool;
     let symbol = params.symbol.as_deref().unwrap_or(&state.symbol);
+    let inverse = &state.short_symbol;
 
-    let position = derive_position(pool, symbol)
+    // Resolve effective position across primary + inverse ETF symbols.
+    let (position, held_symbol) = derive_effective_position(pool, symbol, inverse)
         .await
-        .map_err(|e| internal_error("derive_position", e))?;
-    let realized_pnl = db::sum_equity_realized_pnl(pool, symbol)
+        .map_err(|e| internal_error("derive_effective_position", e))?;
+
+    // Realized PnL: sum across both legs (primary + inverse).
+    let realized_pnl_primary = db::sum_equity_realized_pnl(pool, symbol)
         .await
-        .map_err(|e| internal_error("sum_equity_realized_pnl", e))?;
-    let unrealized_pnl = derive_unrealized_pnl(pool, symbol, position)
+        .map_err(|e| internal_error("sum_equity_realized_pnl (primary)", e))?;
+    let realized_pnl_inverse = db::sum_equity_realized_pnl(pool, inverse)
+        .await
+        .map_err(|e| internal_error("sum_equity_realized_pnl (inverse)", e))?;
+    let realized_pnl = realized_pnl_primary + realized_pnl_inverse;
+
+    // Unrealized PnL & entry price: use the held instrument.
+    let unrealized_pnl = derive_unrealized_pnl(pool, &held_symbol, position)
         .await
         .map_err(|e| internal_error("derive_unrealized_pnl", e))?;
-    let entry_price = db::fetch_equity_entry_trade_price(pool, symbol)
+    let entry_price = db::fetch_equity_entry_trade_price(pool, &held_symbol)
         .await
         .map_err(|e| internal_error("fetch_equity_entry_trade_price", e))?;
+
+    // Candles & staleness: use the PRIMARY symbol (market data).
     let candle = db::fetch_latest_equity_candle(pool, symbol)
         .await
         .map_err(|e| internal_error("fetch_latest_equity_candle", e))?;
@@ -87,7 +127,16 @@ pub(crate) async fn handle_status(
         .await
         .map_err(|e| internal_error("fetch_latest_equity_prediction", e))?;
 
-    let last_close = candle.as_ref().map(|c| c.close);
+    // Close price: use the held instrument's close (what we actually own).
+    let last_close = if held_symbol != *symbol {
+        let hc = db::fetch_latest_equity_candle(pool, &held_symbol)
+            .await
+            .map_err(|e| internal_error("fetch_latest_equity_candle (held)", e))?;
+        hc.as_ref().map(|c| c.close)
+    } else {
+        candle.as_ref().map(|c| c.close)
+    };
+
     let last_candle_ts = candle.as_ref().map(|c| {
         chrono::DateTime::<chrono::Utc>::from_timestamp(c.ts, 0)
             .map(|dt| dt.to_rfc3339())
@@ -98,7 +147,7 @@ pub(crate) async fn handle_status(
         .map(|c| chrono::Utc::now().timestamp() - c.ts)
         .unwrap_or(0);
 
-    let entry_ts = db::fetch_equity_entry_trade_ts(pool, symbol)
+    let entry_ts = db::fetch_equity_entry_trade_ts(pool, &held_symbol)
         .await
         .map_err(|e| internal_error("fetch_equity_entry_trade_ts", e))?;
 

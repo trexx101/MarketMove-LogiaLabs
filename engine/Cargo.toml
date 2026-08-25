@@ -46,6 +46,10 @@ path = "src/main.rs"
 name = "options_recorder"
 path = "src/bin/options_recorder.rs"
 
+[[bin]]
+name = "parity_harness"
+path = "src/bin/parity_harness.rs"
+
 [lib]
 name = "engine"
 path = "src/lib.rs"

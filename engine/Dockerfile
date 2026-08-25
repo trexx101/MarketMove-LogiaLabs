@@ -52,6 +52,7 @@ RUN mkdir -p engine/src/bin \
     && echo 'fn main() { println!("deps-warmup"); }' > engine/src/main.rs \
     && echo '' > engine/src/lib.rs \
     && echo 'fn main() {}' > engine/src/bin/options_recorder.rs \
+    && echo 'fn main() {}' > engine/src/bin/parity_harness.rs \
     && cargo build --release --manifest-path engine/Cargo.toml \
     && rm -rf engine/src
 

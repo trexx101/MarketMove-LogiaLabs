@@ -204,7 +204,7 @@ async fn chart_computes_rolling_sma() {
 #[tokio::test]
 async fn status_reports_unrealized_pnl_for_open_position() {
     let pool = test_pool().await;
-    db::save_position(&pool, strategy::Position::Long.as_i64())
+    db::save_position(&pool, "test-model", strategy::Position::Long.as_i64())
         .await
         .unwrap();
     db::insert_equity_trade(&pool, "BTC/USD", 1_000_000, "buy", 1.0, 100.0, 0.0, 0.0)
