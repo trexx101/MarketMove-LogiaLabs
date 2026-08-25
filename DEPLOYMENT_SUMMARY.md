@@ -75,18 +75,25 @@ Recover old binary if rollback needed: the previous image id is in the docker bu
 cd /home/ubuntu/projects/MarketMoves
 docker build -f inference/Dockerfile -t marketmarkovnet/inference:latest .
 
-# Recreate (internal-only, no host port; engine reaches it on deploy_mmn)
+# Recreate (internal-only, no host port; engine reaches it on deploy_mmn).
+# MODELS_DIR=/models makes the loader discover per-symbol bundles
+# (/models/QQQ, /models/SMH, /models/XLF). WITHOUT it only the legacy flat
+# QQQ ensemble loads and every request silently falls back to QQQ's model.
 docker rm -f mmn-inference
 docker run -d \
   --name mmn-inference \
   --restart unless-stopped \
   --network deploy_mmn \
+  --network-alias inference \
   -v deploy_models:/models:ro \
+  -e MODELS_DIR=/models \
+  -e ZMQ_BIND=tcp://0.0.0.0:5555 \
+  -e PYTHONUNBUFFERED=1 \
   marketmarkovnet/inference:latest
 
-# Verify
+# Verify — MUST say "3 ensembles" and list QQQ, SMH, XLF
 docker ps --filter name=inference --format '{{.Names}}: {{.Status}}'
-docker logs mmn-inference --since 2m | tail -15
+docker logs mmn-inference --since 2m | grep -E "loaded ensembles|ensembles,"
 ```
 Role: ML inference inside the docker network (exposed on 5555 for the engine's ZMQ). Cold-start note: z-score de-norm/embedding state can read `0.0` for the first ~2 candles after a restart — predictions populate once real bars flow.
 

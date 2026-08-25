@@ -219,6 +219,11 @@ pub(crate) struct BackfillPredictionsQuery {
     /// Override ATR lookback period (default 14).
     #[serde(default = "default_atr_period")]
     pub atr_period: usize,
+    /// Symbol to backfill (default: engine bootstrap symbol). Must match a
+    /// `trading_models` primary_symbol (or the bootstrap symbol) so the
+    /// correct per-model norm stats can be loaded.
+    #[serde(default)]
+    pub symbol: Option<String>,
 }
 
 fn default_feature_window_size() -> usize {
@@ -256,11 +261,26 @@ pub(crate) async fn handle_backfill_predictions(
 ) -> ApiResult<BackfillPredictionsResponse> {
     let feature_window_size = params.feature_window_size;
     let atr_period = params.atr_period;
+    let symbol = params
+        .symbol
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| state.symbol.clone());
 
-    // Load norm stats from the file path (same file the scheduler uses at startup).
-    let norm_stats = EquityNormStats::load_named(&state.norm_stats_path)
+    // Resolve the norm stats for THIS symbol. The scheduler bootstrap loads
+    // per-model files from the `trading_models` registry; do the same here so
+    // a backfill for SMH/XLF uses their own stats, not the QQQ default.
+    let norm_stats_path = match db::load_enabled_models(&state.pool).await {
+        Ok(models) => models
+            .iter()
+            .find(|m| m.primary_symbol.eq_ignore_ascii_case(&symbol))
+            .map(|m| m.norm_stats_path.clone())
+            .unwrap_or_else(|| state.norm_stats_path.clone()),
+        Err(_) => state.norm_stats_path.clone(),
+    };
+
+    let norm_stats = EquityNormStats::load_named(&norm_stats_path)
         .map_err(|e| {
-            tracing::error!(error = %e, path = %state.norm_stats_path, "failed to load norm_stats");
+            tracing::error!(error = %e, path = %norm_stats_path, "failed to load norm_stats");
             (StatusCode::INTERNAL_SERVER_ERROR, format!("norm_stats load: {e}"))
         })?;
 
@@ -273,8 +293,8 @@ pub(crate) async fn handle_backfill_predictions(
         .await
         .unwrap_or_default();
 
-    // Pull the full QQQ candle history (oldest-first for feature computation).
-    let candles = db::fetch_equity_candles_asc(&state.pool, &state.symbol, 50_000)
+    // Pull the full candle history for this symbol (oldest-first for feature computation).
+    let candles = db::fetch_equity_candles_asc(&state.pool, &symbol, 50_000)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("db: {e}")))?;
 
@@ -300,7 +320,7 @@ pub(crate) async fn handle_backfill_predictions(
         .collect();
 
     // Pre-load existing prediction timestamps so we skip bars that already have one.
-    let existing: HashMap<i64, ()> = db::fetch_recent_equity_predictions(&state.pool, &state.symbol, 100_000)
+    let existing: HashMap<i64, ()> = db::fetch_recent_equity_predictions(&state.pool, &symbol, 100_000)
         .await
         .map(|rows| rows.into_iter().map(|p| (p.candle_ts, ())).collect())
         .unwrap_or_default();
@@ -360,6 +380,7 @@ pub(crate) async fn handle_backfill_predictions(
         // Call inference service.
         match bridge
             .predict_v3_with_retry(
+                &symbol,
                 &feature_window,
                 atr_ratio,
                 std::time::Duration::from_secs(10),
@@ -385,7 +406,7 @@ pub(crate) async fn handle_backfill_predictions(
 
                 if let Err(e) = db::insert_equity_prediction(
                     &state.pool,
-                    &state.symbol,
+                    &symbol,
                     candle_ts,
                     pred.pred_1d,
                     pred.pred_5d,
@@ -412,7 +433,7 @@ pub(crate) async fn handle_backfill_predictions(
     }
 
     info!(
-        symbol = %state.symbol,
+        symbol = %symbol,
         candles_processed = candles.len(),
         predictions_written = written,
         skipped_already_had = skipped,
@@ -421,7 +442,7 @@ pub(crate) async fn handle_backfill_predictions(
     );
 
     Ok(Json(BackfillPredictionsResponse {
-        symbol: state.symbol.clone(),
+        symbol,
         candles_processed: candles.len(),
         predictions_written: written,
         skipped_already_had: skipped,

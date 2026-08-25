@@ -77,14 +77,15 @@ CREATE INDEX IF NOT EXISTS equity_candles_symbol_ts_idx
 CREATE TABLE IF NOT EXISTS equity_predictions (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     symbol        TEXT    NOT NULL,
-    candle_ts     INTEGER NOT NULL UNIQUE,
+    candle_ts     INTEGER NOT NULL,
     pred_1d       REAL    NOT NULL,
     pred_5d       REAL    NOT NULL,
     pred_21d      REAL    NOT NULL,
     regime        TEXT    NOT NULL DEFAULT 'unknown',
     features_json TEXT    NOT NULL DEFAULT '{}',
     created_at    INTEGER NOT NULL,
-    source        TEXT    NOT NULL DEFAULT 'qqq_tcn_v1'
+    source        TEXT    NOT NULL DEFAULT 'qqq_tcn_v1',
+    UNIQUE(symbol, candle_ts)
 );
 CREATE INDEX IF NOT EXISTS equity_predictions_ts_idx
     ON equity_predictions (candle_ts DESC);
@@ -2090,12 +2091,19 @@ pub async fn fetch_equity_candles_asc(
     symbol: &str,
     limit: i64,
 ) -> Result<Vec<EquityCandle>> {
+    // Subquery: grab the latest N rows (DESC), then re-sort ascending so
+    // callers get chronological order.  Without the subquery, ASC LIMIT N
+    // would return the OLDEST N rows (2021 data) instead of the latest.
     let rows = sqlx::query(
         r#"SELECT symbol, ts, open, high, low, close, volume, source
-           FROM equity_candles
-           WHERE symbol = ?1
-           ORDER BY ts ASC
-           LIMIT ?2"#,
+           FROM (
+             SELECT symbol, ts, open, high, low, close, volume, source
+             FROM equity_candles
+             WHERE symbol = ?1
+             ORDER BY ts DESC
+             LIMIT ?2
+           )
+           ORDER BY ts ASC"#,
     )
     .bind(symbol)
     .bind(limit)
@@ -2167,12 +2175,13 @@ pub async fn insert_equity_prediction(
         r#"INSERT INTO equity_predictions
                (symbol, candle_ts, pred_1d, pred_5d, pred_21d, regime, features_json, created_at, source)
            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'qqq_tcn_v1')
-           ON CONFLICT(candle_ts) DO UPDATE SET
+           ON CONFLICT(symbol, candle_ts) DO UPDATE SET
                pred_1d=excluded.pred_1d,
                pred_5d=excluded.pred_5d,
                pred_21d=excluded.pred_21d,
                regime=excluded.regime,
-               features_json=excluded.features_json"#,
+               features_json=excluded.features_json,
+               created_at=excluded.created_at"#,
     )
     .bind(symbol)
     .bind(candle_ts)

@@ -173,7 +173,7 @@ impl EquityScheduler {
             .expect("ZMQ bridge not configured (test mode — use process_with_prediction)");
 
         let pred = bridge
-            .predict_v3_with_retry(&feature_window, atr_ratio, Duration::from_secs(10), 2)
+            .predict_v3_with_retry(&self.symbol, &feature_window, atr_ratio, Duration::from_secs(10), 2)
             .await?;
 
         self.finalize_candle(candle_ts, &pred, &feature_window, &candles).await
