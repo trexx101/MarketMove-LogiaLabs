@@ -53,9 +53,19 @@ fn param(cfg: &HashMap<String, f64>, name: &str, default: f64) -> f64 {
 /// SMA-regime momentum signal: the normalized signed distance from a trailing
 /// simple moving average, zeroed below a magnitude threshold. This is the same
 /// trend/regime family the live equity engine trades on.
+///
+/// `direction` selects the trading orientation of the signal: +1 = momentum
+/// (distance predicts continuation), -1 = mean reversion (distance predicts
+/// reversal). Default +1 keeps the historical definition unchanged. The 2026-08-25
+/// triage (docs/triage/2026-08-25-options-negative-ic.md) established that the
+/// raw momentum orientation has genuinely NEGATIVE walk-forward rank IC on the
+/// 5-day horizon for QQQ/SMH/XLF (short-term reversal); the grid must be able
+/// to discover both orientations honestly rather than implicitly sign-flipping
+/// a strategy named "momentum".
 pub fn sma_momentum_signal(closes: &[f64], cfg: &HashMap<String, f64>) -> Vec<f64> {
     let window = param(cfg, "sma_window", 200.0).max(2.0) as usize;
     let threshold = param(cfg, "threshold", 0.0);
+    let direction = if param(cfg, "direction", 1.0) < 0.0 { -1.0 } else { 1.0 };
     let mut sig = vec![0.0; closes.len()];
     if closes.len() < window {
         return sig;
@@ -72,7 +82,7 @@ pub fn sma_momentum_signal(closes: &[f64], cfg: &HashMap<String, f64>) -> Vec<f6
             if sma > 0.0 {
                 let mom = (closes[i] - sma) / sma;
                 if mom.abs() >= threshold {
-                    sig[i] = mom;
+                    sig[i] = direction * mom;
                 }
             }
         }
@@ -239,6 +249,13 @@ pub fn param_defs_for_family(family: &str) -> Vec<ParamDef> {
                 name: "threshold".to_string(),
                 values: vec![0.0, 0.005, 0.01],
             },
+            // Orientation is a first-class grid axis (see sma_momentum_signal
+            // doc): momentum (+1) and mean reversion (-1) are scored as
+            // distinct candidates so params_json carries the sign explicitly.
+            ParamDef {
+                name: "direction".to_string(),
+                values: vec![1.0, -1.0],
+            },
         ],
         _ => Vec::new(),
     }
@@ -288,6 +305,38 @@ mod tests {
         let rets = forward_returns(&closes, 5);
         let r = spearman(&sig, &rets);
         assert!(r > 0.5, "expected trending series to give positive rank IC, got r={r}");
+    }
+
+    #[test]
+    fn test_direction_negates_ic_sign() {
+        // Same uptrend series: direction=-1 must exactly negate the signal,
+        // so its rank IC is the arithmetic negative of the momentum IC. This
+        // keeps the grid honest — reversion candidates are scored under the
+        // same objective, not by post-hoc sign-flipping of a "momentum" IC.
+        let closes: Vec<f64> = (0..1000).map(|i| 100.0 + i as f64 * 0.1).collect();
+        let mut params = HashMap::new();
+        params.insert("sma_window".to_string(), 20.0);
+        params.insert("threshold".to_string(), 0.0);
+        let up = sma_momentum_signal(&closes, &params);
+        params.insert("direction".to_string(), -1.0);
+        let down = sma_momentum_signal(&closes, &params);
+        assert_eq!(up.len(), down.len());
+        for (a, b) in up.iter().zip(down.iter()) {
+            assert!((a + b).abs() < 1e-12, "direction=-1 must negate the signal: {a} vs {b}");
+        }
+        let rets = forward_returns(&closes, 5);
+        let r_up = spearman(&up, &rets);
+        let r_down = spearman(&down, &rets);
+        assert!(r_up > 0.5, "momentum IC on uptrend should be positive, got {r_up}");
+        assert!((r_up + r_down).abs() < 1e-9, "flipped IC must be the negative: {r_up} vs {r_down}");
+    }
+
+    #[test]
+    fn test_param_defs_include_both_directions() {
+        let defs = param_defs_for_family("sma_regime");
+        let dir = defs.iter().find(|d| d.name == "direction")
+            .expect("sma_regime grid must include a direction axis");
+        assert_eq!(dir.values, vec![1.0, -1.0]);
     }
 
     #[test]

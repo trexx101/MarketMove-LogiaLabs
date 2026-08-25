@@ -88,6 +88,7 @@ async fn test_full_pipeline_candidate_to_paper() {
         ic: 0.05,
         sharpe: 1.5,
         days_observed: 0,
+        fold_ics: vec![],
     };
 
     let result = pipeline.promote(&store, &version_id, &evidence).await.unwrap();
@@ -144,6 +145,7 @@ async fn test_multi_equity_pipeline() {
         ic: 0.05,
         sharpe: 1.5,
         days_observed: 0,
+        fold_ics: vec![],
     };
 
     let result = pipeline.promote(&store, &qqq_id, &evidence).await.unwrap();
@@ -185,6 +187,7 @@ async fn test_promotion_failure_idempotent() {
         ic: 0.05,
         sharpe: 1.5,
         days_observed: 0,
+        fold_ics: vec![],
     };
 
     let result = pipeline.promote(&store, &version_id, &evidence).await.unwrap();
@@ -219,6 +222,7 @@ async fn test_multi_stage_promotion() {
         ic: 0.05,
         sharpe: 1.5,
         days_observed: 0,
+        fold_ics: vec![],
     };
 
     let result = pipeline.promote(&store, &version_id, &evidence).await.unwrap();
@@ -234,6 +238,7 @@ async fn test_multi_stage_promotion() {
         ic: 0.05,
         sharpe: 1.5,
         days_observed: 14,
+        fold_ics: vec![],
     };
 
     let result = pipeline.promote(&store, &version_id, &evidence).await.unwrap();
@@ -249,6 +254,7 @@ async fn test_multi_stage_promotion() {
         ic: 0.05,
         sharpe: 2.0,
         days_observed: 30,
+        fold_ics: vec![],
     };
 
     let result = pipeline.promote(&store, &version_id, &evidence).await.unwrap();

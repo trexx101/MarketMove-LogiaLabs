@@ -166,6 +166,10 @@ pub async fn promote_candidate(
         ic: candidate.mean_ic,
         sharpe: 0.0,     // Would come from backtest results
         days_observed: 0, // Would come from timestamps
+        // Carry the per-fold walk-forward ICs recorded at candidate creation
+        // so the fold-consistency gate (all folds positive) can reject
+        // candidates whose mean IC is carried by a subset of folds.
+        fold_ics: candidate.fold_ics.clone(),
     };
     let dry_run = pipeline.check_snapshot(&candidate, &evidence);
     if !dry_run.promoted {

@@ -55,6 +55,12 @@ pub struct PromotionEvidence {
     pub ic: f64,
     pub sharpe: f64,
     pub days_observed: usize,
+    /// Per-fold walk-forward ICs at candidate creation time. Defaulted on
+    /// deserialize so evidence JSON queued before the 2026-08-25 fold-
+    /// consistency gate (docs/triage/2026-08-25-options-negative-ic.md)
+    /// still loads — an absent list skips the gate rather than failing it.
+    #[serde(default)]
+    pub fold_ics: Vec<f64>,
 }
 
 /// Promotion pipeline
@@ -117,6 +123,25 @@ impl PromotionPipeline {
                 };
             }
         };
+
+        // Fold-consistency gate (2026-08-25 triage,
+        // docs/triage/2026-08-25-options-negative-ic.md): a candidate whose
+        // mean IC clears the bar on the strength of a subset of folds — with
+        // any test fold negative — is "carried by one bad fold" and does not
+        // earn promotion. Applied at every transition; the strongest form of
+        // the rule (min fold > 0) guards the first hop where all walk-forward
+        // evidence lives.
+        if !evidence.fold_ics.is_empty() && evidence.fold_ics.iter().any(|&ic| ic <= 0.0) {
+            return PromotionResult {
+                promoted: false,
+                from_stage: current,
+                to_stage: current,
+                reason: format!(
+                    "Fold inconsistency: all walk-forward folds must be positive, got {:?}",
+                    evidence.fold_ics.iter().map(|ic| format!("{ic:+.4}")).collect::<Vec<_>>()
+                ),
+            };
+        }
 
         // Check each gate
         if evidence.n_trades < gate.min_trades {
@@ -528,6 +553,7 @@ mod tests {
             ic: 0.05,
             sharpe: 1.5,
             days_observed: 0,
+            fold_ics: vec![],
         };
 
         let result = pipeline.check_promotion(PromotionStage::Candidate, &evidence);
@@ -543,6 +569,7 @@ mod tests {
             ic: 0.05,
             sharpe: 1.5,
             days_observed: 0,
+            fold_ics: vec![],
         };
 
         let result = pipeline.check_promotion(PromotionStage::Candidate, &evidence);
@@ -558,6 +585,7 @@ mod tests {
             ic: 0.01, // < 0.03
             sharpe: 1.5,
             days_observed: 0,
+            fold_ics: vec![],
         };
 
         let result = pipeline.check_promotion(PromotionStage::Candidate, &evidence);
@@ -573,6 +601,7 @@ mod tests {
             ic: 0.05,
             sharpe: 1.5,
             days_observed: 7, // < 14
+            fold_ics: vec![],
         };
 
         let result = pipeline.check_promotion(PromotionStage::Paper, &evidence);
@@ -588,6 +617,7 @@ mod tests {
             ic: 0.05,
             sharpe: 2.0,
             days_observed: 45,
+            fold_ics: vec![],
         };
 
         let result = pipeline.check_promotion(PromotionStage::Micro, &evidence);
@@ -603,6 +633,7 @@ mod tests {
             ic: 0.10,
             sharpe: 3.0,
             days_observed: 365,
+            fold_ics: vec![],
         };
 
         let result = pipeline.check_promotion(PromotionStage::Live, &evidence);
@@ -667,6 +698,7 @@ mod tests {
             ic: 0.05,
             sharpe: 1.5,
             days_observed: 0,
+            fold_ics: vec![],
         };
 
         let result = pipeline.promote(&store, &version_id, &evidence).await.unwrap();
@@ -722,6 +754,7 @@ mod tests {
             ic: 0.05,
             sharpe: 1.5,
             days_observed: 0,
+            fold_ics: vec![],
         };
 
         let result = pipeline.promote(&store, &version_id, &evidence).await.unwrap();
@@ -771,6 +804,7 @@ mod tests {
             ic: 0.05,
             sharpe: 1.5,
             days_observed: 0,
+            fold_ics: vec![],
         };
 
         let result = pipeline.promote(&store, "nonexistent", &evidence).await.unwrap();
