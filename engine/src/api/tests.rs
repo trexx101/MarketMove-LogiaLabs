@@ -62,6 +62,7 @@ fn test_state(pool: db::DbPool) -> State<AppState> {
         totp_secret: String::new(),
         zmq_endpoint: "tcp://127.0.0.1:5555".to_string(),
         norm_stats_path: String::new(),
+        promotion_gates: crate::config::PromotionGatesConfig::default(),
         advisor: None,
     })
 }
@@ -301,6 +302,7 @@ async fn router_serves_static_files_and_api() {
             moomoo_trd_env: "SIMULATE".to_string(),
             totp_secret: String::new(),
             options: crate::config::OptionsEngineConfig::default(),
+            promotion_gates: crate::config::PromotionGatesConfig::default(),
         };
 
         let app = {

@@ -143,6 +143,7 @@ mod tests {
             totp_secret: String::new(),
             zmq_endpoint: String::new(),
             norm_stats_path: String::new(),
+            promotion_gates: crate::config::PromotionGatesConfig::default(),
             short_symbol: "PSQ".into(),
             event_logger: std::sync::Arc::new(crate::event::EventLogger::new(
                 pool.clone(),

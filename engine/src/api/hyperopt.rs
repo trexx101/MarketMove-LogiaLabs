@@ -123,7 +123,7 @@ pub async fn promote_candidate(
 ) -> Result<Json<PromoteResponse>, StatusCode> {
     let pool = &state.pool;
     let store = CandidateStore::new(pool.clone());
-    let pipeline = PromotionPipeline::new();
+    let pipeline = PromotionPipeline::with_gates(state.promotion_gates.clone());
 
     // Verify candidate exists and belongs to equity
     let candidate = store

@@ -106,6 +106,31 @@ impl Default for OptionsEngineConfig {
     }
 }
 
+/// Promotion gates for the hyperopt pipeline (CANDIDATE → PAPER → MICRO → LIVE).
+///
+/// Only the MIN-DAYS gates are active today. The source of truth is the
+/// candidate's own observation clock: `strategy_versions.updated_at` is
+/// stamped on every status flip, so "days since promoted to PAPER" is
+/// directly measurable. Sharpe remains disabled (0.0) because no options
+/// executor exists yet to produce per-candidate returns data — fabricating
+/// a Sharpe source is forbidden (see promotion.rs). Env: HYPEROPT_ prefix.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromotionGatesConfig {
+    /// Minimum days a candidate must sit in PAPER before PAPER → MICRO.
+    pub min_days_paper_to_micro: usize,
+    /// Minimum days a candidate must sit in MICRO before MICRO → LIVE.
+    pub min_days_micro_to_live: usize,
+}
+
+impl Default for PromotionGatesConfig {
+    fn default() -> Self {
+        Self {
+            min_days_paper_to_micro: 14,
+            min_days_micro_to_live: 14,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub trading_mode: TradingMode,
@@ -166,6 +191,9 @@ pub struct Config {
     pub totp_secret: String,
     /// Options Momentum Engine configuration (Phase 0a).
     pub options: OptionsEngineConfig,
+    /// Hyperopt promotion gates — min-days observation clocks
+    /// (PAPER → MICRO, MICRO → LIVE). Env: HYPEROPT_ prefix.
+    pub promotion_gates: PromotionGatesConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -421,6 +449,14 @@ impl Config {
             ));
         }
 
+        // Hyperopt promotion gates (min-days observation clocks).
+        let promotion_gates = PromotionGatesConfig {
+            min_days_paper_to_micro: parse_env::<usize>("HYPEROPT_MIN_DAYS_PAPER_TO_MICRO", "14")
+                .context("HYPEROPT_MIN_DAYS_PAPER_TO_MICRO must be a positive integer")?,
+            min_days_micro_to_live: parse_env::<usize>("HYPEROPT_MIN_DAYS_MICRO_TO_LIVE", "14")
+                .context("HYPEROPT_MIN_DAYS_MICRO_TO_LIVE must be a positive integer")?,
+        };
+
         Ok(Self {
             trading_mode,
             zmq_endpoint,
@@ -448,6 +484,7 @@ impl Config {
             moomoo_trd_env,
             totp_secret,
             options,
+            promotion_gates,
         })
     }
 }

@@ -232,28 +232,46 @@ async fn test_multi_stage_promotion() {
     let snapshot = store.get(&version_id).await.unwrap().unwrap();
     assert_eq!(snapshot.status, CandidateStatus::Paper);
 
-    // Stage 2: Paper → Micro (requires 14 days observation)
+    // Stage 2: Paper → Micro. The days gate reads the LIVE observation
+    // clock (updated_at), NOT the evidence field — simulate 15 days in
+    // PAPER by backdating updated_at. Evidence days_observed is deliberately
+    // 0 to prove it is ignored.
+    let fifteen_days_ago = chrono::Utc::now().timestamp() - 15 * 86_400;
+    sqlx::query("UPDATE strategy_versions SET updated_at = ? WHERE id = ?")
+        .bind(fifteen_days_ago)
+        .bind(&version_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
     let evidence = PromotionEvidence {
         n_trades: 30,
         ic: 0.05,
         sharpe: 1.5,
-        days_observed: 14,
+        days_observed: 0, // ignored — live clock says 15 >= 14
         fold_ics: vec![],
     };
 
     let result = pipeline.promote(&store, &version_id, &evidence).await.unwrap();
-    assert!(result.promoted);
+    assert!(result.promoted, "stage 2 denied: {}", result.reason);
     assert_eq!(result.to_stage, PromotionStage::Micro);
 
     let snapshot = store.get(&version_id).await.unwrap().unwrap();
     assert_eq!(snapshot.status, CandidateStatus::Micro);
 
-    // Stage 3: Micro → Live (requires 30 days observation)
+    // Stage 3: Micro → Live — backdate again to simulate 15 days in MICRO.
+    sqlx::query("UPDATE strategy_versions SET updated_at = ? WHERE id = ?")
+        .bind(fifteen_days_ago)
+        .bind(&version_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
     let evidence = PromotionEvidence {
         n_trades: 50,
         ic: 0.05,
         sharpe: 2.0,
-        days_observed: 30,
+        days_observed: 0, // ignored — live clock says 15 >= 14
         fold_ics: vec![],
     };
 

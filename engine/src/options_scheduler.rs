@@ -79,6 +79,8 @@ pub struct OptionsSchedulerConfig {
     pub sizing_config: SizingConfig,
     /// Trading mode — used for event attribution ("paper" | "live")
     pub mode: String,
+    /// Hyperopt promotion gates (min-days observation clocks).
+    pub promotion_gates: crate::config::PromotionGatesConfig,
 }
 
 impl Default for OptionsSchedulerConfig {
@@ -90,6 +92,7 @@ impl Default for OptionsSchedulerConfig {
             chain_selector_config: ChainSelectorConfig::default(),
             sizing_config: SizingConfig::default(),
             mode: "paper".to_string(),
+            promotion_gates: crate::config::PromotionGatesConfig::default(),
         }
     }
 }
@@ -195,7 +198,7 @@ impl OptionsScheduler {
 
         // D13: apply queued promotions at the daily candle boundary,
         // before the entry pipeline runs (mid-exit re-check inside).
-        let pipeline = crate::hyperopt::PromotionPipeline::new();
+        let pipeline = crate::hyperopt::PromotionPipeline::with_gates(self.config.promotion_gates.clone());
         let cand_store = crate::hyperopt::CandidateStore::new(self.pool.clone());
         match crate::hyperopt::promotion::apply_pending_promotions(
             &self.pool, equity, &self.config.mode, &pipeline, &cand_store,

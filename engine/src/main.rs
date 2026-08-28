@@ -418,8 +418,15 @@ async fn main() {
         let applier_pool = pool.clone();
         let applier_equities = crate::hyperopt::runner::RunnerConfig::default().equities;
         let applier_mode = "paper".to_string(); // event attribution; mirrors OptionsSchedulerConfig default
+        let applier_gates = cfg.promotion_gates.clone();
+        info!(
+            paper_to_micro_days = applier_gates.min_days_paper_to_micro,
+            micro_to_live_days = applier_gates.min_days_micro_to_live,
+            "promotion gates: min_days observation clocks ACTIVE; min_sharpe DISABLED (0.0) — no options executor produces returns data yet"
+        );
+        warn!("promotion min_sharpe gate is disabled — candidates can reach LIVE without any Sharpe track record until an options executor exists");
         tokio::spawn(async move {
-            let pipeline = crate::hyperopt::PromotionPipeline::new();
+            let pipeline = crate::hyperopt::PromotionPipeline::with_gates(applier_gates);
             let store = crate::hyperopt::CandidateStore::new(applier_pool.clone());
             // Per-equity last-seen candle ts; promotions apply when it advances
             // (i.e. a new daily bar exists) so we never flip mid-bar.

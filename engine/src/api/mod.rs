@@ -49,6 +49,9 @@ pub struct AppState {
     pub totp_secret: String,
     /// ZMQ endpoint for the inference service (e.g. `tcp://127.0.0.1:5555`).
     pub zmq_endpoint: String,
+    /// Hyperopt promotion gates (min-days observation clocks) used by the
+    /// promote endpoint's dry-run gate check.
+    pub promotion_gates: crate::config::PromotionGatesConfig,
     /// Path to the norm stats JSON file for feature normalization.
     pub norm_stats_path: String,
     /// Phase 4: AI advisor state. None if advisor is disabled.
@@ -91,6 +94,7 @@ pub fn router(
         totp_secret: config.totp_secret.clone(),
         zmq_endpoint: config.zmq_endpoint.clone(),
         norm_stats_path: config.norm_stats_path.clone(),
+        promotion_gates: config.promotion_gates.clone(),
         advisor,
     };
 

@@ -73,39 +73,58 @@ pub struct PromotionPipeline {
 
 impl Default for PromotionPipeline {
     fn default() -> Self {
-        Self {
-            // NOTE (2026-08-22): min_sharpe and min_days are disabled (0.0)
-            // because the live pipeline has no backtest (Sharpe) or
-            // age-observation source yet — the hyperopt runner emits only
-            // walk-forward rank IC + trade counts. Promotion today is gated
-            // on the REAL metrics (n_trades, mean_ic). Re-enable min_sharpe
-            // and min_days when a per-candidate backtest + observation
-            // tracker land; this structure is already wired to enforce them.
-            candidate_to_paper: GateRequirement {
-                min_trades: 100,
-                min_ic: 0.03,
-                min_sharpe: 0.0,
-                min_days: 0,
-            },
-            paper_to_micro: GateRequirement {
-                min_trades: 30,
-                min_ic: 0.03,
-                min_sharpe: 0.0,
-                min_days: 0,
-            },
-            micro_to_live: GateRequirement {
-                min_trades: 50,
-                min_ic: 0.04,
-                min_sharpe: 0.0,
-                min_days: 0,
-            },
-        }
+        Self::with_gates(crate::config::PromotionGatesConfig::default())
     }
 }
 
 impl PromotionPipeline {
+    /// Build the pipeline from configured gates.
+    ///
+    /// NOTE (2026-08-28): min_sharpe stays DISABLED (0.0) on every stage —
+    /// no options executor exists yet, so there is no per-candidate returns
+    /// data to compute Sharpe from, and fabricating one is forbidden.
+    /// min_days IS active for PAPER→MICRO and MICRO→LIVE: its source of
+    /// truth is the candidate's own observation clock (`updated_at`, stamped
+    /// on every status flip — see `live_days_observed`). CANDIDATE→PAPER
+    /// keeps min_days=0 because observation starts only at PAPER.
+    pub fn with_gates(gates: crate::config::PromotionGatesConfig) -> Self {
+        Self {
+            candidate_to_paper: GateRequirement {
+                min_trades: 100,
+                min_ic: 0.03,
+                min_sharpe: 0.0,
+                min_days: 0, // observation clock starts at PAPER
+            },
+            paper_to_micro: GateRequirement {
+                min_trades: 30,
+                min_ic: 0.03,
+                min_sharpe: 0.0, // disabled — no returns source yet
+                min_days: gates.min_days_paper_to_micro,
+            },
+            micro_to_live: GateRequirement {
+                min_trades: 50,
+                min_ic: 0.04,
+                min_sharpe: 0.0, // disabled — no returns source yet
+                min_days: gates.min_days_micro_to_live,
+            },
+        }
+    }
+
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Days a candidate has been under observation in its CURRENT stage.
+    ///
+    /// Source of truth: `strategy_versions.updated_at`, which
+    /// `CandidateStore::update_status` stamps on every status flip. So for a
+    /// PAPER candidate this is "days since promoted to PAPER". Live-computed
+    /// at check/apply time — never taken from queue-time evidence, which is
+    /// stale by definition for a days gate.
+    pub fn live_days_observed(snapshot: &CandidateSnapshot) -> usize {
+        let now = chrono::Utc::now().timestamp();
+        let elapsed_secs = now.saturating_sub(snapshot.updated_at);
+        (elapsed_secs / 86_400) as usize
     }
 
     /// Check if promotion is allowed
@@ -220,17 +239,26 @@ impl PromotionPipeline {
 
     /// Dry-run gate check for a snapshot without any DB writes (D13).
     /// Used by the promote endpoint to fail fast before queueing.
+    ///
+    /// days_observed is overwritten with the LIVE observation clock
+    /// (`updated_at` → days in current stage). Queue-time or caller-supplied
+    /// days values are stale by definition for a days gate and are ignored.
     pub fn check_snapshot(
         &self,
         snapshot: &CandidateSnapshot,
         evidence: &PromotionEvidence,
     ) -> PromotionResult {
-        self.check_promotion(self.stage_for_status(&snapshot.status), evidence)
+        let mut live = evidence.clone();
+        live.days_observed = Self::live_days_observed(snapshot);
+        self.check_promotion(self.stage_for_status(&snapshot.status), &live)
     }
 
     /// Promote a candidate (DB-backed)
     ///
     /// Reads evidence from the candidate snapshot, checks gates, and updates status if promotion passes.
+    /// days_observed is overwritten with the LIVE observation clock (see
+    /// `check_snapshot`) — a candidate cannot satisfy the days gate with
+    /// evidence numbers, only with real time spent in the current stage.
     pub async fn promote(
         &self,
         store: &CandidateStore,
@@ -252,7 +280,9 @@ impl PromotionPipeline {
 
         let current_stage = self.stage_for_status(&snapshot.status);
 
-        let result = self.check_promotion(current_stage, evidence);
+        let mut live = evidence.clone();
+        live.days_observed = Self::live_days_observed(&snapshot);
+        let result = self.check_promotion(current_stage, &live);
 
         if result.promoted {
             let new_status = match result.to_stage {
@@ -298,7 +328,9 @@ pub async fn apply_pending_promotions(
         }
 
         // Use the evidence validated at queue time (persisted with the request).
-        // Never fabricate evidence here — sharpe/days_observed have no live source yet.
+        // Never fabricate evidence here. days_observed from the persisted
+        // evidence is IGNORED by promote() — it recomputes the live
+        // observation clock from strategy_versions.updated_at.
         let evidence: PromotionEvidence = match serde_json::from_str(&pending.evidence_json) {
             Ok(e) => e,
             Err(e) => {
@@ -597,16 +629,16 @@ mod tests {
     #[test]
     fn test_promote_paper_to_micro_fails_on_positive_trade_count_and_ic_bars() {
         let pipeline = PromotionPipeline::new();
-        // Gates that are ACTIVE for paper->micro today: min_trades + min_ic +
-        // fold consistency. min_sharpe/min_days are disabled (0.0) pending a
-        // real per-candidate backtest source (2026-08-22), so a paper entry
-        // with low days but passing IC/n_trades must promote.
+        // Gates ACTIVE for paper->micro: min_trades + min_ic + fold
+        // consistency + min_days (live observation clock, 2026-08-28).
+        // min_sharpe remains disabled (0.0) — no returns source exists yet.
         let evidence = PromotionEvidence {
-            // Below paper->micro min_trades (30? see gate) => must reject.
+            // Below paper->micro min_trades (30) => must reject on trades
+            // before the days gate is even consulted.
             n_trades: 1,
             ic: 0.05,
             sharpe: 0.0,
-            days_observed: 7, // ignored: min_days=0
+            days_observed: 7, // below the 14d gate too, but trades rejects first
             fold_ics: vec![],
         };
 
@@ -616,13 +648,32 @@ mod tests {
     }
 
     #[test]
-    fn test_promote_paper_to_micro_pass_when_days_disabled() {
+    fn test_promote_paper_to_micro_rejects_when_days_short() {
+        // min_days is ACTIVE (2026-08-28): a paper candidate with passing
+        // IC/n_trades but fewer than the configured observation days must
+        // NOT promote.
+        let pipeline = PromotionPipeline::new();
+        let evidence = PromotionEvidence {
+            n_trades: 100,
+            ic: 0.05,
+            sharpe: 0.0, // ignored: min_sharpe=0 (disabled)
+            days_observed: 7, // below the 14d default gate
+            fold_ics: vec![],
+        };
+
+        let result = pipeline.check_promotion(PromotionStage::Paper, &evidence);
+        assert!(!result.promoted);
+        assert!(result.reason.contains("Insufficient observation days"));
+    }
+
+    #[test]
+    fn test_promote_paper_to_micro_pass_when_days_satisfied() {
         let pipeline = PromotionPipeline::new();
         let evidence = PromotionEvidence {
             n_trades: 100,
             ic: 0.05,
             sharpe: 0.0,      // ignored: min_sharpe=0
-            days_observed: 7, // ignored: min_days=0
+            days_observed: 14, // meets the 14d gate
             fold_ics: vec![],
         };
 
@@ -670,11 +721,51 @@ mod tests {
         assert_eq!(req.min_trades, 100);
 
         let req = pipeline.get_requirements(PromotionStage::Paper).unwrap();
-        // min_days is DISABLED (0.0) pending a real per-candidate observation
-        // source (2026-08-25). Test encodes current intended behavior.
-        assert_eq!(req.min_days, 0);
+        // min_days is ACTIVE (2026-08-28): 14-day observation clock sourced
+        // from strategy_versions.updated_at at check/apply time.
+        assert_eq!(req.min_days, 14);
+        // min_sharpe stays disabled until an executor produces returns data.
+        assert_eq!(req.min_sharpe, 0.0);
         
         assert!(pipeline.get_requirements(PromotionStage::Live).is_none());
+    }
+
+    #[test]
+    fn test_with_gates_overrides_min_days() {
+        let pipeline = PromotionPipeline::with_gates(crate::config::PromotionGatesConfig {
+            min_days_paper_to_micro: 30,
+            min_days_micro_to_live: 60,
+        });
+        assert_eq!(pipeline.paper_to_micro.min_days, 30);
+        assert_eq!(pipeline.micro_to_live.min_days, 60);
+        // Candidate→PAPER keeps days=0 regardless of config.
+        assert_eq!(pipeline.candidate_to_paper.min_days, 0);
+    }
+
+    #[test]
+    fn test_live_days_observed_from_updated_at() {
+        // Snapshot promoted 10 days (+1h slack) ago → 10 observed days.
+        // (+1h so elapsed floors cleanly to 10 full 86400s periods.)
+        let ten_days_ago = chrono::Utc::now().timestamp() - (10 * 86_400 + 3600);
+        let snap = CandidateSnapshot {
+            version_id: "v1".into(),
+            equity: "QQQ".into(),
+            strategy_family: "m".into(),
+            params: HashMap::new(),
+            status: CandidateStatus::Paper,
+            mean_ic: 0.05,
+            std_ic: 0.01,
+            n_trades: 10,
+            fold_ics: vec![],
+            created_at: ten_days_ago,
+            updated_at: ten_days_ago,
+        };
+        assert_eq!(PromotionPipeline::live_days_observed(&snap), 10);
+
+        // Future timestamp (clock skew) → saturates at 0, never negative.
+        let mut snap2 = snap.clone();
+        snap2.updated_at = chrono::Utc::now().timestamp() + 3600;
+        assert_eq!(PromotionPipeline::live_days_observed(&snap2), 0);
     }
 
     #[tokio::test]
