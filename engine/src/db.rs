@@ -294,6 +294,7 @@ CREATE TABLE IF NOT EXISTS trading_models (
     model_path      TEXT    NOT NULL,           -- path to model bundle
     norm_stats_path TEXT    NOT NULL,           -- path to norm stats json
     budget_usd      REAL    NOT NULL DEFAULT 5000.0,
+    deploy_pct      REAL    NOT NULL DEFAULT 0.25, -- fraction of budget per position
     enabled         INTEGER NOT NULL DEFAULT 1,
     deployed_at     INTEGER NOT NULL,
     last_wf_ic      REAL,
@@ -421,6 +422,7 @@ pub async fn open(database_url: &str) -> Result<DbPool> {
     migrate_option_positions(&pool).await?;
     migrate_option_tape_meta(&pool).await?;
     migrate_engine_events(&pool).await?;
+    migrate_trading_models_deploy_pct(&pool).await?;
 
     info!("database ready at {database_url}");
     Ok(pool)
@@ -463,6 +465,26 @@ pub async fn migrate_equity_trades(pool: &DbPool) -> Result<()> {
             .execute(pool)
             .await
             .context("ALTER TABLE equity_trades ADD COLUMN model_id")?;
+    }
+    Ok(())
+}
+
+/// Migrate `trading_models`: add `deploy_pct` column (fraction of a model's
+/// budget deployed per position) to databases created before position sizing
+/// existed (2026-08-28). Defaults to 0.25, matching the options engine's
+/// `deployed_cap_pct`. Idempotent.
+pub async fn migrate_trading_models_deploy_pct(pool: &DbPool) -> Result<()> {
+    let rows = sqlx::query("PRAGMA table_info(trading_models)")
+        .fetch_all(pool)
+        .await
+        .context("PRAGMA table_info(trading_models)")?;
+    let columns: Vec<String> = rows.iter().map(|r| r.get::<String, _>(1)).collect();
+    if !columns.contains(&"deploy_pct".to_string()) {
+        info!("migrating trading_models: adding deploy_pct column");
+        sqlx::query("ALTER TABLE trading_models ADD COLUMN deploy_pct REAL NOT NULL DEFAULT 0.25")
+            .execute(pool)
+            .await
+            .context("ALTER TABLE trading_models ADD COLUMN deploy_pct")?;
     }
     Ok(())
 }
@@ -943,15 +965,16 @@ pub async fn register_model(
     model_path: &str,
     norm_stats_path: &str,
     budget_usd: f64,
+    deploy_pct: f64,
     notes: Option<&str>,
 ) -> Result<TradingModel> {
     let deployed_at = Utc::now().timestamp();
     sqlx::query(
         r#"INSERT INTO trading_models
-               (model_id, primary_symbol, inverse_symbol, model_path,
-                norm_stats_path, budget_usd, enabled, deployed_at,
-                last_wf_ic, last_wf_at, notes)
-           VALUES (?, ?, ?, ?, ?, ?, 1, ?, NULL, NULL, ?)"#,
+              (model_id, primary_symbol, inverse_symbol, model_path,
+               norm_stats_path, budget_usd, deploy_pct, enabled, deployed_at,
+               last_wf_ic, last_wf_at, notes)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, NULL, NULL, ?)"#,
     )
     .bind(model_id)
     .bind(primary_symbol)
@@ -959,6 +982,7 @@ pub async fn register_model(
     .bind(model_path)
     .bind(norm_stats_path)
     .bind(budget_usd)
+    .bind(deploy_pct)
     .bind(deployed_at)
     .bind(notes)
     .execute(pool)
@@ -992,10 +1016,10 @@ pub async fn update_model_enabled(
 
 /// Fetch a single model by id.
 pub async fn load_model_by_id(pool: &DbPool, model_id: &str) -> Result<Option<TradingModel>> {
-    let row: Option<(String, String, String, String, String, f64, i64, i64, Option<f64>, Option<i64>, Option<String>)> =
+    let row: Option<(String, String, String, String, String, f64, f64, i64, i64, Option<f64>, Option<i64>, Option<String>)> =
         sqlx::query_as(
             "SELECT model_id, primary_symbol, inverse_symbol, model_path, norm_stats_path, \
-             budget_usd, enabled, deployed_at, last_wf_ic, last_wf_at, notes \
+             budget_usd, deploy_pct, enabled, deployed_at, last_wf_ic, last_wf_at, notes \
              FROM trading_models WHERE model_id = ?1",
         )
         .bind(model_id)
@@ -1010,20 +1034,21 @@ pub async fn load_model_by_id(pool: &DbPool, model_id: &str) -> Result<Option<Tr
         model_path: r.3,
         norm_stats_path: r.4,
         budget_usd: r.5,
-        enabled: r.6 != 0,
-        deployed_at: r.7,
-        last_wf_ic: r.8,
-        last_wf_at: r.9,
-        notes: r.10,
+        deploy_pct: r.6,
+        enabled: r.7 != 0,
+        deployed_at: r.8,
+        last_wf_ic: r.9,
+        last_wf_at: r.10,
+        notes: r.11,
     }))
 }
 
 /// Load all registered models (regardless of enabled flag).
 pub async fn load_all_models(pool: &DbPool) -> Result<Vec<TradingModel>> {
-    let rows: Vec<(String, String, String, String, String, f64, i64, i64, Option<f64>, Option<i64>, Option<String>)> =
+    let rows: Vec<(String, String, String, String, String, f64, f64, i64, i64, Option<f64>, Option<i64>, Option<String>)> =
         sqlx::query_as(
             "SELECT model_id, primary_symbol, inverse_symbol, model_path, norm_stats_path, \
-             budget_usd, enabled, deployed_at, last_wf_ic, last_wf_at, notes \
+             budget_usd, deploy_pct, enabled, deployed_at, last_wf_ic, last_wf_at, notes \
              FROM trading_models ORDER BY deployed_at DESC",
         )
         .fetch_all(pool)
@@ -1037,20 +1062,21 @@ pub async fn load_all_models(pool: &DbPool) -> Result<Vec<TradingModel>> {
         model_path: r.3,
         norm_stats_path: r.4,
         budget_usd: r.5,
-        enabled: r.6 != 0,
-        deployed_at: r.7,
-        last_wf_ic: r.8,
-        last_wf_at: r.9,
-        notes: r.10,
+        deploy_pct: r.6,
+        enabled: r.7 != 0,
+        deployed_at: r.8,
+        last_wf_ic: r.9,
+        last_wf_at: r.10,
+        notes: r.11,
     }).collect())
 }
 
 /// Load only enabled models.
 pub async fn load_enabled_models(pool: &DbPool) -> Result<Vec<TradingModel>> {
-    let rows: Vec<(String, String, String, String, String, f64, i64, i64, Option<f64>, Option<i64>, Option<String>)> =
+    let rows: Vec<(String, String, String, String, String, f64, f64, i64, i64, Option<f64>, Option<i64>, Option<String>)> =
         sqlx::query_as(
             "SELECT model_id, primary_symbol, inverse_symbol, model_path, norm_stats_path, \
-             budget_usd, enabled, deployed_at, last_wf_ic, last_wf_at, notes \
+             budget_usd, deploy_pct, enabled, deployed_at, last_wf_ic, last_wf_at, notes \
              FROM trading_models WHERE enabled = 1 ORDER BY deployed_at DESC",
         )
         .fetch_all(pool)
@@ -1064,11 +1090,12 @@ pub async fn load_enabled_models(pool: &DbPool) -> Result<Vec<TradingModel>> {
         model_path: r.3,
         norm_stats_path: r.4,
         budget_usd: r.5,
-        enabled: r.6 != 0,
-        deployed_at: r.7,
-        last_wf_ic: r.8,
-        last_wf_at: r.9,
-        notes: r.10,
+        deploy_pct: r.6,
+        enabled: r.7 != 0,
+        deployed_at: r.8,
+        last_wf_ic: r.9,
+        last_wf_at: r.10,
+        notes: r.11,
     }).collect())
 }
 
@@ -1125,6 +1152,7 @@ pub struct TradingModel {
     pub model_path: String,
     pub norm_stats_path: String,
     pub budget_usd: f64,
+    pub deploy_pct: f64,
     pub enabled: bool,
     pub deployed_at: i64,
     pub last_wf_ic: Option<f64>,
@@ -1162,6 +1190,7 @@ pub fn bootstrap_default_model(
         model_path: "<bootstrap>".to_string(),
         norm_stats_path: norm_stats_path.to_string(),
         budget_usd: 0.0,
+        deploy_pct: 0.25,
         enabled: true,
         deployed_at: Utc::now().timestamp(),
         last_wf_ic: None,
@@ -2683,6 +2712,24 @@ pub async fn fetch_equity_entry_trade_price(
     .fetch_optional(pool)
     .await
     .context("fetch_equity_entry_trade_price")?;
+    Ok(row.map(|r| r.0))
+}
+
+/// Fetch the quantity of the most recent entry (buy) trade for a symbol.
+/// Used to restore executor qty on restart so exit PnL scales correctly.
+pub async fn fetch_equity_entry_trade_qty(
+    pool: &DbPool,
+    symbol: &str,
+) -> Result<Option<f64>> {
+    let row: Option<(f64,)> = sqlx::query_as(
+        "SELECT qty FROM equity_trades
+         WHERE symbol = ?1 AND side = 'buy'
+         ORDER BY id DESC LIMIT 1",
+    )
+    .bind(symbol)
+    .fetch_optional(pool)
+    .await
+    .context("fetch_equity_entry_trade_qty")?;
     Ok(row.map(|r| r.0))
 }
 

@@ -25,6 +25,10 @@ pub struct PaperExecutor {
     current_position: Position,
     entry_price: f64,
     qty: f64,
+    /// Notional budget for this model (from `trading_models.budget_usd`).
+    budget_usd: f64,
+    /// Fraction of `budget_usd` deployed per position (Model A fixed-fractional).
+    deploy_pct: f64,
     tx: Option<TelemetrySender>,
 }
 
@@ -61,6 +65,8 @@ impl PaperExecutor {
             current_position: Position::Flat,
             entry_price: 0.0,
             qty: 1.0,
+            budget_usd: 0.0,
+            deploy_pct: 0.0,
             tx,
         }
     }
@@ -73,6 +79,8 @@ impl PaperExecutor {
         model_id: &str,
         primary_symbol: &str,
         inverse_symbol: &str,
+        budget_usd: f64,
+        deploy_pct: f64,
         tx: Option<TelemetrySender>,
     ) -> Self {
         Self {
@@ -85,6 +93,8 @@ impl PaperExecutor {
             current_position: Position::Flat,
             entry_price: 0.0,
             qty: 1.0,
+            budget_usd,
+            deploy_pct,
             tx,
         }
     }
@@ -114,14 +124,21 @@ impl PaperExecutor {
         if position != Position::Flat {
             let held = Self::symbol_for(position, &self.primary_symbol, &self.short_symbol)
                 .to_string();
+            // Restore both the entry PRICE and the entry QUANTITY so exit PnL
+            // scales correctly after restart (qty is now budget-derived at
+            // entry, so the constructor default of 1.0 would misvalue exits).
             self.entry_price = db::fetch_equity_entry_trade_price(&self.pool, &held)
                 .await?
                 .unwrap_or(0.0);
+            self.qty = db::fetch_equity_entry_trade_qty(&self.pool, &held)
+                .await?
+                .unwrap_or(1.0);
             info!(
                 model_id = %self.model_id,
                 position = ?position,
                 held_symbol = %held,
                 entry_price = self.entry_price,
+                qty = self.qty,
                 "executor state restored from DB"
             );
         } else {
@@ -140,6 +157,19 @@ impl PaperExecutor {
         match pos {
             Position::Short => short,
             _ => primary,
+        }
+    }
+
+    /// Compute the quantity to open a position under Model A (fixed-fractional
+    /// of the model's budget). `floor(budget * deploy_pct / close)`, minimum 1.
+    /// When sizing is unconfigured (budget=0 or deploy_pct=0, e.g. legacy or
+    /// test executors) it keeps the existing `qty` (default 1.0) for back-compat.
+    fn sized_qty(&self, close: f64) -> f64 {
+        if self.budget_usd > 0.0 && self.deploy_pct > 0.0 && close > 0.0 {
+            let qty = (self.budget_usd * self.deploy_pct / close).floor();
+            qty.max(1.0)
+        } else {
+            self.qty
         }
     }
 
@@ -221,6 +251,10 @@ impl PaperExecutor {
                     "entry already recorded for this candle — skipping duplicate buy"
                 );
             } else {
+                // Model A: size the position from the budget + close at entry.
+                // Compute once and persist; the same qty values the exit and is
+                // restored from the fill on restart (sync_from_db).
+                self.qty = self.sized_qty(close);
                 let fee = self.qty * close * self.fee_rate;
                 let side_str = "buy";
                 info!(
@@ -454,7 +488,7 @@ mod tests {
             .unwrap();
 
         // Engine restarts → fresh executor starts Flat.
-        let mut exec = PaperExecutor::new_for_model(pool.clone(), 0.0015, "m1", "QQQ", "PSQ", None);
+        let mut exec = PaperExecutor::new_for_model(pool.clone(), 0.0015, "m1", "QQQ", "PSQ", 0.0, 0.0, None);
         assert_eq!(exec.position(), Position::Flat);
 
         exec.sync_from_db().await.unwrap();
@@ -477,7 +511,7 @@ mod tests {
             .await
             .unwrap();
 
-        let mut exec = PaperExecutor::new_for_model(pool.clone(), 0.0015, "m2", "QQQ", "PSQ", None);
+        let mut exec = PaperExecutor::new_for_model(pool.clone(), 0.0015, "m2", "QQQ", "PSQ", 0.0, 0.0, None);
         exec.sync_from_db().await.unwrap();
         assert_eq!(exec.position(), Position::Short);
         assert!((exec.entry_price - 48.0).abs() < 1e-9);
@@ -493,7 +527,7 @@ mod tests {
     async fn sync_from_db_flat_model_stays_flat() {
         let pool = test_pool().await;
         db::save_position(&pool, "m3", Position::Flat.as_i64()).await.unwrap();
-        let mut exec = PaperExecutor::new_for_model(pool.clone(), 0.0015, "m3", "QQQ", "PSQ", None);
+        let mut exec = PaperExecutor::new_for_model(pool.clone(), 0.0015, "m3", "QQQ", "PSQ", 0.0, 0.0, None);
         exec.sync_from_db().await.unwrap();
         assert_eq!(exec.position(), Position::Flat);
     }
@@ -501,7 +535,7 @@ mod tests {
     #[tokio::test]
     async fn duplicate_entry_same_candle_is_skipped() {
         let pool = test_pool().await;
-        let mut exec = PaperExecutor::new_for_model(pool.clone(), 0.0015, "m1", "XLF", "FAZ", None);
+        let mut exec = PaperExecutor::new_for_model(pool.clone(), 0.0015, "m1", "XLF", "FAZ", 0.0, 0.0, None);
 
         // First entry at candle ts=1000.
         let fills1 = exec.set_target_position(Position::Long, 58.0, 1000).await.unwrap();
@@ -509,7 +543,7 @@ mod tests {
 
         // Restart scenario: fresh executor re-enters the same candle
         // (signal re-fires after boot). Must NOT insert a second lot.
-        let mut exec2 = PaperExecutor::new_for_model(pool.clone(), 0.0015, "m1", "XLF", "FAZ", None);
+        let mut exec2 = PaperExecutor::new_for_model(pool.clone(), 0.0015, "m1", "XLF", "FAZ", 0.0, 0.0, None);
         exec2.current_position = Position::Flat;
         let fills2 = exec2.set_target_position(Position::Long, 58.1, 1000).await.unwrap();
         assert!(fills2.is_empty(), "duplicate entry for same candle must be suppressed");
@@ -527,7 +561,7 @@ mod tests {
     #[tokio::test]
     async fn fills_carry_model_id_attribution() {
         let pool = test_pool().await;
-        let mut exec = PaperExecutor::new_for_model(pool.clone(), 0.0015, "smh-v1", "SMH", "SOXS", None);
+        let mut exec = PaperExecutor::new_for_model(pool.clone(), 0.0015, "smh-v1", "SMH", "SOXS", 0.0, 0.0, None);
         exec.set_target_position(Position::Long, 560.0, 100).await.unwrap();
         exec.set_target_position(Position::Flat, 570.0, 200).await.unwrap();
 
@@ -538,5 +572,66 @@ mod tests {
                 .unwrap();
         assert_eq!(rows.len(), 2); // buy + sell
         assert!(rows.iter().all(|r| r.0 == "smh-v1"));
+    }
+
+    #[tokio::test]
+    async fn budget_sizing_sets_qty_at_entry() {
+        let pool = test_pool().await;
+        // budget 10k, deploy_pct 0.25 → $2500 notional @ close 500 → qty 5.
+        let mut exec = PaperExecutor::new_for_model(
+            pool.clone(), 0.0015, "budget1", "QQQ", "PSQ", 10_000.0, 0.25, None,
+        );
+
+        let fills = exec.set_target_position(Position::Long, 500.0, 100).await.unwrap();
+        assert_eq!(fills.len(), 1);
+        assert!((fills[0].qty - 5.0).abs() < 1e-9, "qty = floor(10000*0.25/500)=5, got {}", fills[0].qty);
+        assert!((exec.qty - 5.0).abs() < 1e-9);
+
+        // The sized qty persists to the trade row.
+        let (qty,): (f64,) = sqlx::query_as(
+            "SELECT qty FROM equity_trades WHERE symbol='QQQ' AND side='buy' ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!((qty - 5.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn budget_sizing_restores_qty_on_sync() {
+        let pool = test_pool().await;
+        db::save_position(&pool, "budget2", Position::Long.as_i64()).await.unwrap();
+        // A previously-sized entry: qty=5 @ $500.
+        db::insert_equity_trade(&pool, "QQQ", 100, "buy", 5.0, 500.0, 0.75, 0.0, "budget2")
+            .await
+            .unwrap();
+
+        // Fresh executor (constructor qty=1.0) — sync must restore qty=5 so the
+        // exit PnL scales correctly, NOT value the close at qty=1.
+        let mut exec = PaperExecutor::new_for_model(
+            pool.clone(), 0.0015, "budget2", "QQQ", "PSQ", 10_000.0, 0.25, None,
+        );
+        exec.sync_from_db().await.unwrap();
+        assert!((exec.qty - 5.0).abs() < 1e-9, "sync must restore qty=5, got {}", exec.qty);
+
+        // Exit sell at 520: PnL = (520-500)*5 - fee = 100 - (5*520*0.0015).
+        let fills = exec.set_target_position(Position::Flat, 520.0, 200).await.unwrap();
+        assert_eq!(fills.len(), 1);
+        let expected_fee = 5.0 * 520.0 * 0.0015;
+        let expected_pnl = 100.0 - expected_fee;
+        assert!((fills[0].realized_pnl - expected_pnl).abs() < 1e-6,
+            "exit PnL must scale with qty=5, got {}", fills[0].realized_pnl);
+    }
+
+    #[tokio::test]
+    async fn budget_sizing_floors_at_one() {
+        let pool = test_pool().await;
+        // Small budget vs high price → floor to 1.
+        let mut exec = PaperExecutor::new_for_model(
+            pool.clone(), 0.0015, "budget3", "QQQ", "PSQ", 100.0, 0.25, None,
+        );
+        let fills = exec.set_target_position(Position::Long, 500.0, 100).await.unwrap();
+        assert_eq!(fills.len(), 1);
+        assert!((fills[0].qty - 1.0).abs() < 1e-9, "floor at 1, got {}", fills[0].qty);
     }
 }

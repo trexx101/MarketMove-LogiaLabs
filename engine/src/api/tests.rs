@@ -391,6 +391,7 @@ async fn register_then_list_model() {
         model_path: "models/qqq_v1.txt".to_string(),
         norm_stats_path: "models/norm_stats_qqq.json".to_string(),
         budget_usd: 10_000.0,
+        deploy_pct: 0.25,
         notes: Some("test model".to_string()),
     };
     let (status, Json(model)) =
@@ -419,6 +420,7 @@ async fn set_enabled_toggles_flag() {
         model_path: "models/nvda_v1.txt".to_string(),
         norm_stats_path: "models/norm_stats_nvda.json".to_string(),
         budget_usd: 5_000.0,
+        deploy_pct: 0.25,
         notes: None,
     };
     models::handle_register_model(state, axum::Json(body))
@@ -508,6 +510,7 @@ async fn strategy_config_get_with_known_model_id_returns_per_model_params() {
         "models/q.txt",
         "models/norm_q.json",
         10_000.0,
+        0.25,
         None,
     )
     .await
@@ -562,6 +565,7 @@ async fn strategy_config_put_with_model_id_updates_per_model_params() {
         "models/nvda.txt",
         "models/norm_nvda.json",
         5_000.0,
+        0.25,
         None,
     )
     .await

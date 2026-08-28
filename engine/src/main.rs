@@ -246,6 +246,8 @@ async fn main() {
                 &model.model_id,
                 &model.primary_symbol,
                 &model.inverse_symbol,
+                model.budget_usd,
+                model.deploy_pct,
                 model_tx_for_exec,
             )
             .await,
@@ -516,6 +518,8 @@ async fn build_paper_executor_for_model(
     model_id: &str,
     primary_symbol: &str,
     inverse_symbol: &str,
+    budget_usd: f64,
+    deploy_pct: f64,
     tx: tokio::sync::broadcast::Sender<api::ws::TelemetryEvent>,
 ) -> exec::ExecutorKind {
     info!(
@@ -523,6 +527,8 @@ async fn build_paper_executor_for_model(
         model_id = %model_id,
         primary = %primary_symbol,
         inverse = %inverse_symbol,
+        budget_usd,
+        deploy_pct,
         "using paper executor for model"
     );
     let mut executor = exec::paper::PaperExecutor::new_for_model(
@@ -531,6 +537,8 @@ async fn build_paper_executor_for_model(
         model_id,
         primary_symbol,
         inverse_symbol,
+        budget_usd,
+        deploy_pct,
         Some(tx),
     );
     if let Err(e) = executor.sync_from_db().await {

@@ -35,7 +35,13 @@ pub struct RegisterModelBody {
     pub model_path: String,
     pub norm_stats_path: String,
     pub budget_usd: f64,
+    #[serde(default = "default_deploy_pct")]
+    pub deploy_pct: f64,
     pub notes: Option<String>,
+}
+
+fn default_deploy_pct() -> f64 {
+    0.25
 }
 
 pub async fn handle_register_model(
@@ -50,6 +56,7 @@ pub async fn handle_register_model(
         &body.model_path,
         &body.norm_stats_path,
         body.budget_usd,
+        body.deploy_pct,
         body.notes.as_deref(),
     )
     .await
