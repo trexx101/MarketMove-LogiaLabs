@@ -38,6 +38,8 @@ async fn main() {
         )
         .init();
 
+    let _ = dotenvy::dotenv();
+
     let cfg = match config::Config::from_env() {
         Ok(c) => c,
         Err(e) => {
@@ -234,17 +236,19 @@ async fn main() {
             };
 
         // Per-model paper executor. Each executor holds its own position
-        // state keyed by primary_symbol, so two schedulers trade QQQ and
+        // state keyed by model_id, so two schedulers trade QQQ and
         // NVDA independently without contention.
         let model_tx_for_exec = tx.clone();
         let model_executor = std::sync::Arc::new(tokio::sync::RwLock::new(
             build_paper_executor_for_model(
                 &cfg,
                 pool.clone(),
+                &model.model_id,
                 &model.primary_symbol,
                 &model.inverse_symbol,
                 model_tx_for_exec,
-            ),
+            )
+            .await,
         ));
 
         let model_pool = pool.clone();
@@ -500,29 +504,42 @@ async fn main() {
 /// Build the paper executor for a specific resolved model (§8).
 ///
 /// Each per-model loop iteration in `main()` calls this with the model's
-/// own `primary_symbol` and `inverse_symbol`, so QQQ and NVDA schedulers
-/// run independent paper executors. Currently always returns Paper;
-/// live-Moomoo execution stays single-model and operator-gated.
-fn build_paper_executor_for_model(
+/// own id, `primary_symbol` and `inverse_symbol`, so QQQ and NVDA schedulers
+/// run independent paper executors. Constructs via `new_for_model` so every
+/// fill carries model attribution, then restores position state from
+/// `signal_state` so a restart doesn't lose open positions (sync_from_db).
+/// Currently always returns Paper; live-Moomoo execution stays single-model
+/// and operator-gated.
+async fn build_paper_executor_for_model(
     cfg: &config::Config,
     pool: db::DbPool,
+    model_id: &str,
     primary_symbol: &str,
     inverse_symbol: &str,
     tx: tokio::sync::broadcast::Sender<api::ws::TelemetryEvent>,
 ) -> exec::ExecutorKind {
     info!(
         fee = cfg.paper_fee,
+        model_id = %model_id,
         primary = %primary_symbol,
         inverse = %inverse_symbol,
         "using paper executor for model"
     );
-    exec::ExecutorKind::Paper(exec::paper::PaperExecutor::new_for_symbol(
+    let mut executor = exec::paper::PaperExecutor::new_for_model(
         pool,
         cfg.paper_fee,
+        model_id,
         primary_symbol,
         inverse_symbol,
         Some(tx),
-    ))
+    );
+    if let Err(e) = executor.sync_from_db().await {
+        // Never fatal at boot: log loudly and continue flat rather than
+        // refusing to start. A failed sync only costs one exit leg, the
+        // same as pre-fix behavior — and the engine still serves data.
+        tracing::error!(error = %e, model_id = %model_id, "executor sync_from_db failed; starting flat");
+    }
+    exec::ExecutorKind::Paper(executor)
 }
 
 #[allow(dead_code)]

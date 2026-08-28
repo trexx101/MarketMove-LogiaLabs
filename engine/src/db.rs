@@ -99,7 +99,8 @@ CREATE TABLE IF NOT EXISTS equity_trades (
     price         REAL    NOT NULL,
     fee           REAL    NOT NULL,
     realized_pnl  REAL    NOT NULL DEFAULT 0,
-    created_at    INTEGER NOT NULL
+    created_at    INTEGER NOT NULL,
+    model_id      TEXT    NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS equity_trades_symbol_ts_idx
     ON equity_trades (symbol, candle_ts DESC);
@@ -415,6 +416,7 @@ pub async fn open(database_url: &str) -> Result<DbPool> {
 
     migrate_predictions(&pool).await?;
     migrate_strategy_versions(&pool).await?;
+    migrate_equity_trades(&pool).await?;
     migrate_signal_state(&pool).await?;
     migrate_option_positions(&pool).await?;
     migrate_option_tape_meta(&pool).await?;
@@ -442,6 +444,26 @@ pub async fn migrate_strategy_versions(pool: &DbPool) -> Result<()> {
         info!("migrated strategy_versions: added column equity");
     }
 
+    Ok(())
+}
+
+/// Migrate `equity_trades`: add `model_id` column to databases created
+/// before per-model fill attribution existed (2026-08-27). Without it,
+/// every fill is unattributable and bootstrap re-entries are
+/// indistinguishable from legitimate entries.
+pub async fn migrate_equity_trades(pool: &DbPool) -> Result<()> {
+    let rows = sqlx::query("PRAGMA table_info(equity_trades)")
+        .fetch_all(pool)
+        .await
+        .context("PRAGMA table_info(equity_trades)")?;
+    let columns: Vec<String> = rows.iter().map(|r| r.get::<String, _>(1)).collect();
+    if !columns.contains(&"model_id".to_string()) {
+        info!("migrating equity_trades: adding model_id column");
+        sqlx::query("ALTER TABLE equity_trades ADD COLUMN model_id TEXT NOT NULL DEFAULT ''")
+            .execute(pool)
+            .await
+            .context("ALTER TABLE equity_trades ADD COLUMN model_id")?;
+    }
     Ok(())
 }
 
@@ -1661,12 +1683,10 @@ pub async fn insert_trade(
     Ok(())
 }
 
-/// Insert an equity trade into `equity_trades` with explicit symbol attribution.
-///
-/// The equities pipeline (Wave C) reports PnL per-symbol (see
-/// `sum_equity_realized_pnl` and `status::handle_status`), so every fill must
-/// record which instrument was traded. For a short position this is the inverse
-/// ETF symbol (e.g. PSQ), not the primary symbol (QQQ).
+/// Insert an equity trade into `equity_trades` with explicit symbol AND
+/// model attribution. `model_id` is the registry UUID (or "bootstrap-default")
+/// of the model whose scheduler produced the fill — every fill must be
+/// attributable so bootstrap re-entries stay distinguishable from real entries.
 pub async fn insert_equity_trade(
     pool: &DbPool,
     symbol: &str,
@@ -1676,11 +1696,12 @@ pub async fn insert_equity_trade(
     price: f64,
     fee: f64,
     realized_pnl: f64,
+    model_id: &str,
 ) -> Result<()> {
     let created_at = Utc::now().timestamp();
     sqlx::query(
-        "INSERT INTO equity_trades (symbol, candle_ts, side, qty, price, fee, realized_pnl, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO equity_trades (symbol, candle_ts, side, qty, price, fee, realized_pnl, created_at, model_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(symbol)
     .bind(candle_ts)
@@ -1690,10 +1711,29 @@ pub async fn insert_equity_trade(
     .bind(fee)
     .bind(realized_pnl)
     .bind(created_at)
+    .bind(model_id)
     .execute(pool)
     .await
     .context("insert_equity_trade")?;
     Ok(())
+}
+
+/// Idempotency guard: does an OPEN ENTRY (buy) already exist for this
+/// symbol at this candle? Entry legs check this before inserting so a
+/// restart/re-run cannot duplicate an open position (the "two XLF lots"
+/// bug of 2026-08-25/27). Only buys are guarded — exits must never be
+/// suppressed, since a restart can legitimately re-close a position.
+pub async fn has_open_entry_trade(pool: &DbPool, symbol: &str, candle_ts: i64) -> Result<bool> {
+    let row: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM equity_trades
+         WHERE symbol = ?1 AND candle_ts = ?2 AND side = 'buy'",
+    )
+    .bind(symbol)
+    .bind(candle_ts)
+    .fetch_one(pool)
+    .await
+    .context("has_open_entry_trade")?;
+    Ok(row.0 > 0)
 }
 
 // ---------------------------------------------------------------------------

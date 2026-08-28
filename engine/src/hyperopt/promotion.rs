@@ -445,6 +445,7 @@ mod tests {
             ic: 0.05,
             sharpe: 1.5,
             days_observed: 0,
+            fold_ics: vec![0.05, 0.06],
         })
         .unwrap()
     }
@@ -594,19 +595,39 @@ mod tests {
     }
 
     #[test]
-    fn test_promote_paper_to_micro_fail_days() {
+    fn test_promote_paper_to_micro_fails_on_positive_trade_count_and_ic_bars() {
         let pipeline = PromotionPipeline::new();
+        // Gates that are ACTIVE for paper->micro today: min_trades + min_ic +
+        // fold consistency. min_sharpe/min_days are disabled (0.0) pending a
+        // real per-candidate backtest source (2026-08-22), so a paper entry
+        // with low days but passing IC/n_trades must promote.
         let evidence = PromotionEvidence {
-            n_trades: 50,
+            // Below paper->micro min_trades (30? see gate) => must reject.
+            n_trades: 1,
             ic: 0.05,
-            sharpe: 1.5,
-            days_observed: 7, // < 14
+            sharpe: 0.0,
+            days_observed: 7, // ignored: min_days=0
             fold_ics: vec![],
         };
 
         let result = pipeline.check_promotion(PromotionStage::Paper, &evidence);
         assert!(!result.promoted);
-        assert!(result.reason.contains("Insufficient observation days"));
+        assert!(result.reason.contains("Insufficient trades"));
+    }
+
+    #[test]
+    fn test_promote_paper_to_micro_pass_when_days_disabled() {
+        let pipeline = PromotionPipeline::new();
+        let evidence = PromotionEvidence {
+            n_trades: 100,
+            ic: 0.05,
+            sharpe: 0.0,      // ignored: min_sharpe=0
+            days_observed: 7, // ignored: min_days=0
+            fold_ics: vec![],
+        };
+
+        let result = pipeline.check_promotion(PromotionStage::Paper, &evidence);
+        assert!(result.promoted);
     }
 
     #[test]
@@ -647,9 +668,11 @@ mod tests {
         
         let req = pipeline.get_requirements(PromotionStage::Candidate).unwrap();
         assert_eq!(req.min_trades, 100);
-        
+
         let req = pipeline.get_requirements(PromotionStage::Paper).unwrap();
-        assert_eq!(req.min_days, 14);
+        // min_days is DISABLED (0.0) pending a real per-candidate observation
+        // source (2026-08-25). Test encodes current intended behavior.
+        assert_eq!(req.min_days, 0);
         
         assert!(pipeline.get_requirements(PromotionStage::Live).is_none());
     }

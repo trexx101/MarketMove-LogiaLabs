@@ -154,6 +154,8 @@ async fn post_heartbeat(
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
+    let _ = dotenvy::dotenv();
+
     let config = Config::from_env().context("Failed to load config")?;
     let opts = &config.options;
 

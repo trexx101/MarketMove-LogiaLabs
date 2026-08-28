@@ -201,8 +201,9 @@ impl fmt::Display for TradingMode {
 
 impl Config {
     pub fn from_env() -> Result<Self> {
-        let _ = dotenvy::dotenv();
-
+        // NOTE: .env is loaded once at binary startup (main), not here, so
+        // unit tests that clear the env ("defaults when env unset") are
+        // hermetic instead of having dotenv re-inject the workspace .env.
         let trading_mode_raw = env_or("TRADING_MODE", "paper");
         let trading_mode: TradingMode = trading_mode_raw
             .parse()
@@ -610,8 +611,9 @@ mod tests {
         assert_eq!(cfg.http_port, 8080);
         assert_eq!(cfg.symbol, "BTC/USD");
         assert_eq!(cfg.database_url, "sqlite://data/candles.db");
-        // dotenvy loads .env which overrides the default path.
-        assert_eq!(cfg.norm_stats_path, "/models/norm_stats_qqq_v1.json");
+        // NORM_STATS_PATH default (no leading slash; .env no longer reloaded
+        // here — dotenv is loaded once at binary startup).
+        assert_eq!(cfg.norm_stats_path, "models/norm_stats_qqq_v1.json");
         assert_eq!(cfg.feature_window_size, 126);
         assert_eq!(cfg.parity_marker_path, "parity_verified.json");
         assert_eq!(cfg.parity_max_age_secs, 7 * 24 * 60 * 60);
@@ -640,14 +642,30 @@ mod tests {
     }
 
     #[test]
-    fn live_mode_falls_back_to_paper() {
+    fn live_mode_loads_with_fresh_parity_marker() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         clear_engine_env();
+        // Live mode now gates on a fresh parity marker (production safety gate).
+        // Write a fresh marker so live configuration actually loads.
+        let marker_path = std::env::temp_dir().join("parity_marker_live_ok_test.json");
+        let fresh = crate::parity::ParityMarker {
+            verified_at: chrono::Utc::now().timestamp(),
+            fixture_sha256: "abc".to_string(),
+            candles_compared: 168,
+            max_abs_error: 1e-9,
+            tolerance: 1e-6,
+            notes: "fresh marker".to_string(),
+        };
+        crate::parity::write_marker(&marker_path, &fresh).expect("write fresh marker");
+
         env::set_var("TRADING_MODE", "live");
-        // Wave 5: Kraken retired; live execution is not yet wired to Binance, so
-        // the engine must still load (and will fall back to paper at runtime).
-        let cfg = Config::from_env().expect("live mode must load without exchange keys");
+        env::set_var("PARITY_MARKER_PATH", marker_path.to_str().unwrap());
+        let cfg = Config::from_env().expect("live mode with fresh marker must load");
+        // Live executor resolves to paper at runtime (no broker keys wired); the
+        // config still parses as TradingMode::Live.
         assert_eq!(cfg.trading_mode, TradingMode::Live);
+
+        let _ = std::fs::remove_file(&marker_path);
     }
 
     #[test]

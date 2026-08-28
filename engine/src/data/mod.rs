@@ -13,11 +13,14 @@ use crate::db::DbPool;
 
 /// Symbols pulled from Yahoo Finance / Moomoo for the equities engine.
 /// QQQ (the trade target) + its inverse (PSQ) + key constituents +
-/// cross-asset ETFs. NVDA + NVDD (DailyNVDA Bear ETF, the short leg for
-/// the NVDA model) are included so both model pairs have data.
+/// cross-asset ETFs. Each registry model's inverse ETF must be present so
+/// short positions can be marked to market: QQQ/PSQ, NVDA/NVDD, SMH/SOXS,
+/// XLF/FAZ (inverse bear ETFs for the SMH/XLF models).
 pub const EQUITY_SYMBOLS: &[&str] = &[
     "QQQ", "PSQ",
     "NVDA", "NVDD",
+    "SMH", "SOXS",
+    "XLF", "FAZ",
     "AAPL", "MSFT", "GOOG", "AMZN", "META", "TSLA", "TLT", "GLD", "UUP",
 ];
 

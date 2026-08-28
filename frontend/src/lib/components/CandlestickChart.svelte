@@ -12,11 +12,8 @@
   let chart = null;
   let candleSeries = null;
   let markersPlugin = null;
-  let predPriceLines = [];
-  let livePriceLineObj = null;
   let sma20 = null, sma50 = null, sma200 = null;
   let tenkan = null, kijun = null, senkouA = null, senkouB = null, chikou = null;
-  let livePriceLine = null;
   let chartTimer;
   let resizeObserver;
 
@@ -35,6 +32,13 @@
   let lastClose = null;
   let stale = false;
   let liveQuote = null;
+
+  // Lookup maps for crosshair hover
+  let candleByTime = new Map();
+  let predByTime = new Map();
+
+  // Hover legend state
+  let crosshairInfo = null;
 
   // Resolve the symbol
   $: resolvedSymbol = symbol || ($models.find((m) => m.model_id === $activeModelId)?.primary_symbol) || 'QQQ';
@@ -95,12 +99,10 @@
       pred_21d: p.pred_21d ?? null,
     };
     lastClose = close;
-    updatePredictionCones();
   }
 
   export function setLivePrice(price) {
     livePrice = price;
-    updateLivePriceLine();
   }
 
   // ── Chart update functions ──────────────────────────────────────────────
@@ -117,12 +119,14 @@
     }));
     candleSeries.setData(candleData);
 
+    // Build lookup maps for crosshair hover
+    candleByTime = new Map(candles.map((c) => [c.time, c]));
+    predByTime = new Map(predictionMarkers.map((m) => [m.candle_ts, m]));
+
     updateSMA();
     updateIchimoku();
     updatePredictionMarkers();
     updateTradeMarkers();
-    updatePredictionCones();
-    updateLivePriceLine();
 
     chart.timeScale().fitContent();
   }
@@ -171,27 +175,22 @@
     }
 
     // Show markers for predictions with all horizons resolved (actuals present).
+    // No text — clean glyphs only. Color = direction hit (green) or miss (red).
     const markers = predictionMarkers
       .filter((m) => m.actual_1d != null || m.actual_5d != null || m.actual_21d != null)
       .map((m) => {
-        // Use 5d actual vs pred for color (longest reliable horizon).
         const pred = m.pred_5d;
         const actual = m.actual_5d ?? m.actual_1d ?? 0;
         const diff = actual - pred;
         const correctDir = (pred >= 0 && actual >= 0) || (pred < 0 && actual < 0);
         const color = correctDir ? '#149e61' : '#e5484d';
 
-        let text = '';
-        if (m.actual_1d != null) text += `1d:p${(m.pred_1d * 100).toFixed(1)}% a${(m.actual_1d * 100).toFixed(1)} `;
-        if (m.actual_5d != null) text += `5d:p${(m.pred_5d * 100).toFixed(1)}% a${(m.actual_5d * 100).toFixed(1)} `;
-        if (m.actual_21d != null) text += `21d:p${(m.pred_21d * 100).toFixed(1)}% a${(m.actual_21d * 100).toFixed(1)}`;
-
         return {
           time: m.candle_ts,
           position: diff >= 0 ? 'belowBar' : 'aboveBar',
           color,
           shape: 'circle',
-          text: text.trim(),
+          text: '',
           size: 2,
         };
       });
@@ -218,64 +217,27 @@
     markersPlugin.setMarkers([...predMarkers, ...tradeMarkers]);
   }
 
-  function updatePredictionCones() {
-    // Remove old prediction price lines to prevent accumulation.
-    if (candleSeries && predPriceLines.length) {
-      predPriceLines.forEach((pl) => candleSeries.removePriceLine(pl));
-      predPriceLines = [];
+  // ── Helpers for crosshair legend ────────────────────────────────────────
+
+  function fmtTime(t) {
+    if (t == null) return '';
+    if (typeof t === 'number') {
+      // Unix timestamp
+      const d = new Date(t * 1000);
+      return d.toISOString().slice(0, 10);
     }
-
-    // If we have forward-looking predictions (from store), draw price lines.
-    if (!preds || lastClose == null) return;
-
-    // Create new prediction price lines.
-    const pl1d = candleSeries.createPriceLine({
-      price: lastClose * (1 + (preds.pred_1d ?? 0)),
-      color: (preds.pred_1d ?? 0) >= 0 ? '#149e61' : '#e5484d',
-      lineWidth: 1,
-      lineStyle: 2,
-      axisLabelVisible: true,
-      title: '1D',
-    });
-    predPriceLines.push(pl1d);
-
-    const pl5d = candleSeries.createPriceLine({
-      price: lastClose * (1 + (preds.pred_5d ?? 0)),
-      color: (preds.pred_5d ?? 0) >= 0 ? '#149e61' : '#e5484d',
-      lineWidth: 1,
-      lineStyle: 2,
-      axisLabelVisible: true,
-      title: '5D',
-    });
-    predPriceLines.push(pl5d);
-
-    const pl21d = candleSeries.createPriceLine({
-      price: lastClose * (1 + (preds.pred_21d ?? 0)),
-      color: (preds.pred_21d ?? 0) >= 0 ? '#149e61' : '#e5484d',
-      lineWidth: 1,
-      lineStyle: 2,
-      axisLabelVisible: true,
-      title: '21D',
-    });
-    predPriceLines.push(pl21d);
+    return String(t).slice(0, 10);
   }
 
-  function updateLivePriceLine() {
-    // Remove old live price line to prevent accumulation.
-    if (livePriceLineObj && candleSeries) {
-      candleSeries.removePriceLine(livePriceLineObj);
-      livePriceLineObj = null;
-    }
+  function fmtPct(v) {
+    if (v == null) return '—';
+    const sign = v >= 0 ? '+' : '';
+    return `${sign}${(v * 100).toFixed(1)}%`;
+  }
 
-    if (livePrice == null || !candleSeries) return;
-    livePriceLineObj = candleSeries.createPriceLine({
-      price: livePrice,
-      color: '#7132f5',
-      lineWidth: 1,
-      lineStyle: 2,
-      axisLabelVisible: true,
-      title: 'LIVE',
-    });
+  function fmtPrice(v) {
+    if (v == null) return '—';
+    return v.toFixed(2);
   }
 
   // ── Lifecycle ────────────────────────────────────────────────────────────
@@ -292,7 +254,7 @@
         horzLines: { color: '#1c1d27' },
       },
       crosshair: {
-        mode: 0,
+        mode: 1,
       },
       rightPriceScale: {
         borderColor: '#252631',
@@ -375,6 +337,51 @@
       lastValueVisible: false,
     });
 
+    // Crosshair subscription — drives the hover legend
+    chart.subscribeCrosshairMove((param) => {
+      if (!param.time || !param.point) {
+        crosshairInfo = null;
+        return;
+      }
+
+      const candle = candleByTime.get(param.time);
+      if (!candle) {
+        crosshairInfo = null;
+        return;
+      }
+
+      const pred = predByTime.get(param.time) || null;
+
+      crosshairInfo = {
+        time: param.time,
+        symbol: resolvedSymbol,
+        open: candle.open,
+        high: candle.high,
+        low: candle.low,
+        close: candle.close,
+        pred_1d: pred?.pred_1d ?? null,
+        pred_5d: pred?.pred_5d ?? null,
+        pred_21d: pred?.pred_21d ?? null,
+        actual_1d: pred?.actual_1d ?? null,
+        actual_5d: pred?.actual_5d ?? null,
+        actual_21d: pred?.actual_21d ?? null,
+        // Forward preds for the last candle only
+        forward_1d: null,
+        forward_5d: null,
+        forward_21d: null,
+      };
+
+      // If this is the last candle, attach forward predictions
+      if (preds && lastClose != null) {
+        const lastTime = candles[candles.length - 1]?.time;
+        if (param.time === lastTime) {
+          crosshairInfo.forward_1d = preds.pred_1d ?? null;
+          crosshairInfo.forward_5d = preds.pred_5d ?? null;
+          crosshairInfo.forward_21d = preds.pred_21d ?? null;
+        }
+      }
+    });
+
     // Load data
     await refreshChart();
     await refreshTrades();
@@ -423,13 +430,11 @@
         pred_5d:  p.pred_5d  ?? p.pred_5h_approx,
         pred_21d: p.pred_21d ?? null,
       };
-      updatePredictionCones();
     }
   }
 
   $: if ($status) {
     lastClose = $status.last_close ?? lastClose;
-    updateLivePriceLine();
   }
 </script>
 
@@ -464,7 +469,67 @@
     {/if}
   </div>
 
-  <div class="chart-canvas" bind:this={container}></div>
+  <div class="chart-canvas" bind:this={container}>
+    {#if crosshairInfo}
+      <div class="crosshair-legend">
+        <div class="cl-row cl-header">
+          <span class="cl-symbol">{crosshairInfo.symbol}</span>
+          <span class="cl-date">{fmtTime(crosshairInfo.time)}</span>
+        </div>
+        <div class="cl-row cl-ohlc">
+          <span class="cl-label">O</span><span class="cl-val">{fmtPrice(crosshairInfo.open)}</span>
+          <span class="cl-label">H</span><span class="cl-val">{fmtPrice(crosshairInfo.high)}</span>
+          <span class="cl-label">L</span><span class="cl-val">{fmtPrice(crosshairInfo.low)}</span>
+          <span class="cl-label">C</span><span class="cl-val">{fmtPrice(crosshairInfo.close)}</span>
+        </div>
+        {#if crosshairInfo.pred_1d != null || crosshairInfo.pred_5d != null || crosshairInfo.pred_21d != null}
+          <div class="cl-row cl-preds">
+            <span class="cl-label">Pred</span>
+            <span class="cl-horizon">1d:{fmtPct(crosshairInfo.pred_1d)}</span>
+            <span class="cl-horizon">5d:{fmtPct(crosshairInfo.pred_5d)}</span>
+            <span class="cl-horizon">21d:{fmtPct(crosshairInfo.pred_21d)}</span>
+          </div>
+        {/if}
+        {#if crosshairInfo.actual_1d != null || crosshairInfo.actual_5d != null || crosshairInfo.actual_21d != null}
+          <div class="cl-row cl-actuals">
+            <span class="cl-label">Act</span>
+            <span class="cl-horizon">
+              1d:{fmtPct(crosshairInfo.actual_1d)}
+              {#if crosshairInfo.actual_1d != null}
+                <span class="cl-dir" class:cl-hit={(crosshairInfo.pred_1d >= 0 && crosshairInfo.actual_1d >= 0) || (crosshairInfo.pred_1d < 0 && crosshairInfo.actual_1d < 0)} class:cl-miss={!((crosshairInfo.pred_1d >= 0 && crosshairInfo.actual_1d >= 0) || (crosshairInfo.pred_1d < 0 && crosshairInfo.actual_1d < 0))}>
+                  {((crosshairInfo.pred_1d >= 0 && crosshairInfo.actual_1d >= 0) || (crosshairInfo.pred_1d < 0 && crosshairInfo.actual_1d < 0)) ? '✓' : '✗'}
+                </span>
+              {/if}
+            </span>
+            <span class="cl-horizon">
+              5d:{fmtPct(crosshairInfo.actual_5d)}
+              {#if crosshairInfo.actual_5d != null}
+                <span class="cl-dir" class:cl-hit={(crosshairInfo.pred_5d >= 0 && crosshairInfo.actual_5d >= 0) || (crosshairInfo.pred_5d < 0 && crosshairInfo.actual_5d < 0)} class:cl-miss={!((crosshairInfo.pred_5d >= 0 && crosshairInfo.actual_5d >= 0) || (crosshairInfo.pred_5d < 0 && crosshairInfo.actual_5d < 0))}>
+                  {((crosshairInfo.pred_5d >= 0 && crosshairInfo.actual_5d >= 0) || (crosshairInfo.pred_5d < 0 && crosshairInfo.actual_5d < 0)) ? '✓' : '✗'}
+                </span>
+              {/if}
+            </span>
+            <span class="cl-horizon">
+              21d:{fmtPct(crosshairInfo.actual_21d)}
+              {#if crosshairInfo.actual_21d != null}
+                <span class="cl-dir" class:cl-hit={(crosshairInfo.pred_21d >= 0 && crosshairInfo.actual_21d >= 0) || (crosshairInfo.pred_21d < 0 && crosshairInfo.actual_21d < 0)} class:cl-miss={!((crosshairInfo.pred_21d >= 0 && crosshairInfo.actual_21d >= 0) || (crosshairInfo.pred_21d < 0 && crosshairInfo.actual_21d < 0))}>
+                  {((crosshairInfo.pred_21d >= 0 && crosshairInfo.actual_21d >= 0) || (crosshairInfo.pred_21d < 0 && crosshairInfo.actual_21d < 0)) ? '✓' : '✗'}
+                </span>
+              {/if}
+            </span>
+          </div>
+        {/if}
+        {#if crosshairInfo.forward_1d != null || crosshairInfo.forward_5d != null || crosshairInfo.forward_21d != null}
+          <div class="cl-row cl-forward">
+            <span class="cl-label">Fwd</span>
+            <span class="cl-horizon">1d:{fmtPct(crosshairInfo.forward_1d)}</span>
+            <span class="cl-horizon">5d:{fmtPct(crosshairInfo.forward_5d)}</span>
+            <span class="cl-horizon">21d:{fmtPct(crosshairInfo.forward_21d)}</span>
+          </div>
+        {/if}
+      </div>
+    {/if}
+  </div>
 
   {#if liveQuote}
     <div class="live-bar">
@@ -566,6 +631,7 @@
   .chart-canvas {
     flex: 1;
     min-height: 0;
+    position: relative;
   }
 
   .live-bar {
@@ -587,5 +653,87 @@
   }
   .live-change.negative {
     color: var(--red, #e5484d);
+  }
+
+  /* ── Crosshair hover legend ─────────────────────────────────────────── */
+
+  .crosshair-legend {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 10;
+    background: rgba(12, 13, 18, 0.92);
+    border: 1px solid var(--border, #252631);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font-family: var(--font-mono, monospace);
+    font-size: 0.7rem;
+    line-height: 1.5;
+    pointer-events: none;
+    min-width: 260px;
+  }
+
+  .cl-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+  }
+
+  .cl-header {
+    margin-bottom: 4px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid var(--border, #252631);
+  }
+
+  .cl-symbol {
+    color: var(--text-primary, #ececf1);
+    font-weight: 600;
+  }
+
+  .cl-date {
+    color: var(--text-secondary, #8b8d9a);
+    margin-left: auto;
+  }
+
+  .cl-ohlc {
+    margin-bottom: 3px;
+  }
+
+  .cl-label {
+    color: var(--text-muted, #5c5e6e);
+    width: 18px;
+    flex-shrink: 0;
+  }
+
+  .cl-val {
+    color: var(--text-primary, #ececf1);
+    min-width: 52px;
+    text-align: right;
+  }
+
+  .cl-preds, .cl-actuals, .cl-forward {
+    margin-top: 1px;
+  }
+
+  .cl-horizon {
+    color: var(--text-secondary, #8b8d9a);
+    min-width: 70px;
+  }
+
+  .cl-dir {
+    margin-left: 2px;
+  }
+
+  .cl-hit {
+    color: var(--green, #149e61);
+  }
+
+  .cl-miss {
+    color: var(--red, #e5484d);
+  }
+
+  .cl-forward .cl-horizon {
+    color: var(--accent, #7132f5);
   }
 </style>

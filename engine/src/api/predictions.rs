@@ -9,7 +9,7 @@ use super::{internal_error, ts_to_rfc3339, ApiResult, AppState};
 #[derive(Debug, Deserialize)]
 pub(crate) struct SymbolQuery {
     #[serde(default)]
-    symbol: Option<String>,
+    pub(crate) symbol: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

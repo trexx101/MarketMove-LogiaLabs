@@ -537,11 +537,36 @@ def main():
             if not selections:
                 need_scan = True
             else:
+                today = now_et.date()
                 # Check if any underlying has no selection or DTE expired
                 for u in underlyings:
                     if u not in selections or not selections[u].get("call") and not selections[u].get("put"):
                         need_scan = True
                         break
+                # Roll the chain when a held expiry drifts below dte_min: the
+                # docstring promises a daily scan when DTE < dte_min, but the
+                # old condition only rescanned on a missing selection. Without
+                # this, a chain selected at morning scan stays locked forever
+                # and slides out of the 30-45 DTE window (observed: Sept-25
+                # chain down to 28 DTE, never rolled). Parse the held expiry
+                # and roll once its DTE falls below dte_min.
+                if not need_scan:
+                    for u in underlyings:
+                        sel = selections.get(u) or {}
+                        exp_str = sel.get("expiry")
+                        if exp_str:
+                            try:
+                                exp_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
+                                if (exp_date - today).days < args.dte_min:
+                                    need_scan = True
+                                    print(json.dumps({"chain_roll": True, "underlying": u,
+                                                      "expiry": exp_str,
+                                                      "dte": (exp_date - today).days,
+                                                      "reason": "DTE below dte_min"}),
+                                          file=sys.stderr, flush=True)
+                                    break
+                            except ValueError:
+                                continue
 
             if need_scan:
                 # Only scan during pre-market or if market is about to open

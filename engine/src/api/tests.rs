@@ -69,31 +69,42 @@ fn test_state(pool: db::DbPool) -> State<AppState> {
 #[tokio::test]
 async fn status_returns_empty_state() {
     let pool = test_pool().await;
-    let Json(status) = status::handle_status(test_state(pool)).await.unwrap();
+    let Json(status) = status::handle_status(
+        axum::extract::Query(status::StatusQuery { symbol: None }),
+        test_state(pool),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(status.mode, "paper");
     assert_eq!(status.symbol, "BTC/USD");
     assert_eq!(status.position, "flat");
     assert_eq!(status.realized_pnl, 0.0);
-    assert_eq!(status.entry_price, 0.0);
+    assert_eq!(status.entry_price, None);
     assert_eq!(status.unrealized_pnl, 0.0);
     assert!(status.last_candle_ts.is_none());
     assert!(status.pred_1d.is_none());
-    assert_eq!(status.staleness_secs, u64::MAX);
+    assert_eq!(status.staleness_secs, 0);
 }
 
 #[tokio::test]
-async fn accuracy_returns_503_when_no_resolved() {
+async fn accuracy_returns_zeroed_stats_when_no_resolved() {
     let pool = test_pool().await;
-    let result = predictions::handle_accuracy(test_state(pool)).await;
+    let Json(resp) = predictions::handle_accuracy(
+        axum::extract::Query(predictions::SymbolQuery { symbol: None }),
+        test_state(pool),
+    )
+    .await
+    .unwrap();
 
-    let err = result.unwrap_err();
-    assert_eq!(err.0, axum::http::StatusCode::SERVICE_UNAVAILABLE);
-    assert!(
-        err.1.contains("equity accuracy not yet implemented"),
-        "got: {}",
-        err.1
-    );
+    // With no resolved predictions/insufficient candles the handler returns a
+    // zeroed AccuracyResponse (Ok), not a 503. Field exposure is module-private,
+    // so assert the serialized JSON shape to lock in the all-zero contract.
+    let v = serde_json::to_value(&resp).unwrap();
+    assert_eq!(v["directional_1h"], serde_json::json!(0.0));
+    assert_eq!(v["directional_4h"], serde_json::json!(0.0));
+    assert_eq!(v["directional_24h"], serde_json::json!(0.0));
+    assert_eq!(v["resolved_count"], serde_json::json!(0));
 }
 
 #[tokio::test]
@@ -108,7 +119,12 @@ async fn predictions_returns_history() {
     .await
     .unwrap();
 
-    let Json(resp) = predictions::handle_predictions(test_state(pool)).await.unwrap();
+    let Json(resp) = predictions::handle_predictions(
+        axum::extract::Query(predictions::SymbolQuery { symbol: None }),
+        test_state(pool),
+    )
+    .await
+    .unwrap();
     assert!(resp.latest.is_some());
     assert_eq!(resp.history.len(), 1);
     let latest = resp.latest.unwrap();
@@ -166,18 +182,22 @@ fn prediction_dto_handles_negative_pred() {
 #[tokio::test]
 async fn chart_computes_rolling_sma() {
     let pool = test_pool().await;
-    let closes = [100.0, 102.0, 101.0, 103.0, 104.0];
-    for (i, close) in closes.iter().enumerate() {
-        let ts = 1_000_000 + i as i64 * 3_600;
+    // Seed >= 200 fresh candles so chart's Yahoo backfill skip-condition holds
+    // (count>=min_candles && !stale) and the test stays hermetic/no-network.
+    let n = 200usize;
+    let base = chrono::Utc::now().timestamp() - (n as i64 - 1) * 3_600;
+    for i in 0..n {
+        let close = 100.0 + i as f64;
+        let ts = base + i as i64 * 3_600;
         db::upsert_equity_candle(
             &pool,
             &db::EquityCandle {
                 symbol: "BTC/USD".to_string(),
                 ts,
-                open: *close,
-                high: *close,
-                low: *close,
-                close: *close,
+                open: close,
+                high: close,
+                low: close,
+                close,
                 volume: 1,
                 source: "test".to_string(),
             },
@@ -187,13 +207,14 @@ async fn chart_computes_rolling_sma() {
     }
 
     let query = axum::extract::Query(
-        [("symbol".to_string(), "QQQ".to_string())]
+        [("symbol".to_string(), "BTC/USD".to_string())]
             .into_iter()
             .collect::<std::collections::HashMap<_, _>>(),
     );
     let Json(resp) = chart::handle_chart(test_state(pool), query).await.unwrap();
-    let expected_sma_points = closes.len().saturating_sub(TEST_SMA_WINDOW - 1);
-    assert_eq!(resp.candles.len(), closes.len());
+    // TEST_SMA_WINDOW=3 in test_state; SMA points = N - window + 1.
+    let expected_sma_points = n.saturating_sub(TEST_SMA_WINDOW - 1);
+    assert_eq!(resp.candles.len(), n);
     assert_eq!(resp.sma.len(), expected_sma_points);
     assert_eq!(
         resp.sma.first().unwrap().ts,
@@ -207,7 +228,7 @@ async fn status_reports_unrealized_pnl_for_open_position() {
     db::save_position(&pool, "test-model", strategy::Position::Long.as_i64())
         .await
         .unwrap();
-    db::insert_equity_trade(&pool, "BTC/USD", 1_000_000, "buy", 1.0, 100.0, 0.0, 0.0)
+    db::insert_equity_trade(&pool, "BTC/USD", 1_000_000, "buy", 1.0, 100.0, 0.0, 0.0, "test-model")
         .await
         .unwrap();
     db::upsert_equity_candle(
@@ -226,10 +247,16 @@ async fn status_reports_unrealized_pnl_for_open_position() {
     .await
     .unwrap();
 
-    let Json(status) = status::handle_status(test_state(pool)).await.unwrap();
+    let Json(status) = status::handle_status(
+        axum::extract::Query(status::StatusQuery { symbol: None }),
+        test_state(pool),
+    )
+    .await
+    .unwrap();
     assert_eq!(status.position, "long");
-    assert!((status.entry_price - 100.0).abs() < 1e-9);
-    assert!((status.unrealized_pnl - 10.0).abs() < 1e-9);
+    assert!((status.entry_price.unwrap_or(0.0) - 100.0).abs() < 1e-9);
+    // unrealized_pnl is a return fraction (close-entry)/entry, not absolute $.
+    assert!((status.unrealized_pnl - 0.10).abs() < 1e-9);
 }
 
 #[tokio::test(flavor = "current_thread")]

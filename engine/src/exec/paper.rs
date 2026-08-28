@@ -99,6 +99,42 @@ impl PaperExecutor {
         &self.pair
     }
 
+    /// Restore position state from the DB after a restart.
+    ///
+    /// `PaperExecutor` is constructed `Flat` every boot; without this call a
+    /// restart loses the open position and the next state transition silently
+    /// skips its exit leg (engine thinks Flat while `signal_state` says
+    /// Long/Short — the 2026-08-26/27 ghost-position bug). Position comes from
+    /// `signal_state` (authoritative, written by the scheduler); entry price
+    /// comes from the most recent buy fill of the held instrument.
+    pub async fn sync_from_db(&mut self) -> Result<()> {
+        let pos = db::load_position(&self.pool, &self.model_id).await?;
+        let position = Position::from_i64(pos);
+        self.current_position = position;
+        if position != Position::Flat {
+            let held = Self::symbol_for(position, &self.primary_symbol, &self.short_symbol)
+                .to_string();
+            self.entry_price = db::fetch_equity_entry_trade_price(&self.pool, &held)
+                .await?
+                .unwrap_or(0.0);
+            info!(
+                model_id = %self.model_id,
+                position = ?position,
+                held_symbol = %held,
+                entry_price = self.entry_price,
+                "executor state restored from DB"
+            );
+        } else {
+            info!(model_id = %self.model_id, "executor state restored: flat");
+        }
+        Ok(())
+    }
+
+    /// Read-only accessor: current position (used by sync tests).
+    pub fn position(&self) -> Position {
+        self.current_position
+    }
+
     /// Resolve the instrument symbol for a given position.
     fn symbol_for<'a>(pos: Position, primary: &'a str, short: &'a str) -> &'a str {
         match pos {
@@ -152,7 +188,7 @@ impl PaperExecutor {
                 "closing position"
             );
             db::insert_equity_trade(
-                &self.pool, exit_symbol, ts, side_str, self.qty, close, fee, pnl,
+                &self.pool, exit_symbol, ts, side_str, self.qty, close, fee, pnl, &self.model_id,
             )
             .await?;
             let fill = FillResult {
@@ -175,32 +211,44 @@ impl PaperExecutor {
             // not by short-selling the primary — no borrow/locate needed.
             let entry_side = TradeSide::Buy;
             let entry_symbol = Self::symbol_for(target, &self.primary_symbol, &self.short_symbol);
-            let fee = self.qty * close * self.fee_rate;
-            let side_str = "buy";
-            info!(
-                symbol = entry_symbol,
-                side = side_str,
-                qty = self.qty,
-                price = close,
-                fee = fee,
-                "opening position"
-            );
-            db::insert_equity_trade(
-                &self.pool, entry_symbol, ts, side_str, self.qty, close, fee, 0.0,
-            )
-            .await?;
-            self.entry_price = close;
-            let fill = FillResult {
-                side: entry_side,
-                symbol: entry_symbol.to_string(),
-                qty: self.qty,
-                price: close,
-                fee,
-                realized_pnl: 0.0,
-                ts,
-            };
-            self.publish_fill(side_str, entry_symbol, &fill);
-            fills.push(fill);
+            // Idempotency: never open a second lot for the same candle. A
+            // restart + replayed signal must not duplicate the entry (the
+            // 2026-08-25/27 "two XLF lots" bug).
+            if db::has_open_entry_trade(&self.pool, entry_symbol, ts).await? {
+                info!(
+                    symbol = entry_symbol,
+                    ts,
+                    "entry already recorded for this candle — skipping duplicate buy"
+                );
+            } else {
+                let fee = self.qty * close * self.fee_rate;
+                let side_str = "buy";
+                info!(
+                    symbol = entry_symbol,
+                    side = side_str,
+                    qty = self.qty,
+                    price = close,
+                    fee = fee,
+                    "opening position"
+                );
+                db::insert_equity_trade(
+                    &self.pool, entry_symbol, ts, side_str, self.qty, close, fee, 0.0,
+                    &self.model_id,
+                )
+                .await?;
+                self.entry_price = close;
+                let fill = FillResult {
+                    side: entry_side,
+                    symbol: entry_symbol.to_string(),
+                    qty: self.qty,
+                    price: close,
+                    fee,
+                    realized_pnl: 0.0,
+                    ts,
+                };
+                self.publish_fill(side_str, entry_symbol, &fill);
+                fills.push(fill);
+            }
         }
 
         self.current_position = target;
@@ -389,5 +437,106 @@ mod tests {
             .await
             .unwrap();
         assert!(fills.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Restart state-loss fix (2026-08-27): sync_from_db + entry idempotency
+    // + model_id attribution.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn sync_from_db_restores_long_position_and_entry_price() {
+        let pool = test_pool().await;
+        // Scheduler previously persisted: model "m1" is long, entered at 500.
+        db::save_position(&pool, "m1", Position::Long.as_i64()).await.unwrap();
+        db::insert_equity_trade(&pool, "QQQ", 100, "buy", 1.0, 500.0, 0.75, 0.0, "m1")
+            .await
+            .unwrap();
+
+        // Engine restarts → fresh executor starts Flat.
+        let mut exec = PaperExecutor::new_for_model(pool.clone(), 0.0015, "m1", "QQQ", "PSQ", None);
+        assert_eq!(exec.position(), Position::Flat);
+
+        exec.sync_from_db().await.unwrap();
+        assert_eq!(exec.position(), Position::Long);
+        assert!((exec.entry_price - 500.0).abs() < 1e-9);
+
+        // The next transition must produce the EXIT leg (the bug: it was
+        // skipped because the executor believed itself Flat).
+        let fills = exec.set_target_position(Position::Flat, 520.0, 200).await.unwrap();
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].side, TradeSide::Sell);
+        assert_eq!(fills[0].symbol, "QQQ");
+    }
+
+    #[tokio::test]
+    async fn sync_from_db_restores_short_position_holding_inverse_etf() {
+        let pool = test_pool().await;
+        db::save_position(&pool, "m2", Position::Short.as_i64()).await.unwrap();
+        db::insert_equity_trade(&pool, "PSQ", 100, "buy", 1.0, 48.0, 0.07, 0.0, "m2")
+            .await
+            .unwrap();
+
+        let mut exec = PaperExecutor::new_for_model(pool.clone(), 0.0015, "m2", "QQQ", "PSQ", None);
+        exec.sync_from_db().await.unwrap();
+        assert_eq!(exec.position(), Position::Short);
+        assert!((exec.entry_price - 48.0).abs() < 1e-9);
+
+        // Cover: sells the inverse ETF, not the primary.
+        let fills = exec.set_target_position(Position::Flat, 45.0, 200).await.unwrap();
+        assert_eq!(fills.len(), 1);
+        assert_eq!(fills[0].side, TradeSide::Sell);
+        assert_eq!(fills[0].symbol, "PSQ");
+    }
+
+    #[tokio::test]
+    async fn sync_from_db_flat_model_stays_flat() {
+        let pool = test_pool().await;
+        db::save_position(&pool, "m3", Position::Flat.as_i64()).await.unwrap();
+        let mut exec = PaperExecutor::new_for_model(pool.clone(), 0.0015, "m3", "QQQ", "PSQ", None);
+        exec.sync_from_db().await.unwrap();
+        assert_eq!(exec.position(), Position::Flat);
+    }
+
+    #[tokio::test]
+    async fn duplicate_entry_same_candle_is_skipped() {
+        let pool = test_pool().await;
+        let mut exec = PaperExecutor::new_for_model(pool.clone(), 0.0015, "m1", "XLF", "FAZ", None);
+
+        // First entry at candle ts=1000.
+        let fills1 = exec.set_target_position(Position::Long, 58.0, 1000).await.unwrap();
+        assert_eq!(fills1.len(), 1);
+
+        // Restart scenario: fresh executor re-enters the same candle
+        // (signal re-fires after boot). Must NOT insert a second lot.
+        let mut exec2 = PaperExecutor::new_for_model(pool.clone(), 0.0015, "m1", "XLF", "FAZ", None);
+        exec2.current_position = Position::Flat;
+        let fills2 = exec2.set_target_position(Position::Long, 58.1, 1000).await.unwrap();
+        assert!(fills2.is_empty(), "duplicate entry for same candle must be suppressed");
+
+        // Exactly one buy row in equity_trades for XLF @ ts=1000.
+        let n: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM equity_trades WHERE symbol='XLF' AND candle_ts=1000 AND side='buy'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(n.0, 1);
+    }
+
+    #[tokio::test]
+    async fn fills_carry_model_id_attribution() {
+        let pool = test_pool().await;
+        let mut exec = PaperExecutor::new_for_model(pool.clone(), 0.0015, "smh-v1", "SMH", "SOXS", None);
+        exec.set_target_position(Position::Long, 560.0, 100).await.unwrap();
+        exec.set_target_position(Position::Flat, 570.0, 200).await.unwrap();
+
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT model_id FROM equity_trades ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rows.len(), 2); // buy + sell
+        assert!(rows.iter().all(|r| r.0 == "smh-v1"));
     }
 }

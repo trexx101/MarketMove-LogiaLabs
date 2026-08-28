@@ -28,7 +28,7 @@ pub(crate) struct StatusResponse {
 #[derive(Debug, Deserialize)]
 pub(crate) struct StatusQuery {
     #[serde(default)]
-    symbol: Option<String>,
+    pub(crate) symbol: Option<String>,
 }
 
 /// Return the net quantity (buys - sells) for a given symbol from equity_trades.
