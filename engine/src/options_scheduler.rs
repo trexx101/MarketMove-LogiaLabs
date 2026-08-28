@@ -202,75 +202,64 @@ impl OptionsScheduler {
 
         info!(equity, candle_ts = latest_ts, "processing new candle");
 
-        // A3: Gate on strategy status — only PAPER/MICRO/LIVE proceed.
+        // A3: Gate on strategy status — only PAPER/MICRO/LIVE proceed for entry.
         let strat = self.fetch_strategy_status(equity).await?;
-        match strat {
-            Some((_version_id, ref status))
-                if status == "PAPER" || status == "MICRO" || status == "LIVE" =>
-            {
-                info!(equity, %status, "strategy status eligible for entry");
-            }
+        let entry_eligible = match strat {
+            Some((_version_id, ref status)) if status == "PAPER" || status == "MICRO" || status == "LIVE" => true,
             Some((_version_id, ref status)) => {
-                info!(equity, %status, "strategy status gated — skipping entry");
-                let _ = self
-                    .skipped_entry(
-                        equity,
-                        &format!("Strategy status gated: {status}"),
-                        serde_json::json!({ "status": status }),
-                    )
-                    .await;
-                *self.last_processed_ts.write().await = Some(latest_ts);
-                return Ok(());
+                let _ = self.skipped_entry(equity, &format!("Strategy status gated: {status}"), serde_json::json!({ "status": status })).await;
+                false
             }
             None => {
-                info!(equity, "no strategy_version found — skipping entry");
-                let _ = self
-                    .skipped_entry(equity, "No strategy_version", serde_json::json!({}))
-                    .await;
-                *self.last_processed_ts.write().await = Some(latest_ts);
-                return Ok(());
+                let _ = self.skipped_entry(equity, "No strategy_version", serde_json::json!({})).await;
+                false
+            }
+        };
+
+        // Entry pipeline — only when strategy status allows
+        if entry_eligible {
+            // D13: apply queued promotions at the daily candle boundary,
+            // before the entry pipeline runs (mid-exit re-check inside).
+            let pipeline = crate::hyperopt::PromotionPipeline::with_gates(self.config.promotion_gates.clone());
+            let cand_store = crate::hyperopt::CandidateStore::new(self.pool.clone());
+            match crate::hyperopt::promotion::apply_pending_promotions(
+                &self.pool, equity, &self.config.mode, &pipeline, &cand_store,
+            )
+            .await
+            {
+                Ok((applied, skipped)) if applied > 0 || skipped > 0 => {
+                    info!(equity, applied, skipped, "applied pending promotions at candle boundary");
+                }
+                Err(e) => error!(equity, error = %e, "failed to apply pending promotions"),
+                _ => {}
+            }
+
+            // Run entry pipeline
+            *self.state.write().await = OptionsSchedulerState::EntryPipeline;
+
+            match self.run_entry_pipeline(equity, latest_ts).await {
+                Ok(result) => {
+                    info!(
+                        equity,
+                        entry_initiated = result.entry_initiated,
+                        "entry pipeline complete"
+                    );
+                }
+                Err(e) => {
+                    error!(equity, error = %e, "entry pipeline failed");
+                    return Err(e);
+                }
             }
         }
 
-        // D13: apply queued promotions at the daily candle boundary,
-        // before the entry pipeline runs (mid-exit re-check inside).
-        let pipeline = crate::hyperopt::PromotionPipeline::with_gates(self.config.promotion_gates.clone());
-        let cand_store = crate::hyperopt::CandidateStore::new(self.pool.clone());
-        match crate::hyperopt::promotion::apply_pending_promotions(
-            &self.pool, equity, &self.config.mode, &pipeline, &cand_store,
-        )
-        .await
-        {
-            Ok((applied, skipped)) if applied > 0 || skipped > 0 => {
-                info!(equity, applied, skipped, "applied pending promotions at candle boundary");
-            }
-            Err(e) => error!(equity, error = %e, "failed to apply pending promotions"),
-            _ => {}
-        }
-
-        // Run entry pipeline
-        *self.state.write().await = OptionsSchedulerState::EntryPipeline;
-
-        match self.run_entry_pipeline(equity, latest_ts).await {
-            Ok(result) => {
-                info!(
-                    equity,
-                    entry_initiated = result.entry_initiated,
-                    "entry pipeline complete"
-                );
-                *self.last_processed_ts.write().await = Some(latest_ts);
-            }
-            Err(e) => {
-                error!(equity, error = %e, "entry pipeline failed");
-                return Err(e);
-            }
-        }
-
-        // Phase B: Run exit pipeline for any OPEN options positions
-        *self.state.write().await = OptionsSchedulerState::Processing; // keep non-Idle during exits
+        // Phase B: Run exit pipeline for any OPEN options positions.
+        // Runs every candle boundary regardless of strategy status.
+        *self.state.write().await = OptionsSchedulerState::Processing;
         if let Err(e) = self.run_exit_pipeline(equity).await {
             error!(equity, error = %e, "exit pipeline failed");
         }
+
+        *self.last_processed_ts.write().await = Some(latest_ts);
 
         Ok(())
     }
