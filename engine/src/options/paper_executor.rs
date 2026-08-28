@@ -102,7 +102,7 @@ impl OptionsPaperExecutor {
     }
 
     /// Advance the ladder to the next stage
-    fn advance_ladder(
+    pub fn advance_ladder(
         &mut self,
         position_id: i64,
         current_bid: f64,

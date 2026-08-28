@@ -8,8 +8,9 @@
 //!
 //! Runs as a separate tokio task alongside EquityScheduler.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use sqlx::Row;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
@@ -164,6 +165,11 @@ impl OptionsScheduler {
 
     /// Single tick: check for new candles, run entry pipeline
     pub async fn tick(&self) -> Result<()> {
+        // A2: Respect the options_enabled config toggle (0=off, 1=on).
+        if !self.config_store.get_bool("options_enabled").await.unwrap_or(false) {
+            return Ok(());
+        }
+
         *self.state.write().await = OptionsSchedulerState::Processing;
 
         for equity in &self.config.equities {
@@ -195,6 +201,36 @@ impl OptionsScheduler {
         }
 
         info!(equity, candle_ts = latest_ts, "processing new candle");
+
+        // A3: Gate on strategy status — only PAPER/MICRO/LIVE proceed.
+        let strat = self.fetch_strategy_status(equity).await?;
+        match strat {
+            Some((_version_id, ref status))
+                if status == "PAPER" || status == "MICRO" || status == "LIVE" =>
+            {
+                info!(equity, %status, "strategy status eligible for entry");
+            }
+            Some((_version_id, ref status)) => {
+                info!(equity, %status, "strategy status gated — skipping entry");
+                let _ = self
+                    .skipped_entry(
+                        equity,
+                        &format!("Strategy status gated: {status}"),
+                        serde_json::json!({ "status": status }),
+                    )
+                    .await;
+                *self.last_processed_ts.write().await = Some(latest_ts);
+                return Ok(());
+            }
+            None => {
+                info!(equity, "no strategy_version found — skipping entry");
+                let _ = self
+                    .skipped_entry(equity, "No strategy_version", serde_json::json!({}))
+                    .await;
+                *self.last_processed_ts.write().await = Some(latest_ts);
+                return Ok(());
+            }
+        }
 
         // D13: apply queued promotions at the daily candle boundary,
         // before the entry pipeline runs (mid-exit re-check inside).
@@ -228,6 +264,12 @@ impl OptionsScheduler {
                 error!(equity, error = %e, "entry pipeline failed");
                 return Err(e);
             }
+        }
+
+        // Phase B: Run exit pipeline for any OPEN options positions
+        *self.state.write().await = OptionsSchedulerState::Processing; // keep non-Idle during exits
+        if let Err(e) = self.run_exit_pipeline(equity).await {
+            error!(equity, error = %e, "exit pipeline failed");
         }
 
         Ok(())
@@ -320,12 +362,34 @@ impl OptionsScheduler {
 
         // 4. Position sizing
         let account_equity = self.fetch_account_equity().await?;
+        let deployed_premium = self.current_portfolio_premium().await?;
+        let (pred_1d, last_close) = match self.fetch_latest_prediction(equity).await? {
+            Some((p1d, _)) => {
+                // Get last close from equity_candles for ATR context
+                let candles = db::fetch_equity_candles_asc(&self.pool, equity, 20).await?;
+                let close = candles.last().map(|c| c.close).unwrap_or(100.0);
+                (p1d, close)
+            }
+            None => (0.0, 100.0),
+        };
+        let atr_ratio = compute_atr_ratio_light(&self.pool, equity).await;
+        let stop_distance = (pred_1d.abs() * 0.5) + (atr_ratio * last_close * 0.5);
+        info!(
+            equity,
+            account_equity,
+            deployed_premium,
+            stop_distance,
+            pred_1d,
+            atr_ratio,
+            "sizing inputs"
+        );
+
         let sizing_result = position_sizer.size(
             account_equity,
-            0.0, // stop_distance — would come from strategy
+            stop_distance,
             selected_chain.delta,
             selected_chain.ask,
-            0.0, // current_portfolio_premium
+            deployed_premium,
         );
 
         let sizing_decision = match sizing_result {
@@ -406,22 +470,420 @@ impl OptionsScheduler {
         })
     }
 
-    /// Fetch VIX close (mock — would come from DB)
-    async fn fetch_vix(&self) -> Result<f64> {
-        // Mock: return a default VIX value
-        Ok(20.0)
+    /// Run the exit pipeline for all OPEN option positions for an equity.
+    ///
+    /// For each position, evaluates guardrails (DTE override, trailing stop),
+    /// routes signals through the ExitArbiter, and executes paper fills
+    /// via the staged exit ladder.
+    async fn run_exit_pipeline(&self, equity: &str) -> Result<()> {
+        use crate::options::exit_arbiter::{ExitArbiter, ExitSignal, ExitSource};
+        use crate::options::paper_executor::OptionsPaperExecutor;
+        use crate::options::staged_ladder::ExitStage;
+        use crate::options::trailing_stop::{TrailingStop, TrailingStopConfig};
+        use chrono::Utc;
+
+        // Fetch OPEN positions for this equity
+        let positions = sqlx::query(
+            "SELECT id, contract_code, dte_at_entry, entry_underlying_price, \
+             entry_premium, delta_at_entry, created_at, strategy_version_id \
+             FROM option_positions WHERE underlying = ? AND status = 'OPEN'"
+        )
+        .bind(equity)
+        .fetch_all(&self.pool)
+        .await
+        .context("fetch open positions for exit pipeline")?;
+
+        if positions.is_empty() {
+            return Ok(());
+        }
+
+        let now = Utc::now().timestamp();
+        // Get current price for trailing stop evaluation
+        let current_price = db::fetch_equity_candles_asc(&self.pool, equity, 1)
+            .await
+            .ok()
+            .and_then(|c| c.last().map(|r| r.close))
+            .unwrap_or(0.0);
+        let atr_ratio = compute_atr_ratio_light(&self.pool, equity).await;
+        let atr = atr_ratio * current_price.max(1.0);
+
+        // Fetch latest prediction for signal reversal guardrail
+        let pred_1d = self
+            .fetch_latest_prediction(equity)
+            .await?
+            .map(|(p, _)| p)
+            .unwrap_or(0.0);
+
+        let arbiter = ExitArbiter::new();
+        let mut executor = OptionsPaperExecutor::new(self.pool.clone());
+
+        for pos in &positions {
+            let pos_id: String = pos.get("id");
+            let dte_at_entry: i64 = pos.get("dte_at_entry");
+            let entry_price: f64 = pos.get("entry_underlying_price");
+            let delta: f64 = pos.get("delta_at_entry");
+            let created_at: i64 = pos.get("created_at");
+            // We need position_id as i64 for the executor; parse from TEXT id
+            // (use a safe default if the id isn't parseable as i64 — real UUIDs aren't)
+            let pos_id_i64: i64 = pos_id
+                .split('-')
+                .next()
+                .and_then(|s| i64::from_str_radix(s, 16).ok())
+                .unwrap_or(0);
+
+            let mut signals: Vec<ExitSignal> = Vec::new();
+
+            // Guardrail 1: DTE override — close if remaining DTE < dte_min
+            let days_since_entry = ((now - created_at) as f64 / 86400.0).max(0.0);
+            let remaining_dte = dte_at_entry as f64 - days_since_entry;
+            // Default dte_min to 30 (matching config default); ideally from config store
+            let dte_min = self
+                .config_store
+                .get_f64("dte_min")
+                .await
+                .unwrap_or(30.0);
+            if remaining_dte < dte_min {
+                signals.push(ExitSignal {
+                    source: ExitSource::DteOverride,
+                    priority: ExitSource::DteOverride as u8,
+                    reason: format!(
+                        "DTE {remaining_dte:.0} < min {dte_min:.0} for {pos_id}"
+                    ),
+                    timestamp: Utc::now(),
+                });
+            }
+
+            // Guardrail 2: Trailing stop (paper: track from entry to current)
+            let is_call = delta > 0.0;
+            let trail_pct = self
+                .config_store
+                .get_f64("trail_pct")
+                .await
+                .unwrap_or(0.05);
+            let rearm_band = self
+                .config_store
+                .get_f64("rearm_band_atr")
+                .await
+                .unwrap_or(0.5);
+            let ts_config = TrailingStopConfig {
+                trail_pct,
+                rearm_band_atr: rearm_band,
+            };
+            let mut ts = TrailingStop::with_config(entry_price, atr, is_call, ts_config);
+
+            // Update with current price (simulates having tracked HWM over time in paper)
+            // In production this would be persisted per-position.
+            // For paper: use the HWM between entry and current from candle series.
+            let days_since_entry_f = days_since_entry.ceil() as i64;
+            let candles = db::fetch_equity_candles_asc(
+                &self.pool,
+                equity,
+                days_since_entry_f + 1,
+            )
+            .await?;
+            // Walk candles from entry forward to update trailing stop
+            let mut ts_signal = None;
+            for c in &candles {
+                ts_signal = ts.update(c.close, is_call);
+            }
+            let final_signal = ts.update(current_price, is_call);
+            if final_signal.is_some() {
+                ts_signal = final_signal;
+            }
+
+            if let Some(signal) = ts_signal {
+                signals.push(signal);
+            }
+
+            // Guardrail 3: Signal reversal (prediction flips direction)
+            // For calls: entry when pred_1d > 0; exit when pred_1d <= 0
+            // For puts: entry when pred_1d <= 0; exit when pred_1d > 0
+            let signal_reversed = if is_call {
+                pred_1d <= 0.0
+            } else {
+                pred_1d > 0.0
+            };
+            if signal_reversed && pred_1d != 0.0 {
+                signals.push(ExitSignal {
+                    source: ExitSource::SignalReversal,
+                    priority: ExitSource::SignalReversal as u8,
+                    reason: format!(
+                        "Signal reversed: pred_1d={pred_1d:.4}, delta={delta:.2} for {pos_id}"
+                    ),
+                    timestamp: Utc::now(),
+                });
+            }
+
+            // Run through arbiter
+            let winner = arbiter.select_winner(&signals);
+            if let Some(signal) = winner {
+                info!(
+                    equity,
+                    position_id = %pos_id,
+                    source = ?signal.source,
+                    reason = %signal.reason,
+                    "exit signal selected — initiating staged exit"
+                );
+
+                // Persist exit signal
+                let _ = sqlx::query(
+                    "INSERT INTO exit_signals (id, position_id, trigger_source, \
+                     priority, stage, intended_action, persisted_before_send, created_at) \
+                     VALUES (?, ?, ?, ?, 0, 'CLOSE', 1, ?)"
+                )
+                .bind(uuid::Uuid::new_v4().to_string())
+                .bind(&pos_id)
+                .bind(format!("{:?}", signal.source))
+                .bind(signal.priority as i64)
+                .bind(now)
+                .execute(&self.pool)
+                .await;
+
+                // Current bid — use last close as proxy in paper mode
+                let current_bid = current_price * 0.995; // ~0.5% below close
+                let tick_size = if current_price > 100.0 { 0.05 } else { 0.01 };
+
+                // Initiate staged exit
+                match executor.initiate_exit(pos_id_i64, current_bid, tick_size).await {
+                    Ok(_stage) => {
+                        // Paper mode: advance through ladder stages immediately
+                        // (no real market to wait for)
+                        let fill = loop {
+                            let current_stage = executor
+                                .get_ladder(pos_id_i64)
+                                .map(|l| l.current_stage());
+                            if current_stage == Some(ExitStage::Complete) {
+                                break None;
+                            }
+
+                            match executor
+                                .try_fill(pos_id_i64, current_bid, current_price, Utc::now())
+                                .await
+                            {
+                                Ok(Some(fill)) => break Some(fill),
+                                Ok(None) => {
+                                    // Advance to next stage
+                                    executor.advance_ladder(pos_id_i64, current_bid)?;
+                                }
+                                Err(e) => {
+                                    error!(
+                                        equity,
+                                        position_id = %pos_id,
+                                        error = %e,
+                                        "exit fill failed"
+                                    );
+                                    break None;
+                                }
+                            }
+                        };
+
+                        if let Some(fill) = fill {
+                            info!(
+                                equity,
+                                position_id = %pos_id,
+                                fill_price = fill.price,
+                                "exit filled — marking position CLOSED"
+                            );
+                            // Mark position CLOSED
+                            let _ = sqlx::query(
+                                "UPDATE option_positions SET status = 'CLOSED', \
+                                 closed_at = ?, updated_at = ? WHERE id = ?"
+                            )
+                            .bind(now)
+                            .bind(now)
+                            .bind(&pos_id)
+                            .execute(&self.pool)
+                            .await;
+                        } else {
+                            info!(
+                                equity,
+                                position_id = %pos_id,
+                                "exit ladder exhausted without fill"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            equity,
+                            position_id = %pos_id,
+                            error = %e,
+                            "exit initiation failed"
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
-    /// Fetch candidate chains (mock — would come from OpenD)
+    /// Fetch VIX close from equity_candles (^VIX symbol).
+    /// Returns the last close value, or 20.0 as a fallback if no VIX data exists.
+    async fn fetch_vix(&self) -> Result<f64> {
+        let vix = db::fetch_equity_candles_asc(&self.pool, "^VIX", 1).await?;
+        if let Some(c) = vix.last() {
+            info!(vix = c.close, "fetched VIX close from DB");
+            Ok(c.close)
+        } else {
+            warn!("no ^VIX candles in DB, falling back to 20.0");
+            Ok(20.0)
+        }
+    }
+
+    /// Fetch candidate chains for an underlying equity.
+    ///
+    /// Queries `option_tape_meta` for known chain codes, then attempts to
+    /// read the latest Parquet tape for recent bid/ask/delta/oi data.
+    /// Returns empty vec when no tape data exists yet (recorder not wired).
     async fn fetch_candidate_chains(&self, equity: &str) -> Result<Vec<CandidateChain>> {
-        // Mock: return empty list (no real chains available)
+        // Query known chain codes from option_tape_meta
+        let chain_rows = sqlx::query(
+            "SELECT chain_code, last_heartbeat_ts FROM option_tape_meta WHERE underlying = ?1 ORDER BY chain_code",
+        )
+        .bind(equity)
+        .fetch_all(&self.pool)
+        .await
+        .context("fetch_candidate_chains: option_tape_meta query")?;
+
+        if chain_rows.is_empty() {
+            warn!(%equity, "no option chains in option_tape_meta");
+            return Ok(vec![]);
+        }
+
+        let chain_codes: Vec<String> = chain_rows
+            .iter()
+            .map(|r| r.get::<String, _>("chain_code"))
+            .collect();
+
+        info!(%equity, chains = chain_codes.len(), "found known chains in option_tape_meta");
+
+        // TODO(Phase B): read latest Parquet tape rows for these chains,
+        // extract bid/ask/delta/dte/oi, convert to CandidateChain vec.
+        // For now the tape recorder isn't writing Parquet yet.
+        warn!(%equity, "tape Parquet not populated yet — returning empty candidates");
         Ok(vec![])
     }
 
-    /// Fetch account equity (mock — would come from broker)
+    /// Fetch account equity from trading_models for active equities.
+    /// Sums budget_usd for all enabled models, falling back to 100k if none.
     async fn fetch_account_equity(&self) -> Result<f64> {
-        // Mock: return default equity
-        Ok(100_000.0)
+        let rows = sqlx::query(
+            "SELECT budget_usd FROM trading_models WHERE enabled = 1",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("fetch_account_equity: trading_models query")?;
+
+        if rows.is_empty() {
+            warn!("no enabled trading_models, falling back to 100k");
+            return Ok(100_000.0);
+        }
+
+        let total: f64 = rows.iter().map(|r| r.get::<f64, _>("budget_usd")).sum();
+        info!(total, "fetched account equity from trading_models");
+        Ok(total.max(1_000.0))
+    }
+
+    /// Query the highest-status `strategy_versions` row for this equity.
+    /// Returns (strategy_version_id, status) or None if no strategy exists.
+    /// Used to gate entry on PAPER/MICRO/LIVE status.
+    async fn fetch_strategy_status(&self, equity: &str) -> Result<Option<(String, String)>> {
+        let row = sqlx::query(
+            "SELECT id, status FROM strategy_versions \
+             WHERE equity = ?1 \
+             ORDER BY CASE status \
+               WHEN 'LIVE' THEN 4 \
+               WHEN 'MICRO' THEN 3 \
+               WHEN 'PAPER' THEN 2 \
+               WHEN 'CANDIDATE' THEN 1 \
+               ELSE 0 END DESC \
+             LIMIT 1",
+        )
+        .bind(equity)
+        .fetch_optional(&self.pool)
+        .await
+        .context("fetch_strategy_status")?;
+
+        match row {
+            Some(r) => {
+                let id: String = r.get("id");
+                let status: String = r.get("status");
+                Ok(Some((id, status)))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Current portfolio premium deployed in options: sum of entry_premium * qty
+    /// for all OPEN positions.
+    async fn current_portfolio_premium(&self) -> Result<f64> {
+        let row = sqlx::query(
+            "SELECT COALESCE(SUM(entry_premium * qty), 0.0) AS deployed \
+             FROM option_positions WHERE status = 'OPEN'",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .context("current_portfolio_premium")?;
+
+        let deployed: f64 = row.get("deployed");
+        Ok(deployed)
+    }
+
+    /// Get the latest prediction for an equity to derive stop_distance.
+    async fn fetch_latest_prediction(&self, equity: &str) -> Result<Option<(f64, f64)>> {
+        let row = sqlx::query(
+            "SELECT pred_1d, pred_5d FROM equity_predictions \
+             WHERE symbol = ?1 ORDER BY candle_ts DESC LIMIT 1",
+        )
+        .bind(equity)
+        .fetch_optional(&self.pool)
+        .await
+        .context("fetch_latest_prediction")?;
+
+        match row {
+            Some(r) => {
+                let pred_1d: f64 = r.get("pred_1d");
+                let pred_5d: f64 = r.get("pred_5d");
+                Ok(Some((pred_1d, pred_5d)))
+            }
+            None => {
+                warn!(%equity, "no equity_predictions found");
+                Ok(None)
+            }
+        }
+    }
+}
+
+/// Lightweight ATR ratio: fetch 20 candles and compute ATR/p(last_close).
+/// Returns 0.005 as floor when data is insufficient.
+async fn compute_atr_ratio_light(pool: &DbPool, equity: &str) -> f64 {
+    let candles = match db::fetch_equity_candles_asc(pool, equity, 20).await {
+        Ok(c) if c.len() >= 15 => c,
+        _ => return 0.005,
+    };
+    let n = candles.len();
+    let mut tr = Vec::with_capacity(n);
+    tr.push(0.0);
+    for i in 1..n {
+        let high = candles[i].high;
+        let low = candles[i].low;
+        let prev_close = candles[i - 1].close;
+        let h_l = high - low;
+        let h_c = (high - prev_close).abs();
+        let l_c = (low - prev_close).abs();
+        tr.push(h_l.max(h_c).max(l_c));
+    }
+    let period = 14.0_f64;
+    let warmup: f64 = tr[1..=14].iter().sum::<f64>() / period;
+    let mut atr = warmup;
+    for i in 15..n {
+        atr = (atr * (period - 1.0) + tr[i]) / period;
+    }
+    let last_close = candles.last().map(|c| c.close).unwrap_or(1.0).max(1e-6);
+    if atr <= 0.0 || last_close <= 0.0 {
+        0.005
+    } else {
+        atr / last_close
     }
 }
 
@@ -449,13 +911,14 @@ mod tests {
             r#"
             CREATE TABLE IF NOT EXISTS equity_candles (
                 symbol TEXT NOT NULL,
-                timestamp INTEGER NOT NULL,
+                ts INTEGER NOT NULL,
                 open REAL NOT NULL,
                 high REAL NOT NULL,
                 low REAL NOT NULL,
                 close REAL NOT NULL,
-                volume REAL NOT NULL,
-                PRIMARY KEY (symbol, timestamp)
+                volume INTEGER NOT NULL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT 'yahoo',
+                PRIMARY KEY (symbol, ts)
             )
             "#,
         )
@@ -472,6 +935,141 @@ mod tests {
                 payload_json TEXT NOT NULL DEFAULT '{}', equity TEXT
             )
             "#,
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Tables needed by the real data sources (A1)
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS option_tape_meta (\
+             id TEXT PRIMARY KEY, underlying TEXT NOT NULL, chain_code TEXT NOT NULL,\
+             quota_accounting_json TEXT NOT NULL DEFAULT '{}',\
+             created_at INTEGER NOT NULL, last_heartbeat_ts INTEGER\
+             )"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Tables needed for exit pipeline (Phase B)
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS option_fills (\
+             id INTEGER PRIMARY KEY AUTOINCREMENT,\
+             position_id INTEGER NOT NULL,\
+             stage TEXT NOT NULL,\
+             price REAL NOT NULL,\
+             quantity REAL NOT NULL,\
+             timestamp INTEGER NOT NULL\
+             )"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS exit_signals (\
+             id TEXT PRIMARY KEY,\
+             position_id TEXT NOT NULL,\
+             trigger_source TEXT NOT NULL,\
+             priority INTEGER NOT NULL,\
+             stage INTEGER NOT NULL,\
+             intended_action TEXT NOT NULL,\
+             persisted_before_send INTEGER NOT NULL DEFAULT 0,\
+             created_at INTEGER NOT NULL\
+             )"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS option_positions (\
+             id TEXT PRIMARY KEY, underlying TEXT NOT NULL,\
+             contract_code TEXT NOT NULL, strategy_version_id TEXT NOT NULL,\
+             entry_underlying_price REAL NOT NULL, entry_premium REAL NOT NULL DEFAULT 0.0,\
+             entry_spread REAL NOT NULL, entry_slippage_budget REAL NOT NULL,\
+             qty INTEGER NOT NULL, qty_filled_residual INTEGER NOT NULL DEFAULT 0,\
+             status TEXT NOT NULL DEFAULT 'OPEN', dte_at_entry INTEGER NOT NULL,\
+             delta_at_entry REAL NOT NULL, realized_pnl REAL,\
+             closed_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL\
+             )"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS equity_predictions (\
+             symbol TEXT NOT NULL,\
+             candle_ts INTEGER NOT NULL,\
+             pred_1d REAL, pred_5d REAL, pred_21d REAL,\
+             model_id TEXT NOT NULL,\
+             PRIMARY KEY (symbol, model_id, candle_ts)\
+             )"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS options_config_kv (\
+             key TEXT PRIMARY KEY,\
+             value TEXT NOT NULL\
+             )"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS trading_models (\
+             model_id TEXT PRIMARY KEY, primary_symbol TEXT NOT NULL,\
+             inverse_symbol TEXT NOT NULL, model_path TEXT NOT NULL,\
+             norm_stats_path TEXT NOT NULL, budget_usd REAL NOT NULL DEFAULT 5000.0,\
+             deploy_pct REAL NOT NULL DEFAULT 0.25, enabled INTEGER NOT NULL DEFAULT 1\
+             )"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS strategy_versions (\
+             id TEXT PRIMARY KEY, equity TEXT NOT NULL DEFAULT 'QQQ',\
+             family TEXT NOT NULL, params_json TEXT NOT NULL,\
+             status TEXT NOT NULL DEFAULT 'CANDIDATE',\
+             promotion_metadata_json TEXT NOT NULL DEFAULT '{}',\
+             created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL\
+             )"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS equity_predictions (\
+             id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT NOT NULL,\
+             candle_ts INTEGER NOT NULL, pred_1d REAL NOT NULL, pred_5d REAL NOT NULL,\
+             pred_21d REAL NOT NULL, regime TEXT NOT NULL,\
+             features_json TEXT NOT NULL, created_at INTEGER NOT NULL, source TEXT NOT NULL\
+             )"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS option_positions (\
+             id TEXT PRIMARY KEY, underlying TEXT NOT NULL, contract_code TEXT NOT NULL,\
+             strategy_version_id TEXT NOT NULL, entry_underlying_price REAL NOT NULL,\
+             entry_premium REAL NOT NULL, entry_spread REAL NOT NULL,\
+             entry_slippage_budget REAL NOT NULL, qty INTEGER NOT NULL,\
+             qty_filled_residual INTEGER NOT NULL, status TEXT NOT NULL,\
+             dte_at_entry INTEGER NOT NULL, delta_at_entry REAL NOT NULL,\
+             realized_pnl REAL, closed_at INTEGER, created_at INTEGER NOT NULL,\
+             updated_at INTEGER NOT NULL\
+             )"
         )
         .execute(&pool)
         .await
@@ -560,5 +1158,71 @@ mod tests {
         let result = scheduler.run_entry_pipeline("QQQ", 0).await.unwrap();
         assert!(!result.entry_initiated);
         assert!(result.reason.unwrap().contains("No candidate chains"));
+    }
+
+    #[tokio::test]
+    async fn test_exit_pipeline_dte_override() {
+        // Create an OPEN position that is past its DTE window
+        let pool = test_pool().await;
+        let now = Utc::now().timestamp();
+        let old_ts = now - 40 * 86400; // 40 days ago — DTE 30 would be expired
+
+        // Seed the position
+        sqlx::query(
+            "INSERT INTO option_positions (id, underlying, contract_code, strategy_version_id, \
+             entry_underlying_price, entry_premium, entry_spread, entry_slippage_budget, \
+             qty, qty_filled_residual, status, dte_at_entry, delta_at_entry, \
+             created_at, updated_at) \
+             VALUES ('test-pos-1', 'QQQ', 'QQQ250117C00380000', 'sv-test', \
+             400.0, 5.0, 0.5, 0.05, 1, 0, 'OPEN', 30, 0.45, ?, ?)"
+        )
+        .bind(old_ts)
+        .bind(old_ts)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Seed candles for QQQ (needed for current_price)
+        for i in 0..5 {
+            sqlx::query(
+                "INSERT INTO equity_candles (symbol, ts, open, high, low, close, volume, source) \
+                 VALUES ('QQQ', ?, 400.0, 405.0, 395.0, 401.0, 1000000, 'yahoo')"
+            )
+            .bind(old_ts + i * 86400)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let config = OptionsSchedulerConfig {
+            equities: vec!["QQQ".to_string()],
+            ..Default::default()
+        };
+        let scheduler = OptionsScheduler::new(pool.clone(), config);
+
+        // Run exit pipeline — DTE override should fire (30 DTE - 40 days = -10 remaining)
+        scheduler.run_exit_pipeline("QQQ").await.unwrap();
+
+        // Verify position was closed
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM option_positions WHERE id = 'test-pos-1'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "CLOSED", "position should be CLOSED by DTE override");
+    }
+
+    #[tokio::test]
+    async fn test_exit_pipeline_no_open_positions() {
+        let pool = test_pool().await;
+        let config = OptionsSchedulerConfig {
+            equities: vec!["QQQ".to_string()],
+            ..Default::default()
+        };
+        let scheduler = OptionsScheduler::new(pool, config);
+
+        // Should succeed with no open positions
+        scheduler.run_exit_pipeline("QQQ").await.unwrap();
     }
 }

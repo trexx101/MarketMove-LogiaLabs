@@ -288,6 +288,12 @@ pub fn registry() -> Vec<ConfigSpec> {
             label: "Exit Stage 3 timer (s)",
             description: "Rail: seconds to hold the Stage 3 exit order (BID − slippage) before retrying.",
         },
+        ConfigSpec {
+            key: "options_enabled", tier: ConfigTier::Strategy, kind: ConfigKind::I64,
+            default: 0.0, min: 0.0, max: 1.0,
+            label: "Options engine enabled",
+            description: "Enable/disable the options scheduler. 0=off, 1=on. Default off.",
+        },
     ]
 }
 
@@ -350,6 +356,11 @@ impl OptionsConfigStore {
     /// Read an integer value (DB override or registry default).
     pub async fn get_i64(&self, key: &str) -> Result<i64> {
         Ok(self.get_f64(key).await?.round() as i64)
+    }
+
+    /// Read a boolean value as 0.0/1.0 I64.
+    pub async fn get_bool(&self, key: &str) -> Result<bool> {
+        Ok(self.get_f64(key).await? != 0.0)
     }
 
     /// Validate and write a value. Rejects unknown keys, wrong kinds, and

@@ -89,9 +89,12 @@ async fn main() {
         match totp::otpauth_url(&totp_secret, totp::ISSUER, totp::ACCOUNT_LABEL) {
             Ok(url) => {
                 warn!(
-                    "TOTP_SECRET was empty — generated a fresh secret.\n\
-                     Scan this otpauth URL with your authenticator app, then\n\
-                     persist TOTP_SECRET={} in your env before next restart:\n  {}",
+                    "TOTP_SECRET was empty — generated a fresh secret.
+\
+                     Scan this otpauth URL with your authenticator app, then
+\
+                     persist TOTP_SECRET={} in your env before next restart:
+  {}",
                     totp_secret, url
                 );
             }
@@ -469,6 +472,40 @@ async fn main() {
                 }
             }
         });
+    }
+
+    // Phase 0a: Options Momentum Engine scheduler.
+    // Self-gates on `options_enabled` config key (defaults to 0/off).
+    // Process-equity also gates on strategy_status being PAPER/MICRO/LIVE.
+    {
+        let opts_pool = pool.clone();
+        let opts_mode = cfg.options.mode.clone();
+        let opts_equities: Vec<String> = cfg
+            .options
+            .underlyings
+            .split(',')
+            .map(|s| s.trim().strip_prefix("US.").unwrap_or(s.trim()).to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let opts_scheduler_cfg = crate::options_scheduler::OptionsSchedulerConfig {
+            equities: opts_equities,
+            poll_interval_secs: 300,
+            macro_gate_config: crate::options::macro_gate::MacroGateConfig::default(),
+            chain_selector_config: crate::options::chain_selector::ChainSelectorConfig::default(),
+            sizing_config: crate::options::sizing::SizingConfig::default(),
+            mode: opts_mode,
+            promotion_gates: cfg.promotion_gates.clone(),
+        };
+        let opts_scheduler = crate::options_scheduler::OptionsScheduler::new(
+            opts_pool,
+            opts_scheduler_cfg,
+        );
+        tokio::spawn(async move {
+            if let Err(e) = opts_scheduler.run().await {
+                tracing::error!(error = %e, "options scheduler fatal error");
+            }
+        });
+        info!(equities = ?cfg.options.underlyings, mode = %cfg.options.mode, "options scheduler spawned");
     }
 
     // Build and spawn the Axum telemetry server. We pass an updated Config
