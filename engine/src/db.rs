@@ -1435,7 +1435,7 @@ pub async fn touch_tape_heartbeat(
     sqlx::query(
         "INSERT INTO option_tape_meta (id, underlying, chain_code, quota_accounting_json, created_at, last_heartbeat_ts)
          VALUES (?1, ?2, ?3, ?4, ?5, ?5)
-         ON CONFLICT(id) DO UPDATE SET last_heartbeat_ts = ?5",
+         ON CONFLICT(id) DO UPDATE SET chain_code = ?3, quota_accounting_json = ?4, last_heartbeat_ts = ?5",
     )
     .bind(id)
     .bind(underlying)

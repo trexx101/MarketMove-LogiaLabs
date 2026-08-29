@@ -725,11 +725,19 @@ impl OptionsScheduler {
     /// read the latest Parquet tape for recent bid/ask/delta/oi data.
     /// Returns empty vec when no tape data exists yet (recorder not wired).
     async fn fetch_candidate_chains(&self, equity: &str) -> Result<Vec<CandidateChain>> {
-        // Query known chain codes from option_tape_meta
+        // Query known chain codes from option_tape_meta.
+        // Tape recorder stores underlying as "US.QQQ", but the scheduler
+        // receives stripped equity "QQQ" — try both forms.
+        let us_equity = if equity.starts_with("US.") {
+            equity.to_string()
+        } else {
+            format!("US.{}", equity)
+        };
         let chain_rows = sqlx::query(
-            "SELECT chain_code, last_heartbeat_ts FROM option_tape_meta WHERE underlying = ?1 ORDER BY chain_code",
+            "SELECT chain_code, last_heartbeat_ts FROM option_tape_meta WHERE underlying = ?1 OR underlying = ?2 ORDER BY chain_code",
         )
         .bind(equity)
+        .bind(&us_equity)
         .fetch_all(&self.pool)
         .await
         .context("fetch_candidate_chains: option_tape_meta query")?;
