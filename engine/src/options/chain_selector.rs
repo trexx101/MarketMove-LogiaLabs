@@ -83,12 +83,12 @@ pub struct CandidateChain {
 
 impl CandidateChain {
     /// Build the full contract identifier, mirroring Moomoo's contract-code
-    /// format: underlying + expiry + C/P + strike zero-padded to 8 digits
-    /// (e.g. `US.QQQ260919C00530000`). This matches what the tape recorder
+    /// format: underlying + expiry + C/P + strike × 1000 (variable-width,
+    /// e.g. `US.QQQ260919C530000`). This matches what the tape recorder
     /// stores in its `contract_code` field, so an open position is traceable
     /// back to the tape row.
     pub fn contract_code(&self) -> String {
-        format!("{}{}{}{:08.0}", self.symbol, self.expiry, self.option_type, self.strike * 100.0)
+        format!("{}{}{}{:.0}", self.symbol, self.expiry, self.option_type, self.strike * 1000.0)
     }
 }
 

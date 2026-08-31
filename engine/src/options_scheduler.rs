@@ -489,9 +489,9 @@ impl OptionsScheduler {
         };
 
         let contract_code = format!(
-            "{}{}{}{:08.0}",
+            "{}{}{}{:.0}",
             us_equity, selected_chain.expiry, selected_chain.option_type,
-            selected_chain.strike * 100.0
+            selected_chain.strike * 1000.0
         );
 
         let executor = OptionsPaperExecutor::new(self.pool.clone());
@@ -992,7 +992,7 @@ fn batch_to_tape_rows(batch: &RecordBatch) -> Result<Vec<TapeRow>> {
     Ok(rows)
 }
 
-/// Parse a contract_code like `US.QQQ260919C00530000` and build a
+/// Parse a contract_code like `US.QQQ260919C530000` and build a
 /// CandidateChain, computing DTE and is_monthly from the embedded expiry.
 ///
 /// Returns `(underlying, CandidateChain)` — the underlying is split out
@@ -1025,7 +1025,7 @@ fn tape_row_to_candidate(row: &TapeRow, today: NaiveDate) -> Result<CandidateCha
     })
 }
 
-/// Parse a contract code like `US.QQQ260919C00530000` into its components.
+/// Parse a contract code like `US.QQQ260919C530000` into its components.
 ///
 /// Returns `(expiry_YYMMDD, option_type, strike)`.
 /// Scans from the end: the first `C` or `P` marks the split point.
@@ -1592,7 +1592,7 @@ mod tests {
             .unwrap();
         assert_eq!(row.0, position_id);
         assert_eq!(row.1, "US.QQQ");
-        assert_eq!(row.2, "US.QQQ260930C00062500");
+        assert_eq!(row.2, "US.QQQ260930C625000");
         assert_eq!(row.3, "sv-test");
         assert_eq!(row.4, 620.0);
         assert_eq!(row.5, 8.5);
