@@ -323,7 +323,8 @@ CREATE TABLE IF NOT EXISTS option_fills (
     stage         TEXT    NOT NULL,
     price         REAL    NOT NULL,
     quantity      REAL    NOT NULL,
-    timestamp     INTEGER NOT NULL
+    timestamp     INTEGER NOT NULL,
+    strategy_version_id TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS option_fills_position_idx
     ON option_fills (position_id, timestamp);
@@ -423,6 +424,7 @@ pub async fn open(database_url: &str) -> Result<DbPool> {
     migrate_option_tape_meta(&pool).await?;
     migrate_engine_events(&pool).await?;
     migrate_trading_models_deploy_pct(&pool).await?;
+    migrate_option_fills(&pool).await?;
 
     info!("database ready at {database_url}");
     Ok(pool)
@@ -563,7 +565,8 @@ pub async fn migrate_option_positions(pool: &DbPool) -> Result<()> {
                 stage         TEXT    NOT NULL,
                 price         REAL    NOT NULL,
                 quantity      REAL    NOT NULL,
-                timestamp     INTEGER NOT NULL
+                timestamp     INTEGER NOT NULL,
+                strategy_version_id TEXT NOT NULL DEFAULT ''
             )"#,
         ),
         (
@@ -638,6 +641,27 @@ pub async fn migrate_engine_events(pool: &DbPool) -> Result<()> {
             .await
             .context("adding engine_events.equity")?;
         info!("migrated engine_events: added column equity");
+    }
+    Ok(())
+}
+
+/// Migrate `option_fills`: add `strategy_version_id` column for trade
+/// attribution (E1). Without it, the promotion gate cannot link fills
+/// to a strategy.
+pub async fn migrate_option_fills(pool: &DbPool) -> Result<()> {
+    let rows = sqlx::query("PRAGMA table_info(option_fills)")
+        .fetch_all(pool)
+        .await
+        .context("PRAGMA table_info(option_fills)")?;
+    let existing: Vec<String> = rows.iter().map(|r| r.get::<String, _>(1)).collect();
+    if !existing.iter().any(|n| n == "strategy_version_id") {
+        sqlx::query(
+            "ALTER TABLE option_fills ADD COLUMN strategy_version_id TEXT NOT NULL DEFAULT ''"
+        )
+        .execute(pool)
+        .await
+        .context("adding option_fills.strategy_version_id")?;
+        info!("migrated option_fills: added column strategy_version_id");
     }
     Ok(())
 }

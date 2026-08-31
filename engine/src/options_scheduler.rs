@@ -1293,7 +1293,8 @@ mod tests {
                      stage TEXT NOT NULL,\
                      price REAL NOT NULL,\
                      quantity REAL NOT NULL,\
-                     timestamp INTEGER NOT NULL\
+                     timestamp INTEGER NOT NULL,\
+                     strategy_version_id TEXT NOT NULL DEFAULT ''\
                      )"
         )
         .execute(&pool)

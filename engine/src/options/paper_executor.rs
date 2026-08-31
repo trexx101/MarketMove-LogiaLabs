@@ -158,14 +158,15 @@ impl OptionsPaperExecutor {
         sqlx::query(
             r#"
             INSERT INTO option_fills (
-                position_id, stage, price, quantity, timestamp
-            ) VALUES (?, 'ENTRY', ?, ?, ?)
+                position_id, stage, price, quantity, timestamp, strategy_version_id
+            ) VALUES (?, 'ENTRY', ?, ?, ?, ?)
             "#,
         )
         .bind(&position_id)
         .bind(p.ask)
         .bind(p.contracts as f64)
         .bind(now)
+        .bind(&p.strategy_version_id)
         .execute(&self.pool)
         .await
         .context("initiate_entry: option_fills insert")?;
@@ -263,12 +264,22 @@ impl OptionsPaperExecutor {
         // Fill at the limit price (or observed bid if better)
         let fill_price = observed_bid.min(limit_price);
 
+        // Look up strategy_version_id from the position for attribution
+        let sv_id: String = sqlx::query_scalar(
+            "SELECT strategy_version_id FROM option_positions WHERE id = ?"
+        )
+        .bind(position_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .unwrap_or_default();
+
         let fill = FillResult {
             position_id: position_id.to_string(),
             stage,
             price: fill_price,
             quantity: 1.0, // TODO: track actual position size
             timestamp,
+            strategy_version_id: sv_id,
         };
 
         // Record the fill
@@ -315,8 +326,8 @@ impl OptionsPaperExecutor {
         sqlx::query(
             r#"
             INSERT INTO option_fills (
-                position_id, stage, price, quantity, timestamp
-            ) VALUES (?, ?, ?, ?, ?)
+                position_id, stage, price, quantity, timestamp, strategy_version_id
+            ) VALUES (?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&fill.position_id)
@@ -324,6 +335,7 @@ impl OptionsPaperExecutor {
         .bind(fill.price)
         .bind(fill.quantity)
         .bind(fill.timestamp.timestamp())
+        .bind(&fill.strategy_version_id)
         .execute(&self.pool)
         .await?;
 
@@ -356,6 +368,7 @@ pub struct FillResult {
     pub price: f64,
     pub quantity: f64,
     pub timestamp: DateTime<Utc>,
+    pub strategy_version_id: String,
 }
 
 #[cfg(test)]
@@ -408,7 +421,8 @@ mod tests {
                 stage TEXT NOT NULL,
                 price REAL NOT NULL,
                 quantity REAL NOT NULL,
-                timestamp INTEGER NOT NULL
+                timestamp INTEGER NOT NULL,
+                strategy_version_id TEXT NOT NULL DEFAULT ''
             )
             "#,
         )
