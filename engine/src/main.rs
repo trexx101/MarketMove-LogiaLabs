@@ -495,6 +495,7 @@ async fn main() {
             sizing_config: crate::options::sizing::SizingConfig::default(),
             mode: opts_mode,
             promotion_gates: cfg.promotion_gates.clone(),
+            ..Default::default()
         };
         let opts_scheduler = crate::options_scheduler::OptionsScheduler::new(
             opts_pool,

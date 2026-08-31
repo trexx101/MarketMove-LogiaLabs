@@ -9,19 +9,24 @@
 //! Runs as a separate tokio task alongside EquityScheduler.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use sqlx::Row;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 use crate::db::{self, DbPool};
-use crate::options::chain_selector::{CandidateChain, ChainSelector, ChainSelectorConfig};
+use crate::options::chain_selector::{CandidateChain, ChainSelector, ChainSelectorConfig, SelectedChain};
 use crate::options::config_store::OptionsConfigStore;
-use crate::options::entry_executor::EntryExecutor;
-use crate::options::entry_integration::EntryPipeline;
 use crate::options::macro_gate::{MacroGate, MacroGateConfig};
+use crate::options::paper_executor::{EntryEntryParams, EntryOutcome, OptionsPaperExecutor};
 use crate::options::sizing::{PositionSizer, SizingConfig};
+use crate::options_recorder::TapeRow;
+use arrow::array::{Float64Array, Int64Array, StringArray, TimestampMillisecondArray};
+use arrow::record_batch::RecordBatch;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 /// Build runtime configs from the DB-backed options config store.
 /// Values missing from the store fall back to the boot-time scheduler config,
@@ -82,6 +87,9 @@ pub struct OptionsSchedulerConfig {
     pub mode: String,
     /// Hyperopt promotion gates (min-days observation clocks).
     pub promotion_gates: crate::config::PromotionGatesConfig,
+    /// Directory where the options tape recorder writes Parquet files
+    /// (default: `./data/options_tape`, same as OPT_TAPE_DIR env var).
+    pub tape_dir: String,
 }
 
 impl Default for OptionsSchedulerConfig {
@@ -94,6 +102,7 @@ impl Default for OptionsSchedulerConfig {
             sizing_config: SizingConfig::default(),
             mode: "paper".to_string(),
             promotion_gates: crate::config::PromotionGatesConfig::default(),
+            tape_dir: "./data/options_tape".to_string(),
         }
     }
 }
@@ -289,6 +298,7 @@ impl OptionsScheduler {
         EntryPipelineResult {
             entry_initiated: false,
             reason: Some(reason.to_string()),
+            position_opened: None,
         }
     }
 
@@ -395,68 +405,112 @@ impl OptionsScheduler {
             }
         };
 
-        // 5. Entry executor (2-stage ladder)
-        let mut executor = EntryExecutor::new(
-            0, // position_id — would be assigned after fill
-            selected_chain.ask,
-            0.01, // slippage_budget
-        );
+        // 5. Paper entry (B2): create the real position + fill + event.
+        //    The 2-stage EntryExecutor ladder is a no-op in paper mode
+        //    (plan risk #3) — the order fills immediately at the ask.
+        let us_equity = if equity.starts_with("US.") {
+            equity.to_string()
+        } else {
+            format!("US.{}", equity)
+        };
 
-        let now = Utc::now();
-        if executor.should_advance(now) {
-            executor.advance();
-        }
-
-        // In production: submit order to broker, wait for fill, advance to stage 2
-        // For now: mark as filled (mock)
-        executor.mark_filled();
-
-        info!(
-            equity,
-            contracts = sizing_decision.contracts,
-            premium = selected_chain.ask * sizing_decision.contracts as f64 * 100.0,
-            "entry initiated"
-        );
-
-        // Publish ENTRY_INITIATED event for the Events tab (trade category)
-        let payload = serde_json::json!({
-            "candle_ts": candle_ts,
-            "symbol": selected_chain.symbol,
-            "expiry": selected_chain.expiry,
-            "strike": selected_chain.strike,
-            "option_type": selected_chain.option_type,
-            "delta": selected_chain.delta,
-            "dte": selected_chain.dte,
-            "ask": selected_chain.ask,
-            "contracts": sizing_decision.contracts,
-            "total_premium": sizing_decision.total_premium,
-        });
-        if let Err(e) = db::insert_event(
-            &self.pool,
-            "trade",
-            "info",
-            &self.config.mode,
-            "options::entry",
-            &format!(
-                "ENTRY_INITIATED {equity}: {} {} {} @ {:.2} x{}",
-                selected_chain.symbol,
-                selected_chain.expiry,
-                selected_chain.option_type,
-                selected_chain.ask,
-                sizing_decision.contracts
-            ),
-            &payload.to_string(),
-            Some(equity),
-        )
-        .await
+        match self
+            .open_paper_entry(equity, &us_equity, &selected_chain, sizing_decision.contracts, last_close)
+            .await?
         {
-            error!(equity, error = %e, "failed to record ENTRY_INITIATED event");
+            EntryOutcome::Opened {
+                position_id,
+                fill_price,
+            } => {
+                info!(
+                    equity,
+                    %position_id,
+                    contracts = sizing_decision.contracts,
+                    premium = fill_price * sizing_decision.contracts as f64 * 100.0,
+                    "entry filled (paper)"
+                );
+                return Ok(EntryPipelineResult {
+                    entry_initiated: true,
+                    reason: None,
+                    position_opened: Some(position_id),
+                });
+            }
+            EntryOutcome::Skipped(reason) => {
+                // No broker error — the guard itself denied (duplicate
+                // open position for this underlying).
+                let detail = match &reason {
+                    crate::options::paper_executor::EntrySkipReason::DuplicateOpenPosition {
+                        existing_position_id,
+                    } => {
+                        info!(equity, %existing_position_id, "entry skipped: duplicate open position");
+                        serde_json::json!({ "existing_position_id": existing_position_id })
+                    }
+                };
+                return Ok(self
+                    .skipped_entry(equity, "Entry skipped: duplicate open position", detail)
+                    .await);
+            }
         }
+    }
 
-        Ok(EntryPipelineResult {
-            entry_initiated: true,
-            reason: None,
-        })
+    /// B2: paper entry — the single production path that creates an
+    /// `option_positions` row.
+    ///
+    /// `us_equity` is the underlying as the tape recorder stores it
+    /// (`US.QQQ`) — `initiate_entry` uses it for the one-open-position-per-
+    /// underlying guard, and the exit pipeline must use the same form so
+    /// the WHERE clause matches.
+    ///
+    /// `strategy_version_id` comes from the A3 status gate (the same call
+    /// that decided entry is eligible), so a position is never created
+    /// without attribution.
+    async fn open_paper_entry(
+        &self,
+        equity: &str,
+        us_equity: &str,
+        selected_chain: &SelectedChain,
+        contracts: u32,
+        entry_underlying_price: f64,
+    ) -> Result<EntryOutcome> {
+        // A3: the version that triggered this entry. Re-fetch here — the
+        // gate at tick() is the same query; the status can't change within
+        // one candle.
+        let strategy_version_id = match self.fetch_strategy_status(equity).await? {
+            Some((id, _status)) => id,
+            None => {
+                // Defensive: the gate should have blocked us before sizing.
+                info!(equity, "no strategy_version for entry — skipping (no attribution)");
+                return Ok(EntryOutcome::Skipped(
+                    crate::options::paper_executor::EntrySkipReason::DuplicateOpenPosition {
+                        existing_position_id: String::new(),
+                    },
+                ));
+            }
+        };
+
+        let contract_code = format!(
+            "{}{}{}{:08.0}",
+            us_equity, selected_chain.expiry, selected_chain.option_type,
+            selected_chain.strike * 100.0
+        );
+
+        let executor = OptionsPaperExecutor::new(self.pool.clone());
+        let params = EntryEntryParams {
+            underlying: us_equity.to_string(),
+            contract_code,
+            strategy_version_id,
+            entry_underlying_price,
+            ask: selected_chain.ask,
+            bid: selected_chain.bid,
+            contracts,
+            delta: selected_chain.delta,
+            dte: selected_chain.dte as i64,
+            slippage_budget: 0.01,
+        };
+
+        // `initiate_entry` writes the position, the ENTRY fill, and the
+        // `options::position_opened` event atomically.
+        executor.initiate_entry(&params).await
     }
 
     /// Run the exit pipeline for all OPEN option positions for an equity.
@@ -512,13 +566,6 @@ impl OptionsScheduler {
             let entry_price: f64 = pos.get("entry_underlying_price");
             let delta: f64 = pos.get("delta_at_entry");
             let created_at: i64 = pos.get("created_at");
-            // We need position_id as i64 for the executor; parse from TEXT id
-            // (use a safe default if the id isn't parseable as i64 — real UUIDs aren't)
-            let pos_id_i64: i64 = pos_id
-                .split('-')
-                .next()
-                .and_then(|s| i64::from_str_radix(s, 16).ok())
-                .unwrap_or(0);
 
             let mut signals: Vec<ExitSignal> = Vec::new();
 
@@ -633,26 +680,26 @@ impl OptionsScheduler {
                 let tick_size = if current_price > 100.0 { 0.05 } else { 0.01 };
 
                 // Initiate staged exit
-                match executor.initiate_exit(pos_id_i64, current_bid, tick_size).await {
+                match executor.initiate_exit(&pos_id, current_bid, tick_size).await {
                     Ok(_stage) => {
                         // Paper mode: advance through ladder stages immediately
                         // (no real market to wait for)
                         let fill = loop {
                             let current_stage = executor
-                                .get_ladder(pos_id_i64)
+                                .get_ladder(&pos_id)
                                 .map(|l| l.current_stage());
                             if current_stage == Some(ExitStage::Complete) {
                                 break None;
                             }
 
                             match executor
-                                .try_fill(pos_id_i64, current_bid, current_price, Utc::now())
+                                .try_fill(&pos_id, current_bid, current_price, Utc::now())
                                 .await
                             {
                                 Ok(Some(fill)) => break Some(fill),
                                 Ok(None) => {
                                     // Advance to next stage
-                                    executor.advance_ladder(pos_id_i64, current_bid)?;
+                                    executor.advance_ladder(&pos_id, current_bid)?;
                                 }
                                 Err(e) => {
                                     error!(
@@ -754,13 +801,255 @@ impl OptionsScheduler {
 
         info!(%equity, chains = chain_codes.len(), "found known chains in option_tape_meta");
 
-        // TODO(Phase B): read latest Parquet tape rows for these chains,
-        // extract bid/ask/delta/dte/oi, convert to CandidateChain vec.
-        // For now the tape recorder isn't writing Parquet yet.
-        warn!(%equity, "tape Parquet not populated yet — returning empty candidates");
-        Ok(vec![])
+        // A1.5: read the latest Parquet file for each chain, pick the
+        // newest row per contract_code, and convert to CandidateChain.
+        let mut candidates: Vec<CandidateChain> = Vec::new();
+        let today = Utc::now().date_naive();
+
+        for chain_code in &chain_codes {
+            match read_latest_tape_rows(&self.config.tape_dir, chain_code) {
+                Ok(rows) => {
+                    // Group by contract_code, keep the row with the
+                    // highest timestamp (most recent quote).
+                    let mut latest: std::collections::HashMap<String, &TapeRow> =
+                        std::collections::HashMap::new();
+                    for row in &rows {
+                        let entry = latest.entry(row.contract_code.clone()).or_insert(row);
+                        if row.timestamp_ms > entry.timestamp_ms {
+                            *entry = row;
+                        }
+                    }
+                    for row in latest.values() {
+                        match tape_row_to_candidate(row, today) {
+                            Ok(c) => candidates.push(c),
+                            Err(e) => {
+                                warn!(%equity, chain_code, contract_code = %row.contract_code, error = %e, "skipping unparseable contract");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(%equity, chain_code, error = %e, "failed to read tape Parquet — skipping chain");
+                }
+            }
+        }
+
+        if candidates.is_empty() {
+            warn!(%equity, "no candidates built from tape Parquet");
+        } else {
+            info!(%equity, count = candidates.len(), "built candidates from tape");
+        }
+        Ok(candidates)
+    }
+}
+
+// ── A1.5 Parquet tape reader ──────────────────────────────────────────
+
+/// Read the latest Parquet file for a chain and return all rows.
+///
+/// `chain_code` has the form `US.QQQ260925` (underlying + 6-digit expiry).
+/// Files are under `{tape_dir}/{underlying}/{chain_code}/YYYY-MM-DD.parquet`.
+fn read_latest_tape_rows(tape_dir: &str, chain_code: &str) -> Result<Vec<TapeRow>> {
+    if chain_code.len() < 7 {
+        return Ok(vec![]);
+    }
+    let underlying = &chain_code[..chain_code.len() - 6]; // "US.QQQ"
+    let chain_dir = PathBuf::from(tape_dir).join(underlying).join(chain_code);
+
+    let mut parquet_files: Vec<PathBuf> = Vec::new();
+    match fs::read_dir(&chain_dir) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().map_or(false, |e| e == "parquet") {
+                    // Skip zero-byte files (recorder creates empty files on no-data days)
+                    if entry.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+                        parquet_files.push(path);
+                    }
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(vec![]);
+        }
+        Err(e) => return Err(e.into()),
     }
 
+    if parquet_files.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Sort by filename descending (date-based), take the latest.
+    parquet_files.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+    let latest = &parquet_files[0];
+
+    let file = fs::File::open(latest)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    let reader = builder.build()?;
+
+    let mut rows = Vec::new();
+    for batch in reader {
+        let batch = batch?;
+        rows.extend(batch_to_tape_rows(&batch)?);
+    }
+    Ok(rows)
+}
+
+/// Convert an Arrow RecordBatch into TapeRow structs.
+fn batch_to_tape_rows(batch: &RecordBatch) -> Result<Vec<TapeRow>> {
+    let num_rows = batch.num_rows();
+    let timestamps = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .context("column 0 is not TimestampMillisecondArray")?;
+    let underlyings = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("column 1 is not StringArray")?;
+    let chain_codes = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("column 2 is not StringArray")?;
+    let contract_codes = batch
+        .column(3)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .context("column 3 is not StringArray")?;
+    let bids = batch
+        .column(4)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .context("column 4 is not Float64Array")?;
+    let asks = batch
+        .column(5)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .context("column 5 is not Float64Array")?;
+    let lasts = batch
+        .column(6)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .context("column 6 is not Float64Array")?;
+    let volumes = batch
+        .column(7)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .context("column 7 is not Int64Array")?;
+    let ois = batch
+        .column(8)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .context("column 8 is not Int64Array")?;
+    let ivs = batch
+        .column(9)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .context("column 9 is not Float64Array")?;
+    let deltas = batch
+        .column(10)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .context("column 10 is not Float64Array")?;
+    let gammas = batch
+        .column(11)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .context("column 11 is not Float64Array")?;
+    let thetas = batch
+        .column(12)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .context("column 12 is not Float64Array")?;
+    let ul_prices = batch
+        .column(13)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .context("column 13 is not Float64Array")?;
+
+    let mut rows = Vec::with_capacity(num_rows);
+    for i in 0..num_rows {
+        rows.push(TapeRow {
+            timestamp_ms: timestamps.value(i),
+            underlying: underlyings.value(i).to_string(),
+            chain_code: chain_codes.value(i).to_string(),
+            contract_code: contract_codes.value(i).to_string(),
+            bid: bids.value(i),
+            ask: asks.value(i),
+            last: lasts.value(i),
+            volume: volumes.value(i),
+            open_interest: ois.value(i),
+            implied_volatility: ivs.value(i),
+            delta: deltas.value(i),
+            gamma: gammas.value(i),
+            theta: thetas.value(i),
+            underlying_price: ul_prices.value(i),
+        });
+    }
+    Ok(rows)
+}
+
+/// Parse a contract_code like `US.QQQ260919C00530000` and build a
+/// CandidateChain, computing DTE and is_monthly from the embedded expiry.
+///
+/// Returns `(underlying, CandidateChain)` — the underlying is split out
+/// so the caller can filter by the equity being processed.
+fn tape_row_to_candidate(row: &TapeRow, today: NaiveDate) -> Result<CandidateChain> {
+    let (expiry_ymd, opt_type, strike) = parse_contract_code(&row.contract_code)
+        .with_context(|| format!("unparseable contract_code: {}", row.contract_code))?;
+
+    // expiry_ymd is YYMMDD → NaiveDate
+    let expiry_date = NaiveDate::parse_from_str(&format!("20{}", expiry_ymd), "%Y%m%d")
+        .with_context(|| format!("invalid expiry date: {}", expiry_ymd))?;
+
+    let dte = (expiry_date - today).num_days().max(0) as u32;
+
+    // Monthly expiry: third Friday heuristic — the expiry day is between
+    // 15 and 21 (inclusive).
+    let is_monthly = expiry_date.day() >= 15 && expiry_date.day() <= 21;
+
+    Ok(CandidateChain {
+        symbol: row.underlying.clone(),
+        expiry: expiry_ymd.to_string(),
+        strike,
+        option_type: opt_type.to_string(),
+        delta: row.delta,
+        bid: row.bid,
+        ask: row.ask,
+        open_interest: row.open_interest,
+        dte,
+        is_monthly,
+    })
+}
+
+/// Parse a contract code like `US.QQQ260919C00530000` into its components.
+///
+/// Returns `(expiry_YYMMDD, option_type, strike)`.
+/// Scans from the end: the first `C` or `P` marks the split point.
+/// The strike is encoded as strike × 1000 (Moomoo US option format),
+/// so `720000` → $720.00, `57500` → $57.50.
+fn parse_contract_code(code: &str) -> Option<(&str, &str, f64)> {
+    let bytes = code.as_bytes();
+    for i in (0..bytes.len()).rev() {
+        if bytes[i] == b'C' || bytes[i] == b'P' {
+            let prefix = &code[..i];         // "US.QQQ260919"
+            let opt_type = &code[i..i + 1];  // "C" or "P"
+            let strike_str = &code[i + 1..]; // variable width, e.g. "720000"
+            let strike_raw: f64 = strike_str.parse().ok()?;
+            if prefix.len() < 6 || strike_str.is_empty() {
+                return None;
+            }
+            let expiry = &prefix[prefix.len() - 6..]; // "260919"
+            return Some((expiry, opt_type, strike_raw / 1000.0));
+        }
+    }
+    None
+}
+
+impl OptionsScheduler {
     /// Fetch account equity from trading_models for active equities.
     /// Sums budget_usd for all enabled models, falling back to 100k if none.
     async fn fetch_account_equity(&self) -> Result<f64> {
@@ -889,6 +1178,10 @@ async fn compute_atr_ratio_light(pool: &DbPool, equity: &str) -> f64 {
 pub struct EntryPipelineResult {
     pub entry_initiated: bool,
     pub reason: Option<String>,
+    /// Set when a real paper position was opened (position_id) —
+    /// `entry_initiated` can be true even when a position was skipped
+    /// (e.g. duplicate open position for the same underlying).
+    pub position_opened: Option<String>,
 }
 
 #[cfg(test)]
@@ -950,15 +1243,15 @@ mod tests {
         .unwrap();
 
         // Tables needed for exit pipeline (Phase B)
-        sqlx::query(
-            "CREATE TABLE IF NOT EXISTS option_fills (\
-             id INTEGER PRIMARY KEY AUTOINCREMENT,\
-             position_id INTEGER NOT NULL,\
-             stage TEXT NOT NULL,\
-             price REAL NOT NULL,\
-             quantity REAL NOT NULL,\
-             timestamp INTEGER NOT NULL\
-             )"
+                sqlx::query(
+                    "CREATE TABLE IF NOT EXISTS option_fills (\
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,\
+                     position_id TEXT NOT NULL,\
+                     stage TEXT NOT NULL,\
+                     price REAL NOT NULL,\
+                     quantity REAL NOT NULL,\
+                     timestamp INTEGER NOT NULL\
+                     )"
         )
         .execute(&pool)
         .await
@@ -1221,5 +1514,266 @@ mod tests {
 
         // Should succeed with no open positions
         scheduler.run_exit_pipeline("QQQ").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_open_paper_entry_creates_position_and_fill() {
+        let pool = test_pool().await;
+
+        // Seed a PAPER strategy version (A3 gate passes)
+        let now = Utc::now().timestamp();
+        sqlx::query(
+            "INSERT INTO strategy_versions (id, equity, family, params_json, status, \
+             promotion_metadata_json, created_at, updated_at) \
+             VALUES ('sv-test', 'QQQ', 'momentum', '{}', 'PAPER', '{}', ?, ?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Seed a trading_model (fetch_account_equity needs it)
+        sqlx::query(
+            "INSERT INTO trading_models (model_id, primary_symbol, inverse_symbol, \
+             model_path, norm_stats_path, budget_usd, deploy_pct, enabled) \
+             VALUES ('tm-1', 'QQQ', 'PSQ', '/tmp/model', '/tmp/norm', 5000.0, 0.25, 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let config = OptionsSchedulerConfig {
+            equities: vec!["QQQ".to_string()],
+            ..Default::default()
+        };
+        let scheduler = OptionsScheduler::new(pool.clone(), config);
+
+        let selected_chain = SelectedChain {
+            symbol: "US.QQQ".to_string(),
+            expiry: "260930".to_string(),
+            strike: 625.0,
+            option_type: "C".to_string(),
+            delta: 0.45,
+            bid: 8.25,
+            ask: 8.50,
+            open_interest: 500,
+            dte: 33,
+        };
+
+        let outcome = scheduler
+            .open_paper_entry("QQQ", "US.QQQ", &selected_chain, 2, 620.0)
+            .await
+            .unwrap();
+
+        let (position_id, fill_price) = match outcome {
+            EntryOutcome::Opened {
+                position_id,
+                fill_price,
+            } => (position_id, fill_price),
+            other => panic!("expected Opened, got {:?}", other),
+        };
+        assert_eq!(fill_price, 8.5);
+        assert!(
+            uuid::Uuid::parse_str(&position_id).is_ok(),
+            "position_id must be UUID"
+        );
+
+        // Verify the position row
+        let row: (String, String, String, String, f64, f64, f64, i64, i64, String, i64, f64) =
+            sqlx::query_as(
+                "SELECT id, underlying, contract_code, strategy_version_id, \
+                 entry_underlying_price, entry_premium, entry_spread, qty, qty_filled_residual, \
+                 status, dte_at_entry, delta_at_entry \
+                 FROM option_positions",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(row.0, position_id);
+        assert_eq!(row.1, "US.QQQ");
+        assert_eq!(row.2, "US.QQQ260930C00062500");
+        assert_eq!(row.3, "sv-test");
+        assert_eq!(row.4, 620.0);
+        assert_eq!(row.5, 8.5);
+        assert_eq!(row.6, 0.25);
+        assert_eq!(row.7, 2);
+        assert_eq!(row.8, 2);
+        assert_eq!(row.9, "OPEN");
+        assert_eq!(row.10, 33);
+        assert_eq!(row.11, 0.45);
+
+        // Verify the ENTRY fill row
+        let fill: (String, String, f64, f64) = sqlx::query_as(
+            "SELECT position_id, stage, price, quantity FROM option_fills",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(fill.0, position_id);
+        assert_eq!(fill.1, "ENTRY");
+        assert_eq!(fill.2, 8.5);
+        assert_eq!(fill.3, 2.0);
+    }
+
+    #[test]
+    fn test_parse_contract_code() {
+        // Standard format: strike × 1000 (Moomoo US option)
+        let (expiry, opt_type, strike) =
+            parse_contract_code("US.QQQ260919C530000").unwrap();
+        assert_eq!(expiry, "260919");
+        assert_eq!(opt_type, "C");
+        assert!((strike - 530.0).abs() < 0.001);
+
+        // Put variant
+        let (expiry, opt_type, strike) =
+            parse_contract_code("US.SMH261002P125000").unwrap();
+        assert_eq!(expiry, "261002");
+        assert_eq!(opt_type, "P");
+        assert!((strike - 125.0).abs() < 0.001);
+
+        // Variable-width strike (5 digits for small strikes)
+        let (_expiry, _opt_type, strike) =
+            parse_contract_code("US.XLF260930C57500").unwrap();
+        assert!((strike - 57.50).abs() < 0.01);
+
+        // Invalid: no C/P
+        assert!(parse_contract_code("US.QQQ260919X530000").is_none());
+        assert!(parse_contract_code("").is_none());
+    }
+
+    #[test]
+    fn test_tape_row_to_candidate() {
+        let row = TapeRow {
+            timestamp_ms: 1_700_000_000_000,
+            underlying: "US.QQQ".to_string(),
+            chain_code: "US.QQQ260930".to_string(),
+            contract_code: "US.QQQ260930C625000".to_string(),
+            bid: 8.25,
+            ask: 8.50,
+            last: 8.40,
+            volume: 100,
+            open_interest: 500,
+            implied_volatility: 0.28,
+            delta: 0.45,
+            gamma: 0.003,
+            theta: -0.15,
+            underlying_price: 620.0,
+        };
+
+        // 2026-08-31 (today) → 260930 = 2026-09-30 → DTE = 30
+        let today = NaiveDate::from_ymd_opt(2026, 8, 31).unwrap();
+        let c = tape_row_to_candidate(&row, today).unwrap();
+
+        assert_eq!(c.symbol, "US.QQQ");
+        assert_eq!(c.expiry, "260930");
+        assert!((c.strike - 625.0).abs() < 0.001);
+        assert_eq!(c.option_type, "C");
+        assert!((c.delta - 0.45).abs() < 0.001);
+        assert!((c.bid - 8.25).abs() < 0.001);
+        assert!((c.ask - 8.50).abs() < 0.001);
+        assert_eq!(c.open_interest, 500);
+        assert_eq!(c.dte, 30);
+        // 30th is not a monthly expiry (15-21 range)
+        assert!(!c.is_monthly);
+    }
+
+    #[test]
+    fn test_tape_row_to_candidate_monthly() {
+        let row = TapeRow {
+            timestamp_ms: 1_700_000_000_000,
+            underlying: "US.QQQ".to_string(),
+            chain_code: "US.QQQ260919".to_string(),
+            contract_code: "US.QQQ260919C530000".to_string(),
+            bid: 5.0,
+            ask: 5.10,
+            last: 5.05,
+            volume: 200,
+            open_interest: 1000,
+            implied_volatility: 0.25,
+            delta: 0.42,
+            gamma: 0.004,
+            theta: -0.12,
+            underlying_price: 530.0,
+        };
+
+        // 2026-08-31 → 2026-09-19 = 19 DTE, 19th is monthly
+        let today = NaiveDate::from_ymd_opt(2026, 8, 31).unwrap();
+        let c = tape_row_to_candidate(&row, today).unwrap();
+        assert_eq!(c.dte, 19);
+        assert!(c.is_monthly);
+    }
+
+    #[test]
+    fn test_read_latest_tape_rows_from_synthetic_parquet() {
+        // Write a synthetic Parquet file with the tape schema, then read it back.
+        let tmp = std::env::temp_dir().join(format!("mm_tape_test_{}", std::process::id()));
+        fs::create_dir_all(&tmp).unwrap();
+        let tape_dir = tmp.to_str().unwrap();
+
+        // Create the directory structure: {tape_dir}/US.QQQ/US.QQQ260930/
+        let chain_dir = tmp.join("US.QQQ").join("US.QQQ260930");
+        fs::create_dir_all(&chain_dir).unwrap();
+        let parquet_path = chain_dir.join("2026-08-31.parquet");
+
+        let schema = Arc::new(crate::options_recorder::build_tape_schema());
+        let rows = vec![
+            TapeRow {
+                timestamp_ms: 1_700_000_000_000,
+                underlying: "US.QQQ".to_string(),
+                chain_code: "US.QQQ260930".to_string(),
+                contract_code: "US.QQQ260930C625000".to_string(),
+                bid: 8.25,
+                ask: 8.50,
+                last: 8.40,
+                volume: 100,
+                open_interest: 500,
+                implied_volatility: 0.28,
+                delta: 0.45,
+                gamma: 0.003,
+                theta: -0.15,
+                underlying_price: 620.0,
+            },
+            TapeRow {
+                timestamp_ms: 1_700_000_000_001,
+                underlying: "US.QQQ".to_string(),
+                chain_code: "US.QQQ260930".to_string(),
+                contract_code: "US.QQQ260930P550000".to_string(),
+                bid: 3.10,
+                ask: 3.30,
+                last: 3.20,
+                volume: 80,
+                open_interest: 300,
+                implied_volatility: 0.30,
+                delta: -0.40,
+                gamma: 0.002,
+                theta: -0.10,
+                underlying_price: 620.0,
+            },
+        ];
+
+        let arrays = crate::options_recorder::build_tape_arrays(&rows);
+        let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+
+        let file = fs::File::create(&parquet_path).unwrap();
+        let props = parquet::file::properties::WriterProperties::builder()
+            .set_compression(parquet::basic::Compression::SNAPPY)
+            .build();
+        let mut writer =
+            parquet::arrow::ArrowWriter::try_new(file, schema, Some(props)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+
+        // Read it back
+        let result = read_latest_tape_rows(tape_dir, "US.QQQ260930").unwrap();
+        assert_eq!(result.len(), 2, "should read both rows");
+
+        let call = result.iter().find(|r| r.contract_code.contains("C625000")).unwrap();
+        assert!((call.bid - 8.25).abs() < 0.001);
+        assert!((call.delta - 0.45).abs() < 0.001);
+
+        let put = result.iter().find(|r| r.contract_code.contains("P550000")).unwrap();
+        assert!((put.ask - 3.30).abs() < 0.001);
+        assert!((put.delta - -0.40).abs() < 0.001);
     }
 }
