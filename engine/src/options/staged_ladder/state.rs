@@ -1,6 +1,9 @@
 //! Stateful staged exit ladder
 //!
 //! Wraps the price calculator with state tracking for position exits.
+//! `position_id` is the UUID TEXT primary key of `option_positions`
+//! (not an integer — the schema migration `migrate_option_positions`
+//! rebuilds INTEGER id columns to TEXT).
 
 use chrono::{DateTime, Duration, Utc};
 
@@ -16,7 +19,7 @@ pub enum ExitStage {
 /// Stateful ladder for a single position exit
 #[derive(Debug, Clone)]
 pub struct StagedExitLadder {
-    position_id: i64,
+    position_id: String,
     current_stage: ExitStage,
     stage_start_time: DateTime<Utc>,
     current_bid: f64,
@@ -27,9 +30,9 @@ pub struct StagedExitLadder {
 
 impl StagedExitLadder {
     /// Create a new ladder for a position
-    pub fn new(position_id: i64) -> Self {
+    pub fn new(position_id: impl Into<String>) -> Self {
         Self {
-            position_id,
+            position_id: position_id.into(),
             current_stage: ExitStage::Stage1,
             stage_start_time: Utc::now(),
             current_bid: 0.0,
@@ -48,8 +51,8 @@ impl StagedExitLadder {
     }
 
     /// Get the position ID
-    pub fn position_id(&self) -> i64 {
-        self.position_id
+    pub fn position_id(&self) -> &str {
+        &self.position_id
     }
 
     /// Get the current stage
@@ -104,7 +107,7 @@ mod tests {
 
     #[test]
     fn stage1_price_calculation() {
-        let mut ladder = StagedExitLadder::new(1);
+        let mut ladder = StagedExitLadder::new("pos-1");
         ladder.start_stage_1(5.0, 0.05);
 
         // Stage 1: bid + k*tick = 5.0 + 2.0*0.05 = 5.10
@@ -113,7 +116,7 @@ mod tests {
 
     #[test]
     fn stage2_price_calculation() {
-        let mut ladder = StagedExitLadder::new(1);
+        let mut ladder = StagedExitLadder::new("pos-1");
         ladder.start_stage_1(5.0, 0.05);
         ladder.advance(5.05);
 
@@ -123,7 +126,7 @@ mod tests {
 
     #[test]
     fn stage3_price_calculation() {
-        let mut ladder = StagedExitLadder::new(1);
+        let mut ladder = StagedExitLadder::new("pos-1");
         ladder.start_stage_1(5.0, 0.05);
         ladder.advance(5.05);
         ladder.advance(5.00);
@@ -134,7 +137,7 @@ mod tests {
 
     #[test]
     fn advance_transitions_stages() {
-        let mut ladder = StagedExitLadder::new(1);
+        let mut ladder = StagedExitLadder::new("pos-1");
         ladder.start_stage_1(5.0, 0.05);
 
         assert_eq!(ladder.current_stage(), ExitStage::Stage1);
@@ -147,8 +150,14 @@ mod tests {
     }
 
     #[test]
+    fn position_id_is_preserved() {
+        let ladder = StagedExitLadder::new("0199e1b0-1234-5678-9abc-def012345678");
+        assert_eq!(ladder.position_id(), "0199e1b0-1234-5678-9abc-def012345678");
+    }
+
+    #[test]
     fn should_advance_respects_duration() {
-        let mut ladder = StagedExitLadder::new(1);
+        let mut ladder = StagedExitLadder::new("pos-1");
         ladder.start_stage_1(5.0, 0.05);
 
         // Not enough time passed
