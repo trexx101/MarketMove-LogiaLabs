@@ -528,7 +528,7 @@ impl OptionsScheduler {
         // Fetch OPEN positions for this equity
         let positions = sqlx::query(
             "SELECT id, contract_code, dte_at_entry, entry_underlying_price, \
-             entry_premium, delta_at_entry, created_at, strategy_version_id \
+             entry_premium, delta_at_entry, created_at, strategy_version_id, qty \
              FROM option_positions WHERE underlying = ? AND status = 'OPEN'"
         )
         .bind(equity)
@@ -564,8 +564,10 @@ impl OptionsScheduler {
             let pos_id: String = pos.get("id");
             let dte_at_entry: i64 = pos.get("dte_at_entry");
             let entry_price: f64 = pos.get("entry_underlying_price");
+            let entry_premium: f64 = pos.get("entry_premium");
             let delta: f64 = pos.get("delta_at_entry");
             let created_at: i64 = pos.get("created_at");
+            let qty: i64 = pos.get("qty");
 
             let mut signals: Vec<ExitSignal> = Vec::new();
 
@@ -679,6 +681,18 @@ impl OptionsScheduler {
                 let current_bid = current_price * 0.995; // ~0.5% below close
                 let tick_size = if current_price > 100.0 { 0.05 } else { 0.01 };
 
+                // C3: Record exit intent before sending (audit trail)
+                let _ = sqlx::query(
+                    "INSERT INTO exit_intent_log (position_id, stage, limit_price, quantity, timestamp) \
+                     VALUES (?, 'EXIT_STAGE_1', ?, ?, ?)"
+                )
+                .bind(&pos_id)
+                .bind(current_bid)
+                .bind(qty as f64) // actual position size
+                .bind(Utc::now().to_rfc3339())
+                .execute(&self.pool)
+                .await;
+
                 // Initiate staged exit
                 match executor.initiate_exit(&pos_id, current_bid, tick_size).await {
                     Ok(_stage) => {
@@ -714,21 +728,50 @@ impl OptionsScheduler {
                         };
 
                         if let Some(fill) = fill {
+                            let exit_premium = fill.price;
+                            let realized_pnl = (exit_premium - entry_premium) * qty as f64 * 100.0;
+
                             info!(
                                 equity,
                                 position_id = %pos_id,
-                                fill_price = fill.price,
+                                fill_price = exit_premium,
+                                entry_premium,
+                                realized_pnl,
                                 "exit filled — marking position CLOSED"
                             );
-                            // Mark position CLOSED
+                            // Mark position CLOSED with realized PnL
                             let _ = sqlx::query(
                                 "UPDATE option_positions SET status = 'CLOSED', \
-                                 closed_at = ?, updated_at = ? WHERE id = ?"
+                                 realized_pnl = ?, closed_at = ?, updated_at = ? WHERE id = ?"
                             )
+                            .bind(realized_pnl)
                             .bind(now)
                             .bind(now)
                             .bind(&pos_id)
                             .execute(&self.pool)
+                            .await;
+
+                            // Emit options::position_closed lifecycle event
+                            let payload = serde_json::json!({
+                                "position_id": &pos_id,
+                                "realized_pnl": realized_pnl,
+                                "exit_premium": exit_premium,
+                                "entry_premium": entry_premium,
+                                "qty": qty,
+                            });
+                            let _ = crate::db::insert_event(
+                                &self.pool,
+                                "trade",
+                                "info",
+                                "paper",
+                                "options::position_closed",
+                                &format!(
+                                    "POSITION_CLOSED {}: realized_pnl={:.2} (exit {:.2} - entry {:.2}) x{}",
+                                    &pos_id, realized_pnl, exit_premium, entry_premium, qty
+                                ),
+                                &payload.to_string(),
+                                Some(equity),
+                            )
                             .await;
                         } else {
                             info!(
