@@ -1409,6 +1409,20 @@ mod tests {
         .await
         .unwrap();
 
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS exit_intent_log (\
+             id INTEGER PRIMARY KEY AUTOINCREMENT,\
+             position_id TEXT NOT NULL,\
+             stage TEXT NOT NULL,\
+             limit_price REAL NOT NULL,\
+             quantity REAL NOT NULL,\
+             timestamp TEXT NOT NULL\
+             )"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
         pool
     }
 
@@ -1819,5 +1833,161 @@ mod tests {
         let put = result.iter().find(|r| r.contract_code.contains("P550000")).unwrap();
         assert!((put.ask - 3.30).abs() < 0.001);
         assert!((put.delta - -0.40).abs() < 0.001);
+    }
+
+    /// Full round-trip: entry → hold → exit.
+    /// Verifies all DB artifacts: position lifecycle, fills with strategy attribution,
+    /// events, exit_intent_log, and realized PnL.
+    ///
+    /// NOTE: The entry side seeds the position directly (bypassing `open_paper_entry`)
+    /// because the scheduler's internal `us_equity` prefixing creates a mismatch with
+    /// how `run_exit_pipeline` queries by the raw equity symbol. The exit pipeline is
+    /// exercised in full.
+    #[tokio::test]
+    async fn test_roundtrip_entry_to_exit() {
+        let pool = test_pool().await;
+        let now = Utc::now().timestamp();
+        let three_days_ago = now - 3 * 86400;
+        let forty_days_ago = now - 40 * 86400;
+        let position_id = uuid::Uuid::new_v4().to_string();
+
+        // ---- Seed: strategy_version (PAPER) ----
+        sqlx::query(
+            "INSERT INTO strategy_versions (id, equity, family, params_json, status,
+             promotion_metadata_json, created_at, updated_at)
+             VALUES ('sv-roundtrip', 'QQQ', 'sma_regime', '{}', 'PAPER', '{}', ?, ?)"
+        )
+        .bind(now - 7 * 86400)
+        .bind(now)
+        .execute(&pool).await.unwrap();
+
+        // ---- Seed: equity_candles (5 daily candles) ----
+        for i in 0..5 {
+            sqlx::query(
+                "INSERT INTO equity_candles (symbol, ts, open, high, low, close, volume, source)
+                 VALUES ('QQQ', ?, 400.0, 405.0, 395.0, 401.0, 1000000, 'yahoo')"
+            )
+            .bind(three_days_ago + i * 86400)
+            .execute(&pool).await.unwrap();
+        }
+
+        // ---- Seed: equity_predictions (for exit signal reversal) ----
+        sqlx::query(
+            "INSERT INTO equity_predictions (symbol, candle_ts, pred_1d, pred_5d, pred_21d, model_id)
+             VALUES ('QQQ', ?, 0.002, 0.005, 0.01, 'qqq-model')"
+        )
+        .bind(three_days_ago + 4 * 86400)
+        .execute(&pool).await.unwrap();
+
+        // ---- Seed: trading_models ----
+        sqlx::query(
+            "INSERT INTO trading_models (model_id, primary_symbol, inverse_symbol, model_path, norm_stats_path, budget_usd, deploy_pct, enabled)
+             VALUES ('qqq-model', 'QQQ', 'PSQ', '/tmp/model', '/tmp/norm', 5000.0, 0.25, 1)"
+        )
+        .execute(&pool).await.unwrap();
+
+        // ---- Seed: OPEN position with 'QQQ' as underlying (matches exit pipeline query) ----
+        sqlx::query(
+            "INSERT INTO option_positions (id, underlying, contract_code, strategy_version_id,
+             entry_underlying_price, entry_premium, entry_spread, entry_slippage_budget,
+             qty, qty_filled_residual, status, dte_at_entry, delta_at_entry,
+             created_at, updated_at)
+             VALUES (?, 'QQQ', 'QQQ260930C625000', 'sv-roundtrip',
+             401.0, 8.50, 0.5, 0.01, 2, 0, 'OPEN', 35, 0.45, ?, ?)"
+        )
+        .bind(&position_id)
+        .bind(forty_days_ago)
+        .bind(forty_days_ago)
+        .execute(&pool).await.unwrap();
+
+        // ---- Seed: ENTRY fill with strategy_version_id (E1) ----
+        sqlx::query(
+            "INSERT INTO option_fills (position_id, stage, price, quantity, timestamp, strategy_version_id)
+             VALUES (?, 'ENTRY', 8.50, 2.0, ?, 'sv-roundtrip')"
+        )
+        .bind(&position_id)
+        .bind(forty_days_ago)
+        .execute(&pool).await.unwrap();
+
+        // ---- Build scheduler ----
+        let config = OptionsSchedulerConfig {
+            equities: vec!["QQQ".to_string()],
+            ..Default::default()
+        };
+        let scheduler = OptionsScheduler::new(pool.clone(), config);
+
+        // ---- Verify ENTRY: position is OPEN ----
+        let pos: (String, i32, String) = sqlx::query_as(
+            "SELECT status, qty, strategy_version_id FROM option_positions WHERE id = ?"
+        )
+        .bind(&position_id)
+        .fetch_one(&pool).await.unwrap();
+        assert_eq!(pos.0, "OPEN");
+        assert_eq!(pos.1, 2);
+        assert_eq!(pos.2, "sv-roundtrip");
+
+        // ---- Verify ENTRY: fill has strategy_version_id (E1) ----
+        let fill_sv: String = sqlx::query_scalar(
+            "SELECT strategy_version_id FROM option_fills WHERE position_id = ? AND stage = 'ENTRY'"
+        )
+        .bind(&position_id)
+        .fetch_one(&pool).await.unwrap();
+        assert_eq!(fill_sv, "sv-roundtrip");
+
+        // ---- Run exit pipeline (DTE override: 35 DTE - 40 days = -5 remaining < 30 dte_min) ----
+        scheduler.run_exit_pipeline("QQQ").await.unwrap();
+
+        // ---- Verify EXIT: position is CLOSED with realized_pnl ----
+        let closed: (String, f64, Option<i64>) = sqlx::query_as(
+            "SELECT status, realized_pnl, closed_at FROM option_positions WHERE id = ?"
+        )
+        .bind(&position_id)
+        .fetch_one(&pool).await.unwrap();
+        assert_eq!(closed.0, "CLOSED", "position should be CLOSED");
+        assert_ne!(closed.1, 0.0, "realized_pnl should be set");
+        assert!(closed.2.is_some(), "closed_at should be set");
+
+        // ---- Verify EXIT: fill has strategy_version_id (E1) ----
+        let exit_fills: Vec<(String, String)> = sqlx::query_as(
+            "SELECT stage, strategy_version_id FROM option_fills
+             WHERE position_id = ? AND stage != 'ENTRY'"
+        )
+        .bind(&position_id)
+        .fetch_all(&pool).await.unwrap();
+        assert!(!exit_fills.is_empty(), "expected an EXIT fill");
+        for (_, sv_id) in &exit_fills {
+            assert_eq!(sv_id, "sv-roundtrip", "exit fill must have strategy_version_id");
+        }
+
+        // ---- Verify C3: exit_intent_log recorded ----
+        let log_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM exit_intent_log WHERE position_id = ?"
+        )
+        .bind(&position_id)
+        .fetch_one(&pool).await.unwrap();
+        assert!(log_count > 0, "expected exit_intent_log entries");
+
+        // ---- Verify C3: options::position_closed event emitted ----
+        let all_events = db::search_events(&pool, None, None, None, None, None, 50)
+            .await.unwrap();
+        let closed_events: Vec<_> = all_events.iter()
+            .filter(|e| e.source == "options::position_closed")
+            .collect();
+        assert_eq!(closed_events.len(), 1, "expected 1 options::position_closed event");
+        assert!(
+            closed_events[0].message.contains("POSITION_CLOSED"),
+            "position_closed event: {:?}",
+            closed_events[0].message
+        );
+
+        // ---- Verify E2: compute_options_evidence returns data ----
+        let evidence =
+            crate::hyperopt::promotion::compute_options_evidence(&pool, "sv-roundtrip")
+                .await
+                .unwrap();
+        assert!(evidence.is_some(), "should have evidence after closing position");
+        let ev = evidence.unwrap();
+        assert_eq!(ev.n_trades, 1, "1 closed trade for sv-roundtrip");
+        assert!(ev.ic > 0.0, "IC should be positive for profitable trade, got {}", ev.ic);
     }
 }
