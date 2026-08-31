@@ -161,7 +161,7 @@ pub async fn promote_candidate(
 
     // Gate 2 (request time): dry-run the stage gates so obviously-unready
     // candidates fail fast with a useful message instead of queueing forever.
-    let evidence = crate::hyperopt::promotion::PromotionEvidence {
+    let mut evidence = crate::hyperopt::promotion::PromotionEvidence {
         n_trades: candidate.n_trades,
         ic: candidate.mean_ic,
         sharpe: 0.0,     // Would come from backtest results
@@ -171,6 +171,25 @@ pub async fn promote_candidate(
         // candidates whose mean IC is carried by a subset of folds.
         fold_ics: candidate.fold_ics.clone(),
     };
+
+    // E2: Merge options evidence into promotion evidence
+    if let Ok(Some(opts_ev)) =
+        crate::hyperopt::promotion::compute_options_evidence(pool, &id).await
+    {
+        if opts_ev.n_trades > 0 {
+            // Weighted-average IC: equity IC × equity trades + options IC × options trades
+            let total_trades = evidence.n_trades + opts_ev.n_trades;
+            evidence.ic = if total_trades > 0 {
+                (evidence.ic * evidence.n_trades as f64
+                    + opts_ev.ic * opts_ev.n_trades as f64)
+                    / total_trades as f64
+            } else {
+                evidence.ic
+            };
+            evidence.n_trades = total_trades;
+            evidence.days_observed = evidence.days_observed.max(opts_ev.days_observed);
+        }
+    }
     let dry_run = pipeline.check_snapshot(&candidate, &evidence);
     if !dry_run.promoted {
         return Ok(Json(PromoteResponse {

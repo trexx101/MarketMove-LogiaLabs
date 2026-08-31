@@ -378,6 +378,61 @@ pub async fn apply_pending_promotions(
     Ok((applied, skipped))
 }
 
+/// E2: Compute promotion evidence from closed option positions for a
+/// given strategy_version_id. Returns evidence that can be merged with
+/// equity pipeline evidence.
+///
+/// - `n_trades`: number of closed positions
+/// - `pnl_ratio`: mean of `realized_pnl / (entry_premium × qty × 100)`
+///   across closed positions (proxy for directional accuracy)
+/// - `days_observed`: range of closed positions in days
+pub async fn compute_options_evidence(
+    pool: &crate::db::DbPool,
+    strategy_version_id: &str,
+) -> Result<Option<PromotionEvidence>> {
+    use sqlx::Row;
+
+    let row = sqlx::query(
+        r#"
+        SELECT
+            COUNT(*) AS n_trades,
+            COALESCE(AVG(realized_pnl / NULLIF(entry_premium * qty * 100.0, 0)), 0.0) AS mean_pnl_ratio,
+            COALESCE(MAX(closed_at), 0) AS last_closed_at,
+            COALESCE(MIN(created_at), 0) AS first_created_at
+        FROM option_positions
+        WHERE strategy_version_id = ?1 AND status = 'CLOSED'
+        "#,
+    )
+    .bind(strategy_version_id)
+    .fetch_optional(pool)
+    .await?;
+
+    match row {
+        Some(r) => {
+            let n_trades: i64 = r.get("n_trades");
+            if n_trades == 0 {
+                return Ok(None);
+            }
+            let mean_pnl_ratio: f64 = r.get("mean_pnl_ratio");
+            let last_closed_at: i64 = r.get("last_closed_at");
+            let first_created_at: i64 = r.get("first_created_at");
+            let days_observed = if last_closed_at > 0 && first_created_at > 0 {
+                ((last_closed_at - first_created_at) / 86400).max(0) as usize
+            } else {
+                0usize
+            };
+            Ok(Some(PromotionEvidence {
+                n_trades: n_trades as usize,
+                ic: mean_pnl_ratio,
+                sharpe: 0.0,
+                days_observed,
+                fold_ics: vec![],
+            }))
+        }
+        None => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -924,5 +979,74 @@ mod tests {
         let result = pipeline.promote(&store, "nonexistent", &evidence).await.unwrap();
         assert!(!result.promoted);
         assert!(result.reason.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn compute_options_evidence_from_closed_positions() {
+        use sqlx::Row;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+
+        sqlx::query(
+            "CREATE TABLE option_positions (
+                id TEXT PRIMARY KEY, underlying TEXT NOT NULL,
+                contract_code TEXT NOT NULL, strategy_version_id TEXT NOT NULL,
+                entry_underlying_price REAL NOT NULL, entry_premium REAL NOT NULL DEFAULT 0.0,
+                entry_spread REAL NOT NULL, entry_slippage_budget REAL NOT NULL,
+                qty INTEGER NOT NULL, qty_filled_residual INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'OPEN', dte_at_entry INTEGER NOT NULL,
+                delta_at_entry REAL NOT NULL, realized_pnl REAL,
+                closed_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+            )"
+        )
+        .execute(&pool).await.unwrap();
+
+        let now = chrono::Utc::now().timestamp();
+
+        // Insert 3 closed positions for sv-1
+        for i in 0..3 {
+            let id = format!("pos-{}", i);
+            let pnl = (i as f64 + 1.0) * 50.0; // 50, 100, 150
+            sqlx::query(
+                "INSERT INTO option_positions (id, underlying, contract_code, strategy_version_id,
+                 entry_underlying_price, entry_premium, entry_spread, entry_slippage_budget,
+                 qty, qty_filled_residual, status, dte_at_entry, delta_at_entry,
+                 realized_pnl, closed_at, created_at, updated_at)
+                 VALUES (?, 'QQQ', 'US.QQQ260930C625000', 'sv-1',
+                 400.0, 5.0, 0.5, 0.05, 2, 0, 'CLOSED', 30, 0.45,
+                 ?, ?, ?, ?)"
+            )
+            .bind(&id).bind(pnl)
+            .bind(now + (i + 1) * 86400) // closed_at
+            .bind(now) // created_at
+            .bind(now + (i + 1) * 86400)
+            .execute(&pool).await.unwrap();
+        }
+
+        // Insert 1 OPEN position (should not be counted)
+        sqlx::query(
+            "INSERT INTO option_positions (id, underlying, contract_code, strategy_version_id,
+             entry_underlying_price, entry_premium, entry_spread, entry_slippage_budget,
+             qty, qty_filled_residual, status, dte_at_entry, delta_at_entry,
+             realized_pnl, closed_at, created_at, updated_at)
+             VALUES ('pos-open', 'QQQ', 'US.QQQ260930P550000', 'sv-1',
+             400.0, 5.0, 0.5, 0.05, 2, 0, 'OPEN', 30, 0.45,
+             NULL, NULL, ?, ?)"
+        )
+        .bind(now).bind(now)
+        .execute(&pool).await.unwrap();
+
+        let evidence = compute_options_evidence(&pool, "sv-1").await.unwrap().unwrap();
+        assert_eq!(evidence.n_trades, 3);
+        assert!(evidence.ic > 0.0, "mean pnl_ratio should be positive");
+        assert_eq!(evidence.days_observed, 3); // 3 days range (days 1-3)
+        assert_eq!(evidence.sharpe, 0.0);
+
+        // No closed positions for sv-2
+        let none = compute_options_evidence(&pool, "sv-2").await.unwrap();
+        assert!(none.is_none());
     }
 }
