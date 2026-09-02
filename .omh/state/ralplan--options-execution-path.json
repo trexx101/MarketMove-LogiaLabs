@@ -1,0 +1,14 @@
+{
+  "goal": "Options execution path: wire OptionsScheduler → externalize options config → options executor sync + trade attribution (close the 8-point gap so a PAPER-stage candidate can open positions and accumulate MICRO->LIVE evidence)",
+  "phase": "complete",
+  "round": 1,
+  "max_rounds": 3,
+  "consensus": true,
+  "plan_file": ".omh/plans/ralplan-options-execution-path.md",
+  "instance_id": "options-execution-path",
+  "started_at": "2026-08-28T20:00:00Z",
+  "updated_at": "2026-08-28T20:30:00Z",
+  "branch": "feature/options-momentum-engine",
+  "head": "6807c94",
+  "note": "OmniRoute 503 on Planner subagent. User opted for direct plan (no formal debate). Plan written inline from Phase-0 source analysis."
+}
